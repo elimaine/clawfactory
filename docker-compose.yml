@@ -21,22 +21,32 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
+        # Sync approved config from brain_ro to workspace on startup
+        echo "[startup] Syncing workspace from approved brain_ro..."
+        cp -r /workspace/brain_ro/*.md /home/node/.openclaw/workspace/ 2>/dev/null || true
+        cp -r /workspace/brain_ro/skills /home/node/.openclaw/workspace/ 2>/dev/null || true
+        cp /workspace/brain_ro/openclaw.json /home/node/.openclaw/openclaw.json 2>/dev/null || true
+        echo "[startup] Workspace synced"
+        # Run minimal setup then start gateway
         node dist/index.js onboard --non-interactive --accept-risk --mode local \
           --skip-daemon --skip-channels --skip-skills --skip-health --skip-ui \
           --gateway-auth token --gateway-token clawfactory-internal && \
         node dist/index.js gateway --port 18789
+    user: "1000:1000"  # Run as node user
     volumes:
-      # Brain config: READ-ONLY
-      - ./sandyclaws/brain_ro:/workspace/brain:ro
-      # Proposal workspace: WRITABLE (for OpenClaw's sandbox)
-      - ./sandyclaws/brain_work:/workspace/brain_work:rw
+      # OpenClaw home directory (config, state, workspace)
+      - ./sandyclaws/openclaw-home:/home/node/.openclaw
+      # Approved brain config (read-only, synced to workspace on startup)
+      - ./sandyclaws/brain_ro:/workspace/brain_ro:ro
+      # Proposal workspace: WRITABLE for agent to propose changes
+      - ./sandyclaws/brain_work:/workspace/proposals:rw
       # Bare repo for git operations
       - ./sandyclaws/brain.git:/workspace/brain.git:rw
       # Temp filesystem
       - type: tmpfs
         target: /tmp
     networks:
-      - clawfactory-internal
+      - clawfactory
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:18789/health"]
       interval: 30s
@@ -77,7 +87,7 @@ services:
       # Webhook endpoint (protect with Tailscale/Cloudflare in production)
       - "127.0.0.1:8080:8080"
     networks:
-      - clawfactory-internal
+      - clawfactory
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
@@ -85,6 +95,9 @@ services:
       retries: 3
 
 networks:
-  clawfactory-internal:
+  clawfactory:
     driver: bridge
-    internal: true
+    # TODO: Add Cloudflare Zero Trust egress for stricter control
+    # See docs/TODO-cloudflare-zerotrust.md
+
+volumes: {}

@@ -40,3 +40,4 @@ audit/
 __pycache__/
 *.pyc
 .venv/
+sandyclaws/openclaw-home/

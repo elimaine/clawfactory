@@ -97,6 +97,9 @@ github:
 
 anthropic:
   api_key: "${ANTHROPIC_API_KEY:-}"
+
+gemini:
+  api_key: "${GEMINI_API_KEY:-}"
 EOF
     chmod 600 "${SECRETS_DIR}/secrets.yml"
 }
@@ -216,6 +219,7 @@ configure_secrets() {
     local saved_github_webhook=$(load_secret "github.webhook_secret")
     local saved_github_repo=$(load_secret "github.brain_repo")
     local saved_anthropic=$(load_secret "anthropic.api_key")
+    local saved_gemini=$(load_secret "gemini.api_key")
 
     # Clean up array notation from user ID
     saved_discord_user="${saved_discord_user#- }"
@@ -332,6 +336,19 @@ configure_secrets() {
             prompt ANTHROPIC_API_KEY "Anthropic API key" "" true
             save_secrets
         fi
+
+        echo ""
+        echo "=== Memory (Gemini Embeddings) ==="
+        echo "For agent memory/search. Get a key at:"
+        echo "  https://aistudio.google.com/app/apikey"
+        echo ""
+        if [[ -n "$saved_gemini" ]]; then
+            GEMINI_API_KEY="$saved_gemini"
+            success "Gemini API key (saved)"
+        else
+            prompt GEMINI_API_KEY "Gemini API key (optional, for memory)" "" true
+            save_secrets
+        fi
     else
         GITHUB_USERNAME=""
         GITHUB_WEBHOOK_SECRET=""
@@ -346,6 +363,16 @@ configure_secrets() {
             prompt ANTHROPIC_API_KEY "Anthropic API key (or leave empty for local LLM)" "" true
             save_secrets
         fi
+
+        echo ""
+        echo "=== Memory (Gemini Embeddings) ==="
+        if [[ -n "$saved_gemini" ]]; then
+            GEMINI_API_KEY="$saved_gemini"
+            success "Gemini API key (saved)"
+        else
+            prompt GEMINI_API_KEY "Gemini API key (optional)" "" true
+            save_secrets
+        fi
     fi
 
     # Generate env files for containers
@@ -353,6 +380,7 @@ configure_secrets() {
 # Gateway environment
 DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
 ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+GEMINI_API_KEY=${GEMINI_API_KEY}
 EOF
 
     cat > "${SECRETS_DIR}/controller.env" <<EOF
