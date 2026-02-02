@@ -1,72 +1,48 @@
 # ClawFactory Docker Compose
-# Gateway (OpenClaw) + Runner (tools) + Controller (authority)
+# Gateway (OpenClaw) + Controller (authority)
 
 services:
   # ============================================================
   # Gateway: OpenClaw agent runtime
   # - Connects to Discord
   # - Makes LLM calls
-  # - READ-ONLY access to brain
-  # - Delegates tool execution to Runner via Unix socket
+  # - Uses OpenClaw's native sandbox for tool execution
+  # - READ-ONLY access to brain_ro, WRITE to brain_work
   # ============================================================
   gateway:
     image: ghcr.io/openclaw/openclaw:latest
     container_name: clawfactory-gateway
     restart: unless-stopped
-    read_only: true
     env_file:
       - ./secrets/gateway.env
     environment:
-      - RUNNER_SOCKET=/run/clawfactory/runner.sock
+      - OPENCLAW_GATEWAY_MODE=local
+      - OPENCLAW_GATEWAY_AUTH=none
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        node dist/index.js onboard --non-interactive --accept-risk --mode local \
+          --skip-daemon --skip-channels --skip-skills --skip-health --skip-ui \
+          --gateway-auth token --gateway-token clawfactory-internal && \
+        node dist/index.js gateway --port 18789
     volumes:
-      # Brain: READ-ONLY
+      # Brain config: READ-ONLY
       - ./sandyclaws/brain_ro:/workspace/brain:ro
-      # Shared socket for Runner communication
-      - runner-socket:/run/clawfactory
+      # Proposal workspace: WRITABLE (for OpenClaw's sandbox)
+      - ./sandyclaws/brain_work:/workspace/brain_work:rw
+      # Bare repo for git operations
+      - ./sandyclaws/brain.git:/workspace/brain.git:rw
       # Temp filesystem
       - type: tmpfs
         target: /tmp
     networks:
       - clawfactory-internal
-    depends_on:
-      - runner
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:18789/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 60s
-
-  # ============================================================
-  # Runner: Tool execution sandbox
-  # - Executes git, shell, file operations
-  # - WRITE access to brain_work (proposals only)
-  # - NO access to brain_ro, Docker socket, or host
-  # - Listens on Unix socket for Gateway requests
-  # ============================================================
-  runner:
-    build:
-      context: ./runner
-      dockerfile: Dockerfile
-    container_name: clawfactory-runner
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    volumes:
-      # Proposal workspace: WRITABLE
-      - ./sandyclaws/brain_work:/workspace/brain_work:rw
-      # Bare repo for git operations
-      - ./sandyclaws/brain.git:/workspace/brain.git:rw
-      # Shared socket
-      - runner-socket:/run/clawfactory
-      # Temp filesystem
-      - type: tmpfs
-        target: /tmp
-    networks:
-      - clawfactory-internal
-    # No ports exposed
 
   # ============================================================
   # Controller: Authority & promotion
@@ -112,7 +88,3 @@ networks:
   clawfactory-internal:
     driver: bridge
     internal: true
-
-volumes:
-  runner-socket:
-    driver: local

@@ -590,7 +590,7 @@ case "${1:-help}" in
         echo "  stop            Stop all containers"
         echo "  restart         Restart all containers"
         echo "  status          Show container status"
-        echo "  logs [name]     Follow logs (gateway/runner/controller)"
+        echo "  logs [name]     Follow logs (gateway/controller)"
         echo "  shell [name]    Open shell in container"
         echo "  promote         Open promotion UI"
         echo "  audit           Show recent audit log"

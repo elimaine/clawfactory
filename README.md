@@ -10,39 +10,36 @@ Local-first autonomous agent runtime with hard separation between proposal and a
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Host VM                                  │
-│  ┌─────────────────────────────────────────────────────────────┐│
-│  │                    Docker Compose                            ││
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  ││
-│  │  │   Gateway   │  │   Runner    │  │     Controller      │  ││
-│  │  │  (OpenClaw) │◄─┤  (Python)   │  │  (Python/FastAPI)   │  ││
-│  │  │             │  │             │  │                     │  ││
-│  │  │ • Discord   │  │ • Tools     │  │ • GitHub webhooks   │  ││
-│  │  │ • LLM calls │  │ • Git       │  │ • Promotion logic   │  ││
-│  │  │ • Read-only │  │ • Proposals │  │ • Approval UI       │  ││
-│  │  │   brain     │  │   only      │  │                     │  ││
-│  │  └──────┬──────┘  └──────┬──────┘  └──────────┬──────────┘  ││
-│  │         │    Unix Socket │                     │             ││
-│  │         └────────────────┘                     │             ││
-│  └────────────────────────────────────────────────┼─────────────┘│
-│                                                   │              │
-│  ┌────────────────────────────────────────────────┼─────────────┐│
-│  │                    Volumes                     │             ││
-│  │  sandyclaws/brain_ro/     sandyclaws/brain_work/     secrets/     audit/          ││
-│  │  (read-only)   (proposals)     (600)        (append)        ││
-│  └──────────────────────────────────────────────────────────────┘│
-│                                                                  │
-│  [Kill Switch] ─────────────────────────────────────────────────│
-└──────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                         Host VM                               │
+│  ┌──────────────────────────────────────────────────────────┐│
+│  │                    Docker Compose                         ││
+│  │  ┌───────────────────────┐  ┌─────────────────────────┐  ││
+│  │  │        Gateway        │  │       Controller        │  ││
+│  │  │       (OpenClaw)      │  │    (Python/FastAPI)     │  ││
+│  │  │                       │  │                         │  ││
+│  │  │  • Discord            │  │  • GitHub webhooks      │  ││
+│  │  │  • LLM calls          │  │  • Promotion logic      │  ││
+│  │  │  • Native sandbox     │  │  • Approval UI          │  ││
+│  │  │  • Tool execution     │  │                         │  ││
+│  │  └───────────────────────┘  └────────────┬────────────┘  ││
+│  └──────────────────────────────────────────┼───────────────┘│
+│                                             │                │
+│  ┌──────────────────────────────────────────┼───────────────┐│
+│  │                   Volumes                │                ││
+│  │  brain_ro/    brain_work/    secrets/    audit/          ││
+│  │  (read-only)  (proposals)    (600)       (append)        ││
+│  └──────────────────────────────────────────────────────────┘│
+│                                                              │
+│  [Kill Switch] ─────────────────────────────────────────────│
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ## Components
 
 | Component | Role | Can Write To | Cannot Access |
 |-----------|------|--------------|---------------|
-| **Gateway** | Agent runtime (OpenClaw) | Nothing | brain_work, secrets |
-| **Runner** | Tool execution | brain_work only | brain_ro, Docker socket |
+| **Gateway** | Agent runtime (OpenClaw) | brain_work (via sandbox) | secrets |
 | **Controller** | Authority & promotion | brain_ro (promotion only) | - |
 
 ## Quick Start
@@ -52,7 +49,8 @@ Local-first autonomous agent runtime with hard separation between proposal and a
 ```bash
 git clone https://github.com/elimaine/clawfactory
 cd clawfactory
-./install.sh    # Prompts for all secrets interactively
+./install.sh              # Prompts for all secrets interactively
+./clawfactory.sh start    # Start containers
 ```
 
 ### Option B: Manual Setup
@@ -137,7 +135,7 @@ Required values:
 
 1. Active brain is immutable at runtime
 2. Bot cannot promote itself
-3. Runner cannot escalate to host
+3. Gateway sandbox cannot escalate to host
 4. Discord is not an authority signal
 5. Kill switch always wins
 6. Offline mode remains functional
