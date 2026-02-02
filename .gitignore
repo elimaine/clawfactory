@@ -1,1 +1,22 @@
+# Secrets (NEVER commit)
+secrets/*.yml
+secrets/*.env
+!secrets/*.example
+
+# Brain state (created at runtime)
+brain/
+
+# Audit logs
+audit/
+
+# OS
 .DS_Store
+
+# Backups
+*.backup
+.iptables.backup
+
+# Python
+__pycache__/
+*.pyc
+.venv/
