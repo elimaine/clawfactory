@@ -1,0 +1,118 @@
+# ClawFactory Docker Compose
+# Gateway (OpenClaw) + Runner (tools) + Controller (authority)
+
+services:
+  # ============================================================
+  # Gateway: OpenClaw agent runtime
+  # - Connects to Discord
+  # - Makes LLM calls
+  # - READ-ONLY access to brain
+  # - Delegates tool execution to Runner via Unix socket
+  # ============================================================
+  gateway:
+    image: ghcr.io/openclaw/openclaw:latest
+    container_name: clawfactory-gateway
+    restart: unless-stopped
+    read_only: true
+    env_file:
+      - ./secrets/gateway.env
+    environment:
+      - RUNNER_SOCKET=/run/clawfactory/runner.sock
+    volumes:
+      # Brain: READ-ONLY
+      - ./brain/brain_ro:/workspace/brain:ro
+      # Shared socket for Runner communication
+      - runner-socket:/run/clawfactory
+      # Temp filesystem
+      - type: tmpfs
+        target: /tmp
+    networks:
+      - clawfactory-internal
+    depends_on:
+      - runner
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:18789/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ============================================================
+  # Runner: Tool execution sandbox
+  # - Executes git, shell, file operations
+  # - WRITE access to brain_work (proposals only)
+  # - NO access to brain_ro, Docker socket, or host
+  # - Listens on Unix socket for Gateway requests
+  # ============================================================
+  runner:
+    build:
+      context: ./runner
+      dockerfile: Dockerfile
+    container_name: clawfactory-runner
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      # Proposal workspace: WRITABLE
+      - ./brain/brain_work:/workspace/brain_work:rw
+      # Bare repo for git operations
+      - ./brain/brain.git:/workspace/brain.git:rw
+      # Shared socket
+      - runner-socket:/run/clawfactory
+      # Temp filesystem
+      - type: tmpfs
+        target: /tmp
+    networks:
+      - clawfactory-internal
+    # No ports exposed
+
+  # ============================================================
+  # Controller: Authority & promotion
+  # - Receives GitHub webhooks
+  # - Performs promotions (brain_work → brain_ro)
+  # - Restarts Gateway
+  # - Hosts approval UI (for offline mode)
+  # ============================================================
+  controller:
+    build:
+      context: ./controller
+      dockerfile: Dockerfile
+    container_name: clawfactory-controller
+    restart: unless-stopped
+    env_file:
+      - ./secrets/controller.env
+    environment:
+      - BRAIN_GIT=/srv/brain/brain.git
+      - BRAIN_RO=/srv/brain/brain_ro
+      - BRAIN_WORK=/srv/brain/brain_work
+      - AUDIT_LOG=/srv/audit/audit.jsonl
+    volumes:
+      # Brain directories: Controller has write for promotion
+      - ./brain/brain.git:/srv/brain/brain.git:rw
+      - ./brain/brain_ro:/srv/brain/brain_ro:rw
+      - ./brain/brain_work:/srv/brain/brain_work:ro
+      # Audit log
+      - ./audit:/srv/audit:rw
+      # Docker socket for restarting gateway
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      # Webhook endpoint (protect with Tailscale/Cloudflare in production)
+      - "127.0.0.1:8080:8080"
+    networks:
+      - clawfactory-internal
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  clawfactory-internal:
+    driver: bridge
+    internal: true
+
+volumes:
+  runner-socket:
+    driver: local

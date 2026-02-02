@@ -1,0 +1,8 @@
+fastapi>=0.109.0
+uvicorn>=0.27.0
+python-multipart>=0.0.6
+httpx>=0.26.0
+PyGithub>=2.1.1
+pyyaml>=6.0.1
+docker>=7.0.0
+python-jose>=3.3.0
