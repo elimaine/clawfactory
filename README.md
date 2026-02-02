@@ -47,22 +47,62 @@ Local-first autonomous agent runtime with hard separation between proposal and a
 
 ## Quick Start
 
+### Option A: Interactive Setup
+
 ```bash
-# 1. Clone and setup
 git clone https://github.com/elimaine/clawfactory
 cd clawfactory
-./install.sh
-
-# 2. Edit secrets (install.sh will prompt, or edit manually)
-vim secrets/secrets.yml
-
-# 3. Start
-docker compose up -d
-
-# 4. Check status
-docker compose ps
-./clawfactory.sh status
+./install.sh    # Prompts for all secrets interactively
 ```
+
+### Option B: Manual Setup
+
+```bash
+git clone https://github.com/elimaine/clawfactory
+cd clawfactory
+
+# 1. Copy example secrets
+cp secrets/secrets.yml.example secrets/secrets.yml
+cp secrets/gateway.env.example secrets/gateway.env
+cp secrets/controller.env.example secrets/controller.env
+
+# 2. Edit with your values
+vim secrets/secrets.yml
+vim secrets/gateway.env
+vim secrets/controller.env
+
+# 3. Lock down permissions
+chmod 600 secrets/secrets.yml secrets/gateway.env secrets/controller.env
+
+# 4. Initialize brain repository
+mkdir -p brain/{brain.git,brain_ro,brain_work}
+git init --bare brain/brain.git
+cd brain/brain_work && git init && git remote add origin ../brain.git
+
+# 5. Start
+docker compose up -d
+```
+
+### Verify
+
+```bash
+./clawfactory.sh status
+./clawfactory.sh logs gateway
+```
+
+## Secrets Configuration
+
+| File | Purpose |
+|------|---------|
+| `secrets/secrets.yml` | Main config (mode, discord, github, anthropic) |
+| `secrets/gateway.env` | Gateway container environment |
+| `secrets/controller.env` | Controller container environment |
+
+Required values:
+- **Discord bot token** - from [Discord Developer Portal](https://discord.com/developers/applications)
+- **Discord user ID** - right-click your name → Copy User ID
+- **Anthropic API key** - from [Anthropic Console](https://console.anthropic.com/)
+- **GitHub webhook secret** - generate with `openssl rand -hex 32`
 
 ## Promotion Flow (Online)
 
