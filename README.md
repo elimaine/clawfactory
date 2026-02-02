@@ -1,5 +1,7 @@
 # ClawFactory
 
+This is a work in progress! Currently the bot can persist changes, but it does at least allow repo changes to be version controlled.
+
 Local-first autonomous agent runtime with hard separation between proposal and authority.
 
 ## Philosophy
