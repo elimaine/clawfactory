@@ -21,11 +21,18 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        # Sync approved config from brain_ro to workspace on startup
+        # Sync approved brain files from brain_ro/workspace to OpenClaw workspace on startup
         echo "[startup] Syncing workspace from approved brain_ro..."
-        cp -r /workspace/brain_ro/*.md /home/node/.openclaw/workspace/ 2>/dev/null || true
-        cp -r /workspace/brain_ro/skills /home/node/.openclaw/workspace/ 2>/dev/null || true
-        cp /workspace/brain_ro/openclaw.json /home/node/.openclaw/openclaw.json 2>/dev/null || true
+        cp -r /workspace/brain_ro/workspace/*.md /home/node/.openclaw/workspace/ 2>/dev/null || true
+        cp -r /workspace/brain_ro/workspace/skills /home/node/.openclaw/workspace/ 2>/dev/null || true
+        cp -r /workspace/brain_ro/workspace/policies.yml /home/node/.openclaw/workspace/ 2>/dev/null || true
+        # Memory persists directly via volume mount to brain_work/workspace/memory
+        # No copy needed - memory survives restarts and can be committed to git
+        mkdir -p /home/node/.openclaw/workspace/memory
+        # Only copy MEMORY.md if it exists in brain_ro and not locally
+        if [ -f "/workspace/brain_ro/workspace/MEMORY.md" ] && [ ! -f "/home/node/.openclaw/workspace/MEMORY.md" ]; then
+          cp /workspace/brain_ro/workspace/MEMORY.md /home/node/.openclaw/workspace/ 2>/dev/null || true
+        fi
         echo "[startup] Workspace synced"
         # Run minimal setup then start gateway
         node dist/index.js onboard --non-interactive --accept-risk --mode local \
@@ -36,12 +43,12 @@ services:
     volumes:
       # OpenClaw home directory (config, state, workspace)
       - ./sandyclaws/openclaw-home:/home/node/.openclaw
-      # Approved brain config (read-only, synced to workspace on startup)
+      # Approved brain (OpenClaw fork, read-only)
       - ./sandyclaws/brain_ro:/workspace/brain_ro:ro
-      # Proposal workspace: WRITABLE for agent to propose changes
+      # Proposal workspace (OpenClaw fork clone, agent pushes branches here)
       - ./sandyclaws/brain_work:/workspace/proposals:rw
-      # Bare repo for git operations
-      - ./sandyclaws/brain.git:/workspace/brain.git:rw
+      # Memory persists directly in brain_work (survives restarts, can be committed)
+      - ./sandyclaws/brain_work/workspace/memory:/home/node/.openclaw/workspace/memory:rw
       # Temp filesystem
       - type: tmpfs
         target: /tmp
@@ -70,15 +77,18 @@ services:
     env_file:
       - ./secrets/controller.env
     environment:
-      - BRAIN_GIT=/srv/sandyclaws/brain.git
       - BRAIN_RO=/srv/sandyclaws/brain_ro
       - BRAIN_WORK=/srv/sandyclaws/brain_work
+      - OPENCLAW_HOME=/srv/openclaw-home
       - AUDIT_LOG=/srv/audit/audit.jsonl
+      - GITHUB_REPO=elimaine/sandyclaws-brain
     volumes:
-      # Brain directories: Controller has write for promotion
-      - ./sandyclaws/brain.git:/srv/sandyclaws/brain.git:rw
+      # Brain directories: Controller pulls from GitHub to brain_ro
       - ./sandyclaws/brain_ro:/srv/sandyclaws/brain_ro:rw
-      - ./sandyclaws/brain_work:/srv/sandyclaws/brain_work:ro
+      # brain_work: Controller can commit memory backups
+      - ./sandyclaws/brain_work:/srv/sandyclaws/brain_work:rw
+      # OpenClaw home: Read memory files for backup
+      - ./sandyclaws/openclaw-home:/srv/openclaw-home:ro
       # Audit log
       - ./audit:/srv/audit:rw
       # Docker socket for restarting gateway

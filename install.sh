@@ -111,46 +111,68 @@ preflight() {
     info "Checking dependencies..."
     require docker
     require git
+    require gh
 
     if ! docker info >/dev/null 2>&1; then
         die "Docker is not running. Please start Docker and try again."
+    fi
+
+    if ! gh auth status &>/dev/null; then
+        die "GitHub CLI not authenticated. Run: gh auth login"
     fi
 
     success "All dependencies satisfied"
 }
 
 # ============================================================
-# Initialize Brain Repository
+# Initialize Brain Repository (GitHub Fork)
 # ============================================================
 init_brain() {
     info "Initializing sandyclaws brain repository..."
 
     mkdir -p "${SANDYCLAWS_DIR}"
+    mkdir -p "${SANDYCLAWS_DIR}/openclaw-home"
 
-    # Initialize bare repo if not exists
-    if [[ ! -d "${SANDYCLAWS_DIR}/brain.git/HEAD" ]]; then
-        git init --bare "${SANDYCLAWS_DIR}/brain.git"
-        info "Created bare repository at sandyclaws/brain.git"
+    local fork_repo="${GITHUB_USERNAME}/sandyclaws-brain"
+    local fork_url="https://github.com/${fork_repo}.git"
+
+    # Check if fork exists, if not create it
+    if ! gh repo view "${fork_repo}" &>/dev/null; then
+        info "Forking openclaw/openclaw as sandyclaws-brain..."
+        gh repo fork openclaw/openclaw --clone=false --fork-name sandyclaws-brain
+        success "Created fork: ${fork_repo}"
+    else
+        success "Fork exists: ${fork_repo}"
     fi
 
-    # Create brain_ro if not exists
-    if [[ ! -d "${SANDYCLAWS_DIR}/brain_ro" ]]; then
-        mkdir -p "${SANDYCLAWS_DIR}/brain_ro"
-        info "Created sandyclaws/brain_ro directory"
-    fi
-
-    # Create brain_work if not exists
+    # Clone brain_work if not exists
     if [[ ! -d "${SANDYCLAWS_DIR}/brain_work/.git" ]]; then
-        mkdir -p "${SANDYCLAWS_DIR}/brain_work"
-        cd "${SANDYCLAWS_DIR}/brain_work"
-        git init
-        git remote add origin "${SANDYCLAWS_DIR}/brain.git" 2>/dev/null || true
+        info "Cloning fork to brain_work..."
+        git clone "${fork_url}" "${SANDYCLAWS_DIR}/brain_work"
+        success "Cloned to sandyclaws/brain_work"
+    else
+        success "brain_work already exists"
+    fi
 
-        # Create initial brain content
-        cat > SOUL.md <<'EOF'
+    # Clone brain_ro if not exists
+    if [[ ! -d "${SANDYCLAWS_DIR}/brain_ro/.git" ]]; then
+        info "Cloning fork to brain_ro..."
+        git clone "${fork_url}" "${SANDYCLAWS_DIR}/brain_ro"
+        success "Cloned to sandyclaws/brain_ro"
+    else
+        success "brain_ro already exists"
+    fi
+
+    # Create workspace/brain files if they don't exist
+    if [[ ! -f "${SANDYCLAWS_DIR}/brain_work/workspace/SOUL.md" ]]; then
+        info "Creating brain workspace files..."
+        mkdir -p "${SANDYCLAWS_DIR}/brain_work/workspace/skills"
+        mkdir -p "${SANDYCLAWS_DIR}/brain_work/workspace/memory"
+
+        cat > "${SANDYCLAWS_DIR}/brain_work/workspace/SOUL.md" <<'EOF'
 # Soul
 
-You are a helpful AI assistant.
+You are a helpful AI assistant running in the ClawFactory secure environment.
 
 ## Principles
 
@@ -158,14 +180,27 @@ You are a helpful AI assistant.
 2. Respect user privacy
 3. Admit when you don't know something
 4. Follow the policies defined in this brain
+5. Use the proposal workflow for configuration changes
+
+## Workspace Security
+
+Your workspace is version-controlled. To modify your configuration:
+1. Write changes to `/workspace/proposals/workspace/`
+2. Commit and push to create a proposal branch
+3. Notify your operator for review
+4. Wait for approval before changes take effect
+
+See `skills/propose.md` for detailed instructions.
 
 ## Capabilities
 
-You can propose changes to your own configuration by creating commits.
-These changes require human approval before they take effect.
+- You can use all your configured tools and skills
+- You can propose changes to SOUL.md, TOOLS.md, etc.
+- Changes require human approval before they take effect
+- Memory search is enabled for context recall
 EOF
 
-        cat > policies.yml <<'EOF'
+        cat > "${SANDYCLAWS_DIR}/brain_work/workspace/policies.yml" <<'EOF'
 # Policies
 
 allowed_actions:
@@ -173,6 +208,7 @@ allowed_actions:
   - write_proposals
   - create_commits
   - open_pull_requests
+  - backup_memory
 
 forbidden_actions:
   - direct_promotion
@@ -181,24 +217,47 @@ forbidden_actions:
   - docker_access
 EOF
 
-        git add -A
-        git commit -m "Initial brain setup"
-        git push -u origin main 2>/dev/null || git push --set-upstream origin main
+        cat > "${SANDYCLAWS_DIR}/brain_work/workspace/skills/propose.md" <<'EOF'
+# Propose Changes Skill
 
-        info "Created initial brain content"
+When you need to modify your configuration, use the proposal workflow.
+
+## How to Propose
+
+1. Write changes to `/workspace/proposals/workspace/`
+2. Commit and push: `git add . && git commit -m "Proposal: description" && git push origin HEAD:refs/heads/proposal/name`
+3. Notify your operator for review
+4. Wait for approval
+EOF
+
+        cat > "${SANDYCLAWS_DIR}/brain_work/workspace/skills/memory-backup.md" <<'EOF'
+# Memory Backup Skill
+
+Your memories persist across restarts. To backup to GitHub:
+
+```bash
+curl -X POST http://controller:8080/memory/backup
+```
+
+This commits memory files and pushes to GitHub for disaster recovery.
+EOF
+
+        cd "${SANDYCLAWS_DIR}/brain_work"
+        git add workspace/
+        git commit -m "Add ClawFactory brain workspace files"
+        git push origin main
         cd "${SCRIPT_DIR}"
+
+        success "Created brain workspace files"
+    else
+        success "Brain workspace files already exist"
     fi
 
-    # Checkout to brain_ro
-    cd "${SANDYCLAWS_DIR}/brain.git"
-    local sha
-    sha=$(git rev-parse main 2>/dev/null || echo "")
-    if [[ -n "$sha" ]]; then
-        git --work-tree "${SANDYCLAWS_DIR}/brain_ro" checkout main -- . 2>/dev/null || true
-        info "Checked out main to brain_ro"
-    fi
-
+    # Pull latest to brain_ro
+    cd "${SANDYCLAWS_DIR}/brain_ro"
+    git pull origin main 2>/dev/null || true
     cd "${SCRIPT_DIR}"
+
     success "Brain repository initialized"
 }
 
