@@ -29,7 +29,7 @@ Local-first autonomous agent runtime with hard separation between proposal and a
 │                                                   │              │
 │  ┌────────────────────────────────────────────────┼─────────────┐│
 │  │                    Volumes                     │             ││
-│  │  brain_ro/     brain_work/     secrets/     audit/          ││
+│  │  sandyclaws/brain_ro/     sandyclaws/brain_work/     secrets/     audit/          ││
 │  │  (read-only)   (proposals)     (600)        (append)        ││
 │  └──────────────────────────────────────────────────────────────┘│
 │                                                                  │
@@ -75,9 +75,9 @@ vim secrets/controller.env
 chmod 600 secrets/secrets.yml secrets/gateway.env secrets/controller.env
 
 # 4. Initialize brain repository
-mkdir -p brain/{brain.git,brain_ro,brain_work}
-git init --bare brain/brain.git
-cd brain/brain_work && git init && git remote add origin ../brain.git
+mkdir -p sandyclaws/{brain.git,brain_ro,brain_work}
+git init --bare sandyclaws/brain.git
+cd sandyclaws/brain_work && git init && git remote add origin ../brain.git
 
 # 5. Start
 docker compose up -d
@@ -106,21 +106,21 @@ Required values:
 
 ## Promotion Flow (Online)
 
-1. Bot edits `brain_work/`
+1. Bot edits `sandyclaws/brain_work/`
 2. Bot creates branch + commit
 3. Bot opens PR on GitHub
 4. **Human merges PR** ← Authority checkpoint
 5. GitHub webhook → Controller
-6. Controller promotes to `brain_ro/`
+6. Controller promotes to `sandyclaws/brain_ro/`
 7. Gateway restarts with new config
 
 ## Promotion Flow (Offline)
 
-1. Bot commits to `brain_work/`
+1. Bot commits to `sandyclaws/brain_work/`
 2. Bot DMs diff + SHA to human
 3. Human opens Controller UI (Tailscale)
 4. **Human clicks Promote** ← Authority checkpoint
-5. Controller promotes to `brain_ro/`
+5. Controller promotes to `sandyclaws/brain_ro/`
 6. Gateway restarts
 
 ## Kill Switch

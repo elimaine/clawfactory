@@ -24,9 +24,9 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 # Configuration from environment
-BRAIN_GIT = Path(os.environ.get("BRAIN_GIT", "/srv/brain/brain.git"))
-BRAIN_RO = Path(os.environ.get("BRAIN_RO", "/srv/brain/brain_ro"))
-BRAIN_WORK = Path(os.environ.get("BRAIN_WORK", "/srv/brain/brain_work"))
+BRAIN_GIT = Path(os.environ.get("BRAIN_GIT", "/srv/sandyclaws/brain.git"))
+BRAIN_RO = Path(os.environ.get("BRAIN_RO", "/srv/sandyclaws/brain_ro"))
+BRAIN_WORK = Path(os.environ.get("BRAIN_WORK", "/srv/sandyclaws/brain_work"))
 AUDIT_LOG = Path(os.environ.get("AUDIT_LOG", "/srv/audit/audit.jsonl"))
 GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
 ALLOWED_MERGE_ACTORS = os.environ.get("ALLOWED_MERGE_ACTORS", "").split(",")

@@ -20,7 +20,7 @@ services:
       - RUNNER_SOCKET=/run/clawfactory/runner.sock
     volumes:
       # Brain: READ-ONLY
-      - ./brain/brain_ro:/workspace/brain:ro
+      - ./sandyclaws/brain_ro:/workspace/brain:ro
       # Shared socket for Runner communication
       - runner-socket:/run/clawfactory
       # Temp filesystem
@@ -56,9 +56,9 @@ services:
       - ALL
     volumes:
       # Proposal workspace: WRITABLE
-      - ./brain/brain_work:/workspace/brain_work:rw
+      - ./sandyclaws/brain_work:/workspace/brain_work:rw
       # Bare repo for git operations
-      - ./brain/brain.git:/workspace/brain.git:rw
+      - ./sandyclaws/brain.git:/workspace/brain.git:rw
       # Shared socket
       - runner-socket:/run/clawfactory
       # Temp filesystem
@@ -84,15 +84,15 @@ services:
     env_file:
       - ./secrets/controller.env
     environment:
-      - BRAIN_GIT=/srv/brain/brain.git
-      - BRAIN_RO=/srv/brain/brain_ro
-      - BRAIN_WORK=/srv/brain/brain_work
+      - BRAIN_GIT=/srv/sandyclaws/brain.git
+      - BRAIN_RO=/srv/sandyclaws/brain_ro
+      - BRAIN_WORK=/srv/sandyclaws/brain_work
       - AUDIT_LOG=/srv/audit/audit.jsonl
     volumes:
       # Brain directories: Controller has write for promotion
-      - ./brain/brain.git:/srv/brain/brain.git:rw
-      - ./brain/brain_ro:/srv/brain/brain_ro:rw
-      - ./brain/brain_work:/srv/brain/brain_work:ro
+      - ./sandyclaws/brain.git:/srv/sandyclaws/brain.git:rw
+      - ./sandyclaws/brain_ro:/srv/sandyclaws/brain_ro:rw
+      - ./sandyclaws/brain_work:/srv/sandyclaws/brain_work:ro
       # Audit log
       - ./audit:/srv/audit:rw
       # Docker socket for restarting gateway

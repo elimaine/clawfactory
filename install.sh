@@ -7,7 +7,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SECRETS_DIR="${SCRIPT_DIR}/secrets"
-BRAIN_DIR="${SCRIPT_DIR}/brain"
+SANDYCLAWS_DIR="${SCRIPT_DIR}/sandyclaws"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -32,7 +32,11 @@ prompt() {
     local secret="${4:-false}"
 
     if [[ -n "$default" ]]; then
-        prompt_text="${prompt_text} [${default}]"
+        if [[ "$secret" == "true" ]]; then
+            prompt_text="${prompt_text} [****saved****]"
+        else
+            prompt_text="${prompt_text} [${default}]"
+        fi
     fi
 
     if [[ "$secret" == "true" ]]; then
@@ -44,6 +48,57 @@ prompt() {
 
     value="${value:-$default}"
     eval "$var_name=\"\$value\""
+}
+
+# Load existing value from secrets.yml using grep/sed (no yq dependency)
+load_secret() {
+    local key="$1"
+    local file="${SECRETS_DIR}/secrets.yml"
+    [[ -f "$file" ]] || return
+
+    # Handle nested keys like discord.bot_token
+    if [[ "$key" == *"."* ]]; then
+        local parent="${key%%.*}"
+        local child="${key#*.}"
+        # Simple extraction - looks for "  child: value" after "parent:"
+        sed -n "/^${parent}:/,/^[a-z]/p" "$file" 2>/dev/null | \
+            grep "^  ${child}:" | \
+            sed 's/.*: *"\{0,1\}\([^"]*\)"\{0,1\}/\1/' | \
+            head -1
+    else
+        grep "^${key}:" "$file" 2>/dev/null | \
+            sed 's/.*: *"\{0,1\}\([^"]*\)"\{0,1\}/\1/' | \
+            head -1
+    fi
+}
+
+# Save current secrets state
+save_secrets() {
+    mkdir -p "${SECRETS_DIR}"
+    chmod 700 "${SECRETS_DIR}"
+
+    cat > "${SECRETS_DIR}/secrets.yml" <<EOF
+# ClawFactory Secrets
+# Generated: $(date -Iseconds)
+# chmod 600 this file!
+
+mode: ${MODE:-}
+
+discord:
+  bot_token: "${DISCORD_BOT_TOKEN:-}"
+  allowed_user_ids:
+    - "${DISCORD_USER_ID:-}"
+
+github:
+  username: "${GITHUB_USERNAME:-}"
+  webhook_secret: "${GITHUB_WEBHOOK_SECRET:-}"
+  allowed_merge_actors: "${GITHUB_ALLOWED_ACTORS:-}"
+  brain_repo: "${GITHUB_BRAIN_REPO:-}"
+
+anthropic:
+  api_key: "${ANTHROPIC_API_KEY:-}"
+EOF
+    chmod 600 "${SECRETS_DIR}/secrets.yml"
 }
 
 # ============================================================
@@ -65,28 +120,28 @@ preflight() {
 # Initialize Brain Repository
 # ============================================================
 init_brain() {
-    info "Initializing brain repository..."
+    info "Initializing sandyclaws brain repository..."
 
-    mkdir -p "${BRAIN_DIR}"
+    mkdir -p "${SANDYCLAWS_DIR}"
 
     # Initialize bare repo if not exists
-    if [[ ! -d "${BRAIN_DIR}/brain.git/HEAD" ]]; then
-        git init --bare "${BRAIN_DIR}/brain.git"
-        info "Created bare repository at brain/brain.git"
+    if [[ ! -d "${SANDYCLAWS_DIR}/brain.git/HEAD" ]]; then
+        git init --bare "${SANDYCLAWS_DIR}/brain.git"
+        info "Created bare repository at sandyclaws/brain.git"
     fi
 
     # Create brain_ro if not exists
-    if [[ ! -d "${BRAIN_DIR}/brain_ro" ]]; then
-        mkdir -p "${BRAIN_DIR}/brain_ro"
-        info "Created brain_ro directory"
+    if [[ ! -d "${SANDYCLAWS_DIR}/brain_ro" ]]; then
+        mkdir -p "${SANDYCLAWS_DIR}/brain_ro"
+        info "Created sandyclaws/brain_ro directory"
     fi
 
     # Create brain_work if not exists
-    if [[ ! -d "${BRAIN_DIR}/brain_work/.git" ]]; then
-        mkdir -p "${BRAIN_DIR}/brain_work"
-        cd "${BRAIN_DIR}/brain_work"
+    if [[ ! -d "${SANDYCLAWS_DIR}/brain_work/.git" ]]; then
+        mkdir -p "${SANDYCLAWS_DIR}/brain_work"
+        cd "${SANDYCLAWS_DIR}/brain_work"
         git init
-        git remote add origin "${BRAIN_DIR}/brain.git" 2>/dev/null || true
+        git remote add origin "${SANDYCLAWS_DIR}/brain.git" 2>/dev/null || true
 
         # Create initial brain content
         cat > SOUL.md <<'EOF'
@@ -132,11 +187,11 @@ EOF
     fi
 
     # Checkout to brain_ro
-    cd "${BRAIN_DIR}/brain.git"
+    cd "${SANDYCLAWS_DIR}/brain.git"
     local sha
     sha=$(git rev-parse main 2>/dev/null || echo "")
     if [[ -n "$sha" ]]; then
-        git --work-tree "${BRAIN_DIR}/brain_ro" checkout main -- . 2>/dev/null || true
+        git --work-tree "${SANDYCLAWS_DIR}/brain_ro" checkout main -- . 2>/dev/null || true
         info "Checked out main to brain_ro"
     fi
 
@@ -153,85 +208,145 @@ configure_secrets() {
     mkdir -p "${SECRETS_DIR}"
     chmod 700 "${SECRETS_DIR}"
 
-    # Check if secrets already exist
-    if [[ -f "${SECRETS_DIR}/secrets.yml" ]]; then
-        warn "secrets/secrets.yml already exists"
-        read -p "Overwrite? [y/N]: " overwrite
-        if [[ ! "$overwrite" =~ ^[Yy]$ ]]; then
-            info "Keeping existing secrets"
-            return
-        fi
-    fi
+    # Load any existing values as defaults
+    local saved_mode=$(load_secret "mode")
+    local saved_discord_token=$(load_secret "discord.bot_token")
+    local saved_discord_user=$(load_secret "discord.allowed_user_ids")
+    local saved_github_username=$(load_secret "github.username")
+    local saved_github_webhook=$(load_secret "github.webhook_secret")
+    local saved_github_repo=$(load_secret "github.brain_repo")
+    local saved_anthropic=$(load_secret "anthropic.api_key")
+
+    # Clean up array notation from user ID
+    saved_discord_user="${saved_discord_user#- }"
+
+    # Track if we have all required secrets
+    local missing_secrets=false
 
     echo ""
     echo "=== Mode Selection ==="
-    echo "online  - GitHub PRs for promotion, Cloudflare for ingress"
-    echo "offline - Local approval UI only"
-    echo ""
-    prompt MODE "Mode (online/offline)" "online"
+    if [[ -n "$saved_mode" ]]; then
+        MODE="$saved_mode"
+        success "Mode: $MODE (saved)"
+    else
+        echo "online  - GitHub PRs for promotion, Cloudflare for ingress"
+        echo "offline - Local approval UI only"
+        echo ""
+        prompt MODE "Mode (online/offline)" "online"
+        save_secrets
+    fi
 
     echo ""
     echo "=== Discord Configuration ==="
-    prompt DISCORD_BOT_TOKEN "Discord bot token" "" true
-    prompt DISCORD_USER_ID "Your Discord user ID (for DM allowlist)"
+    if [[ -n "$saved_discord_token" ]]; then
+        DISCORD_BOT_TOKEN="$saved_discord_token"
+        success "Discord bot token (saved)"
+    else
+        prompt DISCORD_BOT_TOKEN "Discord bot token" "" true
+        save_secrets
+    fi
+
+    if [[ -n "$saved_discord_user" ]]; then
+        DISCORD_USER_ID="$saved_discord_user"
+        success "Discord user ID: $DISCORD_USER_ID (saved)"
+    else
+        prompt DISCORD_USER_ID "Your Discord user ID (for DM allowlist)"
+        save_secrets
+    fi
 
     if [[ "$MODE" == "online" ]]; then
         echo ""
         echo "=== GitHub Configuration ==="
-        echo ""
-        echo "The webhook secret is a shared secret between GitHub and ClawFactory."
-        echo "It verifies that webhook requests actually come from GitHub."
-        echo ""
-        echo "Generate one with:  openssl rand -hex 32"
-        echo ""
-        echo "After setup, add this secret to your brain repo's webhook settings:"
-        echo "  https://github.com/YOUR_USER/YOUR_BRAIN_REPO/settings/hooks/new"
-        echo ""
-        echo "Webhook settings:"
-        echo "  Payload URL: https://your-controller/webhook/github"
-        echo "  Content type: application/json"
-        echo "  Secret: (paste the secret you enter below)"
-        echo "  Events: Pull requests only"
-        echo ""
-        prompt GITHUB_WEBHOOK_SECRET "GitHub webhook secret" "" true
-        echo ""
-        echo "Which GitHub users can merge PRs to trigger promotion?"
-        echo "(comma-separated GitHub usernames)"
-        prompt GITHUB_ALLOWED_ACTORS "Allowed merge actors"
+        if [[ -n "$saved_github_username" ]]; then
+            GITHUB_USERNAME="$saved_github_username"
+            success "GitHub username: $GITHUB_USERNAME (saved)"
+        else
+            echo ""
+            prompt GITHUB_USERNAME "Your GitHub username"
+            save_secrets
+        fi
+
+        if [[ -n "$saved_github_webhook" ]]; then
+            GITHUB_WEBHOOK_SECRET="$saved_github_webhook"
+            GITHUB_BRAIN_REPO="${saved_github_repo:-sandyclaws-brain}"
+            success "GitHub webhook secret (saved)"
+            success "Brain repo: $GITHUB_BRAIN_REPO (saved)"
+            AUTO_GITHUB=false
+        else
+            echo ""
+            echo "Do you want to automatically configure GitHub webhooks?"
+            echo "This requires a classic GitHub personal access token (not fine-grained)."
+            echo "Scopes needed: 'repo' and 'admin:repo_hook'"
+            echo ""
+            echo "Create a classic token here:"
+            echo "  https://github.com/settings/tokens/new?scopes=repo,admin:repo_hook&description=ClawFactory"
+            echo ""
+            echo "(If that page shows 'Fine-grained tokens', click 'Tokens (classic)' in the left sidebar)"
+            echo ""
+            read -p "Auto-configure GitHub? [y/N]: " auto_github
+
+            if [[ "$auto_github" =~ ^[Yy]$ ]]; then
+                prompt GITHUB_TOKEN "GitHub personal access token" "" true
+                prompt GITHUB_BRAIN_REPO "Brain repository name (will be created if doesn't exist)" "${saved_github_repo:-sandyclaws-brain}"
+                save_secrets
+
+                GITHUB_WEBHOOK_SECRET=$(openssl rand -hex 32)
+                info "Generated webhook secret automatically"
+                save_secrets
+
+                AUTO_GITHUB=true
+            else
+                AUTO_GITHUB=false
+                GITHUB_TOKEN=""
+                GITHUB_BRAIN_REPO="${saved_github_repo:-sandyclaws-brain}"
+                echo ""
+                echo "Manual webhook setup required."
+                echo ""
+                echo "The webhook secret is a shared secret between GitHub and ClawFactory."
+                echo "It verifies that webhook requests actually come from GitHub."
+                echo ""
+                echo "Generate one with:  openssl rand -hex 32"
+                echo ""
+                echo "After setup, add this secret to your brain repo's webhook settings:"
+                echo "  https://github.com/${GITHUB_USERNAME}/${GITHUB_BRAIN_REPO}/settings/hooks/new"
+                echo ""
+                echo "Webhook settings:"
+                echo "  Payload URL: https://your-controller/webhook/github"
+                echo "  Content type: application/json"
+                echo "  Secret: (paste the secret you enter below)"
+                echo "  Events: Pull requests only"
+                echo ""
+                prompt GITHUB_WEBHOOK_SECRET "GitHub webhook secret" "" true
+                save_secrets
+            fi
+        fi
+
+        GITHUB_ALLOWED_ACTORS="${GITHUB_USERNAME}"
 
         echo ""
         echo "=== AI Provider ==="
-        prompt ANTHROPIC_API_KEY "Anthropic API key" "" true
+        if [[ -n "$saved_anthropic" ]]; then
+            ANTHROPIC_API_KEY="$saved_anthropic"
+            success "Anthropic API key (saved)"
+        else
+            prompt ANTHROPIC_API_KEY "Anthropic API key" "" true
+            save_secrets
+        fi
     else
+        GITHUB_USERNAME=""
         GITHUB_WEBHOOK_SECRET=""
         GITHUB_ALLOWED_ACTORS=""
+        GITHUB_BRAIN_REPO=""
         echo ""
         echo "=== AI Provider (optional for offline) ==="
-        prompt ANTHROPIC_API_KEY "Anthropic API key (or leave empty for local LLM)" "" true
+        if [[ -n "$saved_anthropic" ]]; then
+            ANTHROPIC_API_KEY="$saved_anthropic"
+            success "Anthropic API key (saved)"
+        else
+            prompt ANTHROPIC_API_KEY "Anthropic API key (or leave empty for local LLM)" "" true
+            save_secrets
+        fi
     fi
-
-    # Write secrets.yml
-    cat > "${SECRETS_DIR}/secrets.yml" <<EOF
-# ClawFactory Secrets
-# Generated: $(date -Iseconds)
-# chmod 600 this file!
-
-mode: ${MODE}
-
-discord:
-  bot_token: "${DISCORD_BOT_TOKEN}"
-  allowed_user_ids:
-    - "${DISCORD_USER_ID}"
-
-github:
-  webhook_secret: "${GITHUB_WEBHOOK_SECRET}"
-  allowed_merge_actors: "${GITHUB_ALLOWED_ACTORS}"
-
-anthropic:
-  api_key: "${ANTHROPIC_API_KEY}"
-EOF
-
-    chmod 600 "${SECRETS_DIR}/secrets.yml"
 
     # Generate env files for containers
     cat > "${SECRETS_DIR}/gateway.env" <<EOF
@@ -248,7 +363,99 @@ EOF
 
     chmod 600 "${SECRETS_DIR}"/*.env
 
+    # Auto-configure GitHub if requested
+    if [[ "${AUTO_GITHUB:-false}" == "true" ]] && [[ -n "${GITHUB_TOKEN:-}" ]]; then
+        configure_github_auto
+    fi
+
     success "Secrets configured"
+}
+
+# ============================================================
+# Auto-configure GitHub (repo + webhook)
+# ============================================================
+configure_github_auto() {
+    info "Configuring GitHub automatically..."
+
+    local api_base="https://api.github.com"
+    local auth_header="Authorization: Bearer ${GITHUB_TOKEN}"
+
+    # Check if repo exists
+    local repo_check
+    repo_check=$(curl -s -o /dev/null -w "%{http_code}" \
+        -H "$auth_header" \
+        "${api_base}/repos/${GITHUB_USERNAME}/${GITHUB_BRAIN_REPO}")
+
+    if [[ "$repo_check" == "404" ]]; then
+        info "Creating repository ${GITHUB_USERNAME}/${GITHUB_BRAIN_REPO}..."
+        local create_result
+        create_result=$(curl -s -X POST \
+            -H "$auth_header" \
+            -H "Content-Type: application/json" \
+            "${api_base}/user/repos" \
+            -d "{\"name\":\"${GITHUB_BRAIN_REPO}\",\"private\":true,\"description\":\"SandyClaws brain repository\"}")
+
+        if echo "$create_result" | grep -q '"id"'; then
+            success "Created repository"
+        else
+            warn "Failed to create repository: $create_result"
+            return 1
+        fi
+    else
+        info "Repository already exists"
+    fi
+
+    # Create webhook
+    info "Creating webhook..."
+    echo ""
+    echo "Enter your Controller's public URL (where GitHub will send webhooks)."
+    echo "Example: https://clawfactory.yourdomain.com"
+    prompt CONTROLLER_URL "Controller URL"
+
+    local webhook_result
+    webhook_result=$(curl -s -X POST \
+        -H "$auth_header" \
+        -H "Content-Type: application/json" \
+        "${api_base}/repos/${GITHUB_USERNAME}/${GITHUB_BRAIN_REPO}/hooks" \
+        -d "{
+            \"name\": \"web\",
+            \"active\": true,
+            \"events\": [\"pull_request\"],
+            \"config\": {
+                \"url\": \"${CONTROLLER_URL}/webhook/github\",
+                \"content_type\": \"json\",
+                \"secret\": \"${GITHUB_WEBHOOK_SECRET}\",
+                \"insecure_ssl\": \"0\"
+            }
+        }")
+
+    if echo "$webhook_result" | grep -q '"id"'; then
+        success "Created webhook"
+    else
+        warn "Failed to create webhook (may already exist): $webhook_result"
+    fi
+
+    # Update local brain to push to GitHub
+    info "Configuring local brain to push to GitHub..."
+    cd "${SANDYCLAWS_DIR}/brain_work"
+    git remote set-url origin "https://github.com/${GITHUB_USERNAME}/${GITHUB_BRAIN_REPO}.git" 2>/dev/null || \
+        git remote add origin "https://github.com/${GITHUB_USERNAME}/${GITHUB_BRAIN_REPO}.git"
+
+    # Update bare repo remote too
+    cd "${SANDYCLAWS_DIR}/brain.git"
+    git remote add github "https://github.com/${GITHUB_USERNAME}/${GITHUB_BRAIN_REPO}.git" 2>/dev/null || true
+
+    cd "${SCRIPT_DIR}"
+
+    echo ""
+    success "GitHub configured!"
+    echo ""
+    echo "Your brain repo: https://github.com/${GITHUB_USERNAME}/${GITHUB_BRAIN_REPO}"
+    echo "Webhook URL: ${CONTROLLER_URL}/webhook/github"
+    echo ""
+    echo "Note: You may need to push the initial brain content to GitHub:"
+    echo "  cd sandyclaws/brain_work && git push -u origin main"
+    echo ""
 }
 
 # ============================================================
@@ -406,8 +613,8 @@ secrets/
 
 # Runtime state
 audit/
-brain/brain_ro/
-brain/brain_work/
+sandyclaws/brain_ro/
+sandyclaws/brain_work/
 
 # OS
 .DS_Store
