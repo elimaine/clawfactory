@@ -1,26 +1,24 @@
 # ClawFactory
 
-This is a work in progress! Currently the bot can still write to self and persist changes (this is risky), but it does at least allow repo changes and long term memory to be backed up and versioned.
-
-currently the gateway ui isnt accessible.. kind of by design until i implement the runner
-(quarantine) layer. 
-
-NOTE: automated install asks for all your keys and stores them in a permission 600 file 
-
-
-the purpose is to make locked down openclaw vms easy to spin up, kill and rotate keys.
-
-coming in the next few days..
-- fixes for deployment cycle that requires external approval through github
-- support for zerotrust, 
-- fixes to full local option, 
-- cloudflare ai gateway, tails, and external websocket..
-- "fishiness" detection, text gating, honeypot
-
-
-and here ill pass it over to claude
-
 Local-first autonomous agent runtime with hard separation between proposal and authority.
+
+> **Status**: Work in progress. The bot can propose changes but requires human approval (via GitHub PR or Controller UI) to promote them.
+
+## Quick Start
+
+```bash
+git clone https://github.com/elimaine/clawfactory
+cd clawfactory
+./install.sh              # Interactive setup (prompts for secrets + instance name)
+./clawfactory.sh start    # Start containers
+./clawfactory.sh info     # Show instance info and access tokens
+```
+
+Access:
+- **Gateway UI**: http://localhost:18789
+- **Controller**: http://localhost:8080/controller?token=YOUR_TOKEN
+
+The install script generates authentication tokens. Run `./clawfactory.sh info` to see them.
 
 ## Philosophy
 
@@ -31,30 +29,31 @@ Local-first autonomous agent runtime with hard separation between proposal and a
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                         Host VM                               │
+│                         Host VM                              │
 │  ┌──────────────────────────────────────────────────────────┐│
-│  │                    Docker Compose                         ││
-│  │  ┌───────────────────────┐  ┌─────────────────────────┐  ││
-│  │  │        Gateway        │  │       Controller        │  ││
-│  │  │       (OpenClaw)      │  │    (Python/FastAPI)     │  ││
-│  │  │                       │  │                         │  ││
-│  │  │  • Discord            │  │  • GitHub webhooks      │  ││
-│  │  │  • LLM calls          │  │  • Promotion logic      │  ││
-│  │  │  • Native sandbox     │  │  • Memory backup        │  ││
-│  │  │  • Memory (Gemini)    │  │  • Approval UI          │  ││
-│  │  └───────────────────────┘  └────────────┬────────────┘  ││
-│  └──────────────────────────────────────────┼───────────────┘│
-│                                             │                │
-│  ┌──────────────────────────────────────────┼───────────────┐│
-│  │                   Volumes                │                ││
-│  │  brain_ro/    brain_work/    secrets/    audit/          ││
-│  │  (approved)   (proposals)    (600)       (append)        ││
+│  │                    Docker Compose                        ││
+│  │                                                          ││
+│  │  ┌─────────┐    ┌───────────────┐    ┌──────────────┐   ││
+│  │  │  Proxy  │───►│    Gateway    │    │  Controller  │   ││
+│  │  │ (nginx) │    │   (OpenClaw)  │    │   (FastAPI)  │   ││
+│  │  │         │───►│               │    │              │   ││
+│  │  └────┬────┘    │ • Discord     │    │ • Webhooks   │   ││
+│  │       │         │ • LLM calls   │    │ • Promotion  │   ││
+│  │       │         │ • Sandbox     │    │ • Memory     │   ││
+│  │  localhost      │ • Memory      │    │   backup     │   ││
+│  │  :18789/:8080   └───────────────┘    └──────────────┘   ││
+│  └──────────────────────────────────────────────────────────┘│
+│                                                              │
+│  ┌──────────────────────────────────────────────────────────┐│
+│  │                   Volumes                                ││
+│  │  brain_ro/    brain_work/    secrets/    audit/         ││
+│  │  (approved)   (proposals)    (600)       (append)       ││
 │  └──────────────────────────────────────────────────────────┘│
 │                                                              │
 │  [Kill Switch] ─────────────────────────────────────────────│
 └──────────────────────────────────────────────────────────────┘
 
-GitHub: your-username/sandyclaws-brain (fork of openclaw/openclaw)
+GitHub: your-username/{instance}-brain (fork of openclaw/openclaw)
          └── workspace/
              ├── SOUL.md, TOOLS.md, etc.
              ├── skills/
@@ -63,91 +62,126 @@ GitHub: your-username/sandyclaws-brain (fork of openclaw/openclaw)
 
 ## Components
 
-| Component | Role | Can Write To | Cannot Access |
-|-----------|------|--------------|---------------|
-| **Gateway** | Agent runtime (OpenClaw) | proposals, memory | secrets |
-| **Controller** | Authority & promotion | brain_ro (via git pull) | - |
+| Component | Role | Listens On | Can Write To |
+|-----------|------|------------|--------------|
+| **Proxy** | Reverse proxy, localhost access | localhost:18789, :8080 | - |
+| **Gateway** | Agent runtime (OpenClaw) | Docker network only | proposals, memory |
+| **Controller** | Authority & promotion | Docker network only | brain_ro (via git) |
 
-## Quick Start
+## Setup Options
 
-### Option A: Interactive Setup
+### Option A: Interactive Setup (Recommended)
 
 ```bash
-git clone https://github.com/elimaine/clawfactory
-cd clawfactory
-./install.sh              # Prompts for all secrets interactively
-./clawfactory.sh start    # Start containers
+./install.sh
 ```
+
+This prompts for:
+- **Instance name** (e.g., `bot1`, `prod-agent`) - used for container naming and multi-instance support
+- Discord bot token
+- Anthropic API key
+- Gemini API key (for memory embeddings)
+- GitHub setup (forks openclaw/openclaw as {instance}-brain)
+
+The installer generates two tokens:
+- **Gateway token** - for authenticating to the OpenClaw gateway API
+- **Controller token** - for accessing the Controller dashboard
 
 ### Option B: Manual Setup
 
 ```bash
-git clone https://github.com/elimaine/clawfactory
-cd clawfactory
-
 # 1. Fork OpenClaw on GitHub
 # Go to https://github.com/openclaw/openclaw and click Fork
-# Name it: sandyclaws-brain
+# Name it: {instance}-brain (e.g., bot1-brain)
 
 # 2. Clone your fork locally
-mkdir -p sandyclaws
-git clone https://github.com/YOUR_USERNAME/sandyclaws-brain.git sandyclaws/brain_work
-git clone https://github.com/YOUR_USERNAME/sandyclaws-brain.git sandyclaws/brain_ro
+mkdir -p data
+git clone https://github.com/YOUR_USERNAME/bot1-brain.git data/brain_work
+git clone https://github.com/YOUR_USERNAME/bot1-brain.git data/brain_ro
 
 # 3. Add brain files to workspace/
-mkdir -p sandyclaws/brain_work/workspace
+mkdir -p data/brain_work/workspace
 # Create SOUL.md, TOOLS.md, etc. in workspace/
-git -C sandyclaws/brain_work add workspace/ && git -C sandyclaws/brain_work commit -m "Add brain files" && git -C sandyclaws/brain_work push
+git -C data/brain_work add workspace/
+git -C data/brain_work commit -m "Add brain files"
+git -C data/brain_work push
 
 # 4. Copy and edit secrets
 cp secrets/gateway.env.example secrets/gateway.env
 cp secrets/controller.env.example secrets/controller.env
-# Edit with your values (Discord token, Anthropic key, Gemini key)
+# Edit with your values
 chmod 600 secrets/*.env
 
 # 5. Start
 ./clawfactory.sh start
 ```
 
-### Verify
-
-```bash
-./clawfactory.sh status
-./clawfactory.sh logs gateway
-curl http://localhost:8080/status
-```
-
 ## Secrets Configuration
 
-| File | Purpose |
-|------|---------|
-| `secrets/secrets.yml` | Main config (mode, discord, github, anthropic, gemini) |
-| `secrets/gateway.env` | Gateway container environment |
-| `secrets/controller.env` | Controller container environment |
+Each instance has its own secrets folder:
 
-Required values:
-- **Discord bot token** - from [Discord Developer Portal](https://discord.com/developers/applications)
-- **Discord user ID** - right-click your name → Copy User ID
-- **Anthropic API key** - from [Anthropic Console](https://console.anthropic.com/)
-- **Gemini API key** - from [Google AI Studio](https://aistudio.google.com/app/apikey) (for memory embeddings)
-- **GitHub webhook secret** - generate with `openssl rand -hex 32`
+```
+secrets/
+├── bot1/
+│   ├── gateway.env      # Discord token, Anthropic key, Gemini key
+│   └── controller.env   # GitHub webhook secret, tokens
+├── bot2/
+│   ├── gateway.env
+│   └── controller.env
+└── tokens.env           # Token registry for all instances
+```
 
-## Promotion Flow (Online)
+| File | Contents |
+|------|----------|
+| `secrets/<instance>/gateway.env` | Discord token, Anthropic key, Gemini key, Gateway token |
+| `secrets/<instance>/controller.env` | GitHub webhook secret, Controller token, Gateway token |
+| `secrets/tokens.env` | Token registry for all instances |
+| `.clawfactory.conf` | Default instance name |
 
-1. Bot edits files in `sandyclaws/brain_work/workspace/`
+Tokens are auto-generated by `install.sh`. To view them:
+```bash
+./clawfactory.sh info
+./clawfactory.sh -i bot1 info   # For specific instance
+```
+
+## Commands
+
+```bash
+./clawfactory.sh start              # Start default instance
+./clawfactory.sh stop               # Stop default instance
+./clawfactory.sh restart            # Restart containers
+./clawfactory.sh status             # Show container status
+./clawfactory.sh info               # Show instance name and tokens
+./clawfactory.sh list               # List all instances and containers
+./clawfactory.sh logs [service]     # Follow logs (gateway/proxy/controller)
+./clawfactory.sh shell [service]    # Shell into container
+./clawfactory.sh controller         # Show controller URL
+./clawfactory.sh audit              # Show recent audit log
+
+# Multi-instance support
+./clawfactory.sh -i bot1 start      # Start 'bot1' instance
+./clawfactory.sh -i bot1 stop       # Stop 'bot1' instance
+./clawfactory.sh -i bot1 info       # Show 'bot1' info and tokens
+```
+
+## Promotion Flow
+
+### Online (GitHub)
+
+1. Bot edits files in `brain_work/workspace/`
 2. Bot commits and pushes to proposal branch
 3. Bot opens PR on GitHub
 4. **Human merges PR** ← Authority checkpoint
 5. GitHub webhook → Controller
-6. Controller pulls main to `sandyclaws/brain_ro/`
+6. Controller pulls to `brain_ro/`
 7. Gateway restarts with new config
 
-## Promotion Flow (Offline)
+### Offline (Local UI)
 
-1. Bot commits to `sandyclaws/brain_work/`
-2. Human opens Controller UI (http://localhost:8080/promote)
+1. Bot commits to `brain_work/`
+2. Human opens Controller dashboard (http://localhost:8080/controller?token=...)
 3. **Human clicks Promote** ← Authority checkpoint
-4. Controller pulls to `sandyclaws/brain_ro/`
+4. Controller pulls to `brain_ro/`
 5. Gateway restarts
 
 ## Memory
@@ -161,28 +195,34 @@ Memory persists across restarts. To backup to GitHub:
 curl -X POST http://localhost:8080/memory/backup
 ```
 
-The agent can also call this endpoint using the `memory-backup` skill.
+The agent can also trigger this via the `memory-backup` skill.
 
-## Controller Endpoints
+## Controller API
+
+All endpoints require authentication via `?token=` query param or session cookie.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/promote` | GET | Approval UI |
-| `/promote` | POST | Promote specific SHA |
-| `/promote/main` | POST | Pull latest main |
+| `/controller` | GET | Dashboard UI |
+| `/controller` | POST | Promote specific SHA |
+| `/controller/promote-main` | POST | Pull latest main & restart |
 | `/memory/backup` | POST | Backup memory to GitHub |
 | `/memory/status` | GET | List memory files |
 | `/status` | GET | System status |
 | `/health` | GET | Health check |
+| `/audit` | GET | Get audit log entries |
+| `/gateway/devices` | GET | List pending/paired devices |
+| `/gateway/devices/approve` | POST | Approve device pairing |
+| `/gateway/devices/reject` | POST | Reject device pairing |
+| `/gateway/pairing/{channel}` | GET | List DM pairing requests |
+| `/gateway/pairing/approve` | POST | Approve DM pairing code |
+| `/gateway/security-audit` | GET | Run OpenClaw security audit |
 
 ## Kill Switch
 
 ```bash
-# Immediate containment - stops everything, drops network
-./killswitch.sh lock
-
-# Restore after incident
-./killswitch.sh restore
+./killswitch.sh lock      # Stop everything, drop network
+./killswitch.sh restore   # Restore after incident
 ```
 
 ## Safety Invariants
@@ -196,21 +236,37 @@ The agent can also call this endpoint using the `memory-backup` skill.
 
 ## Updating OpenClaw
 
-Since brain_work/brain_ro are forks of OpenClaw, you can merge upstream updates:
+Since brain repos are forks of OpenClaw, merge upstream updates:
 
 ```bash
-cd sandyclaws/brain_work
+cd data/brain_work
 git remote add upstream https://github.com/openclaw/openclaw.git
 git fetch upstream
 git merge upstream/main
 git push origin main
 ```
 
+Repeat for brain_ro if needed.
+
+## Remote Access
+
+### Tailscale (Recommended for personal use)
+
+```bash
+# Expose gateway and controller on your tailnet
+tailscale serve --bg --set-path /<instance> http://127.0.0.1:18789
+tailscale serve --bg --set-path /<instance>/controller http://127.0.0.1:8080
+```
+
+Access via `https://your-machine.tailnet.ts.net/<instance>/`
+
+### Cloudflare Zero Trust
+
+For public access with authentication, see `todo/cloudflare/` for Cloudflare tunnel setup.
+
 ## Documentation
 
-- [SANDYCLAW-DESIGN.md](SANDYCLAW-DESIGN.md) - Full architecture specification
-- [docs/TODO-cloudflare-zerotrust.md](docs/TODO-cloudflare-zerotrust.md) - Egress control setup
-- [docs/TODO-expose-controller.md](docs/TODO-expose-controller.md) - Webhook ingress setup
+- [DESIGN.md](DESIGN.md) - Full architecture specification
 
 ## License
 

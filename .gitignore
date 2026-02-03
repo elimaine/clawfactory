@@ -1,8 +1,8 @@
 # =====================
 # Secrets (NEVER commit)
 # =====================
-secrets/*.yml
-secrets/*.env
+secrets/*/
+secrets/tokens.env
 !secrets/*.example
 
 # =====================
@@ -10,12 +10,14 @@ secrets/*.env
 # =====================
 clawfactory.sh
 killswitch.sh
+.clawfactory.conf
+.env
 
 # =====================
 # Runtime state
 # =====================
 # Brain directories (created by install.sh)
-sandyclaws/
+data/
 brain/
 
 # Audit logs
@@ -40,4 +42,4 @@ audit/
 __pycache__/
 *.pyc
 .venv/
-sandyclaws/openclaw-home/
+data/openclaw-home/

@@ -7,7 +7,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SECRETS_DIR="${SCRIPT_DIR}/secrets"
-SANDYCLAWS_DIR="${SCRIPT_DIR}/sandyclaws"
+DATA_DIR="${SCRIPT_DIR}/data"
+CONFIG_FILE="${SCRIPT_DIR}/.clawfactory.conf"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -23,6 +24,56 @@ die() { error "$*"; exit 1; }
 
 require() {
     command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
+}
+
+# Validate instance name: lowercase alphanumeric and hyphens only, 1-32 chars, can't start/end with hyphen
+validate_instance_name() {
+    local name="$1"
+    if [[ -z "$name" ]]; then
+        echo "Instance name cannot be empty"
+        return 1
+    fi
+    if [[ ${#name} -gt 32 ]]; then
+        echo "Instance name must be 32 characters or less"
+        return 1
+    fi
+    if [[ ! "$name" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
+        if [[ "$name" =~ ^- ]] || [[ "$name" =~ -$ ]]; then
+            echo "Instance name cannot start or end with a hyphen"
+        elif [[ "$name" =~ [A-Z] ]]; then
+            echo "Instance name must be lowercase"
+        elif [[ "$name" =~ [^a-z0-9-] ]]; then
+            echo "Instance name can only contain lowercase letters, numbers, and hyphens"
+        else
+            echo "Invalid instance name format"
+        fi
+        return 1
+    fi
+    return 0
+}
+
+# Load config file
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        source "$CONFIG_FILE"
+    fi
+}
+
+# Save config file
+save_config() {
+    cat > "$CONFIG_FILE" <<EOF
+# ClawFactory Instance Configuration
+INSTANCE_NAME="${INSTANCE_NAME:-}"
+GITHUB_USERNAME="${GITHUB_USERNAME:-}"
+EOF
+
+    # Also save to .env for docker-compose
+    cat > "${SCRIPT_DIR}/.env" <<EOF
+# Docker Compose environment (auto-generated)
+INSTANCE_NAME=${INSTANCE_NAME:-clawfactory}
+COMPOSE_PROJECT_NAME=clawfactory-${INSTANCE_NAME:-default}
+GITHUB_USERNAME=${GITHUB_USERNAME:-}
+EOF
 }
 
 prompt() {
@@ -50,58 +101,27 @@ prompt() {
     eval "$var_name=\"\$value\""
 }
 
-# Load existing value from secrets.yml using grep/sed (no yq dependency)
-load_secret() {
+# Load existing value from instance env files
+load_env_value() {
     local key="$1"
-    local file="${SECRETS_DIR}/secrets.yml"
+    local instance="${2:-${INSTANCE_NAME:-}}"
+    local file=""
+
+    # Determine which file to check based on key
+    case "$key" in
+        DISCORD_BOT_TOKEN|ANTHROPIC_API_KEY|GEMINI_API_KEY|OPENCLAW_GATEWAY_TOKEN)
+            file="${SECRETS_DIR}/${instance}/gateway.env"
+            ;;
+        GITHUB_WEBHOOK_SECRET|ALLOWED_MERGE_ACTORS|CONTROLLER_API_TOKEN)
+            file="${SECRETS_DIR}/${instance}/controller.env"
+            ;;
+        *)
+            return
+            ;;
+    esac
+
     [[ -f "$file" ]] || return
-
-    # Handle nested keys like discord.bot_token
-    if [[ "$key" == *"."* ]]; then
-        local parent="${key%%.*}"
-        local child="${key#*.}"
-        # Simple extraction - looks for "  child: value" after "parent:"
-        sed -n "/^${parent}:/,/^[a-z]/p" "$file" 2>/dev/null | \
-            grep "^  ${child}:" | \
-            sed 's/.*: *"\{0,1\}\([^"]*\)"\{0,1\}/\1/' | \
-            head -1
-    else
-        grep "^${key}:" "$file" 2>/dev/null | \
-            sed 's/.*: *"\{0,1\}\([^"]*\)"\{0,1\}/\1/' | \
-            head -1
-    fi
-}
-
-# Save current secrets state
-save_secrets() {
-    mkdir -p "${SECRETS_DIR}"
-    chmod 700 "${SECRETS_DIR}"
-
-    cat > "${SECRETS_DIR}/secrets.yml" <<EOF
-# ClawFactory Secrets
-# Generated: $(date -Iseconds)
-# chmod 600 this file!
-
-mode: ${MODE:-}
-
-discord:
-  bot_token: "${DISCORD_BOT_TOKEN:-}"
-  allowed_user_ids:
-    - "${DISCORD_USER_ID:-}"
-
-github:
-  username: "${GITHUB_USERNAME:-}"
-  webhook_secret: "${GITHUB_WEBHOOK_SECRET:-}"
-  allowed_merge_actors: "${GITHUB_ALLOWED_ACTORS:-}"
-  brain_repo: "${GITHUB_BRAIN_REPO:-}"
-
-anthropic:
-  api_key: "${ANTHROPIC_API_KEY:-}"
-
-gemini:
-  api_key: "${GEMINI_API_KEY:-}"
-EOF
-    chmod 600 "${SECRETS_DIR}/secrets.yml"
+    grep "^${key}=" "$file" 2>/dev/null | cut -d'=' -f2- | head -1
 }
 
 # ============================================================
@@ -128,48 +148,49 @@ preflight() {
 # Initialize Brain Repository (GitHub Fork)
 # ============================================================
 init_brain() {
-    info "Initializing sandyclaws brain repository..."
+    info "Initializing brain repository..."
 
-    mkdir -p "${SANDYCLAWS_DIR}"
-    mkdir -p "${SANDYCLAWS_DIR}/openclaw-home"
+    mkdir -p "${DATA_DIR}"
+    mkdir -p "${DATA_DIR}/openclaw-home"
 
-    local fork_repo="${GITHUB_USERNAME}/sandyclaws-brain"
+    local brain_repo_name="${INSTANCE_NAME}-brain"
+    local fork_repo="${GITHUB_USERNAME}/${brain_repo_name}"
     local fork_url="https://github.com/${fork_repo}.git"
 
     # Check if fork exists, if not create it
     if ! gh repo view "${fork_repo}" &>/dev/null; then
-        info "Forking openclaw/openclaw as sandyclaws-brain..."
-        gh repo fork openclaw/openclaw --clone=false --fork-name sandyclaws-brain
+        info "Forking openclaw/openclaw as ${brain_repo_name}..."
+        gh repo fork openclaw/openclaw --clone=false --fork-name "${brain_repo_name}"
         success "Created fork: ${fork_repo}"
     else
         success "Fork exists: ${fork_repo}"
     fi
 
     # Clone brain_work if not exists
-    if [[ ! -d "${SANDYCLAWS_DIR}/brain_work/.git" ]]; then
+    if [[ ! -d "${DATA_DIR}/brain_work/.git" ]]; then
         info "Cloning fork to brain_work..."
-        git clone "${fork_url}" "${SANDYCLAWS_DIR}/brain_work"
-        success "Cloned to sandyclaws/brain_work"
+        git clone "${fork_url}" "${DATA_DIR}/brain_work"
+        success "Cloned to data/brain_work"
     else
         success "brain_work already exists"
     fi
 
     # Clone brain_ro if not exists
-    if [[ ! -d "${SANDYCLAWS_DIR}/brain_ro/.git" ]]; then
+    if [[ ! -d "${DATA_DIR}/brain_ro/.git" ]]; then
         info "Cloning fork to brain_ro..."
-        git clone "${fork_url}" "${SANDYCLAWS_DIR}/brain_ro"
-        success "Cloned to sandyclaws/brain_ro"
+        git clone "${fork_url}" "${DATA_DIR}/brain_ro"
+        success "Cloned to data/brain_ro"
     else
         success "brain_ro already exists"
     fi
 
     # Create workspace/brain files if they don't exist
-    if [[ ! -f "${SANDYCLAWS_DIR}/brain_work/workspace/SOUL.md" ]]; then
+    if [[ ! -f "${DATA_DIR}/brain_work/workspace/SOUL.md" ]]; then
         info "Creating brain workspace files..."
-        mkdir -p "${SANDYCLAWS_DIR}/brain_work/workspace/skills"
-        mkdir -p "${SANDYCLAWS_DIR}/brain_work/workspace/memory"
+        mkdir -p "${DATA_DIR}/brain_work/workspace/skills"
+        mkdir -p "${DATA_DIR}/brain_work/workspace/memory"
 
-        cat > "${SANDYCLAWS_DIR}/brain_work/workspace/SOUL.md" <<'EOF'
+        cat > "${DATA_DIR}/brain_work/workspace/SOUL.md" <<'EOF'
 # Soul
 
 You are a helpful AI assistant running in the ClawFactory secure environment.
@@ -200,7 +221,7 @@ See `skills/propose.md` for detailed instructions.
 - Memory search is enabled for context recall
 EOF
 
-        cat > "${SANDYCLAWS_DIR}/brain_work/workspace/policies.yml" <<'EOF'
+        cat > "${DATA_DIR}/brain_work/workspace/policies.yml" <<'EOF'
 # Policies
 
 allowed_actions:
@@ -217,7 +238,7 @@ forbidden_actions:
   - docker_access
 EOF
 
-        cat > "${SANDYCLAWS_DIR}/brain_work/workspace/skills/propose.md" <<'EOF'
+        cat > "${DATA_DIR}/brain_work/workspace/skills/propose.md" <<'EOF'
 # Propose Changes Skill
 
 When you need to modify your configuration, use the proposal workflow.
@@ -230,7 +251,7 @@ When you need to modify your configuration, use the proposal workflow.
 4. Wait for approval
 EOF
 
-        cat > "${SANDYCLAWS_DIR}/brain_work/workspace/skills/memory-backup.md" <<'EOF'
+        cat > "${DATA_DIR}/brain_work/workspace/skills/memory-backup.md" <<'EOF'
 # Memory Backup Skill
 
 Your memories persist across restarts. To backup to GitHub:
@@ -242,7 +263,7 @@ curl -X POST http://controller:8080/memory/backup
 This commits memory files and pushes to GitHub for disaster recovery.
 EOF
 
-        cd "${SANDYCLAWS_DIR}/brain_work"
+        cd "${DATA_DIR}/brain_work"
         git add workspace/
         git commit -m "Add ClawFactory brain workspace files"
         git push origin main
@@ -254,7 +275,7 @@ EOF
     fi
 
     # Pull latest to brain_ro
-    cd "${SANDYCLAWS_DIR}/brain_ro"
+    cd "${DATA_DIR}/brain_ro"
     git pull origin main 2>/dev/null || true
     cd "${SCRIPT_DIR}"
 
@@ -270,34 +291,54 @@ configure_secrets() {
     mkdir -p "${SECRETS_DIR}"
     chmod 700 "${SECRETS_DIR}"
 
-    # Load any existing values as defaults
-    local saved_mode=$(load_secret "mode")
-    local saved_discord_token=$(load_secret "discord.bot_token")
-    local saved_discord_user=$(load_secret "discord.allowed_user_ids")
-    local saved_github_username=$(load_secret "github.username")
-    local saved_github_webhook=$(load_secret "github.webhook_secret")
-    local saved_github_repo=$(load_secret "github.brain_repo")
-    local saved_anthropic=$(load_secret "anthropic.api_key")
-    local saved_gemini=$(load_secret "gemini.api_key")
+    # Load existing config
+    load_config
 
-    # Clean up array notation from user ID
-    saved_discord_user="${saved_discord_user#- }"
+    # Instance name configuration
+    echo ""
+    echo "=== Instance Name ==="
+    echo "This identifies your ClawFactory instance (e.g., 'bot1', 'bot2', 'prod-agent')"
+    echo "Used for container names and token storage."
+    echo ""
 
-    # Track if we have all required secrets
-    local missing_secrets=false
+    # Try to derive default from directory name
+    local dir_name=$(basename "$SCRIPT_DIR")
+    local default_instance="${INSTANCE_NAME:-}"
+    if [[ -z "$default_instance" ]]; then
+        # Sanitize directory name as default
+        default_instance=$(echo "$dir_name" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | sed 's/^-//;s/-$//' | cut -c1-32)
+        [[ -z "$default_instance" ]] && default_instance="clawfactory"
+    fi
+
+    while true; do
+        prompt INSTANCE_NAME "Instance name" "$default_instance"
+        local validation_error
+        if validation_error=$(validate_instance_name "$INSTANCE_NAME"); then
+            break
+        else
+            error "$validation_error"
+            echo "Please try again."
+        fi
+    done
+    save_config
+    success "Instance name: $INSTANCE_NAME"
+
+    # Load any existing values from env files as defaults
+    local saved_discord_token=$(load_env_value "DISCORD_BOT_TOKEN")
+    local saved_anthropic=$(load_env_value "ANTHROPIC_API_KEY")
+    local saved_gemini=$(load_env_value "GEMINI_API_KEY")
+    local saved_github_webhook=$(load_env_value "GITHUB_WEBHOOK_SECRET")
+    local saved_github_actors=$(load_env_value "ALLOWED_MERGE_ACTORS")
+
+    # GitHub username can be derived from actors
+    local saved_github_username="${saved_github_actors%%,*}"
 
     echo ""
     echo "=== Mode Selection ==="
-    if [[ -n "$saved_mode" ]]; then
-        MODE="$saved_mode"
-        success "Mode: $MODE (saved)"
-    else
-        echo "online  - GitHub PRs for promotion, Cloudflare for ingress"
-        echo "offline - Local approval UI only"
-        echo ""
-        prompt MODE "Mode (online/offline)" "online"
-        save_secrets
-    fi
+    echo "online  - GitHub PRs for promotion, webhooks for updates"
+    echo "offline - Local approval UI only"
+    echo ""
+    prompt MODE "Mode (online/offline)" "online"
 
     echo ""
     echo "=== Discord Configuration ==="
@@ -306,15 +347,6 @@ configure_secrets() {
         success "Discord bot token (saved)"
     else
         prompt DISCORD_BOT_TOKEN "Discord bot token" "" true
-        save_secrets
-    fi
-
-    if [[ -n "$saved_discord_user" ]]; then
-        DISCORD_USER_ID="$saved_discord_user"
-        success "Discord user ID: $DISCORD_USER_ID (saved)"
-    else
-        prompt DISCORD_USER_ID "Your Discord user ID (for DM allowlist)"
-        save_secrets
     fi
 
     if [[ "$MODE" == "online" ]]; then
@@ -324,16 +356,14 @@ configure_secrets() {
             GITHUB_USERNAME="$saved_github_username"
             success "GitHub username: $GITHUB_USERNAME (saved)"
         else
-            echo ""
             prompt GITHUB_USERNAME "Your GitHub username"
-            save_secrets
         fi
 
         if [[ -n "$saved_github_webhook" ]]; then
             GITHUB_WEBHOOK_SECRET="$saved_github_webhook"
-            GITHUB_BRAIN_REPO="${saved_github_repo:-sandyclaws-brain}"
+            GITHUB_BRAIN_REPO="${INSTANCE_NAME}-brain"
             success "GitHub webhook secret (saved)"
-            success "Brain repo: $GITHUB_BRAIN_REPO (saved)"
+            success "Brain repo: $GITHUB_BRAIN_REPO"
             AUTO_GITHUB=false
         else
             echo ""
@@ -350,18 +380,16 @@ configure_secrets() {
 
             if [[ "$auto_github" =~ ^[Yy]$ ]]; then
                 prompt GITHUB_TOKEN "GitHub personal access token" "" true
-                prompt GITHUB_BRAIN_REPO "Brain repository name (will be created if doesn't exist)" "${saved_github_repo:-sandyclaws-brain}"
-                save_secrets
+                prompt GITHUB_BRAIN_REPO "Brain repository name (will be created if doesn't exist)" "${INSTANCE_NAME}-brain"
 
                 GITHUB_WEBHOOK_SECRET=$(openssl rand -hex 32)
                 info "Generated webhook secret automatically"
-                save_secrets
 
                 AUTO_GITHUB=true
             else
                 AUTO_GITHUB=false
                 GITHUB_TOKEN=""
-                GITHUB_BRAIN_REPO="${saved_github_repo:-sandyclaws-brain}"
+                GITHUB_BRAIN_REPO="${INSTANCE_NAME}-brain"
                 echo ""
                 echo "Manual webhook setup required."
                 echo ""
@@ -380,7 +408,6 @@ configure_secrets() {
                 echo "  Events: Pull requests only"
                 echo ""
                 prompt GITHUB_WEBHOOK_SECRET "GitHub webhook secret" "" true
-                save_secrets
             fi
         fi
 
@@ -393,7 +420,6 @@ configure_secrets() {
             success "Anthropic API key (saved)"
         else
             prompt ANTHROPIC_API_KEY "Anthropic API key" "" true
-            save_secrets
         fi
 
         echo ""
@@ -406,7 +432,6 @@ configure_secrets() {
             success "Gemini API key (saved)"
         else
             prompt GEMINI_API_KEY "Gemini API key (optional, for memory)" "" true
-            save_secrets
         fi
     else
         GITHUB_USERNAME=""
@@ -420,7 +445,6 @@ configure_secrets() {
             success "Anthropic API key (saved)"
         else
             prompt ANTHROPIC_API_KEY "Anthropic API key (or leave empty for local LLM)" "" true
-            save_secrets
         fi
 
         echo ""
@@ -430,30 +454,105 @@ configure_secrets() {
             success "Gemini API key (saved)"
         else
             prompt GEMINI_API_KEY "Gemini API key (optional)" "" true
-            save_secrets
         fi
     fi
 
-    # Generate env files for containers
-    cat > "${SECRETS_DIR}/gateway.env" <<EOF
-# Gateway environment
+    # Generate or load API tokens (instance-specific)
+    info "Configuring API tokens for instance '${INSTANCE_NAME}'..."
+
+    local TOKEN_FILE="${SECRETS_DIR}/tokens.env"
+    local GATEWAY_TOKEN_VAR="${INSTANCE_NAME}_gateway_token"
+    local CONTROLLER_TOKEN_VAR="${INSTANCE_NAME}_controller_token"
+
+    # Load existing tokens if they exist
+    local GATEWAY_TOKEN=""
+    local CONTROLLER_TOKEN=""
+    if [[ -f "$TOKEN_FILE" ]]; then
+        source "$TOKEN_FILE"
+        # Use indirect variable reference to get instance-specific tokens
+        GATEWAY_TOKEN="${!GATEWAY_TOKEN_VAR:-}"
+        CONTROLLER_TOKEN="${!CONTROLLER_TOKEN_VAR:-}"
+    fi
+
+    # Generate new tokens if not found
+    if [[ -z "$GATEWAY_TOKEN" ]]; then
+        GATEWAY_TOKEN=$(openssl rand -hex 32)
+        success "Generated new gateway token for ${INSTANCE_NAME}"
+    else
+        success "Using existing gateway token for ${INSTANCE_NAME}"
+    fi
+
+    if [[ -z "$CONTROLLER_TOKEN" ]]; then
+        CONTROLLER_TOKEN=$(openssl rand -hex 32)
+        success "Generated new controller token for ${INSTANCE_NAME}"
+    else
+        success "Using existing controller token for ${INSTANCE_NAME}"
+    fi
+
+    # Save tokens to tokens.env (append/update instance-specific tokens)
+    # First, load all existing tokens
+    declare -A all_tokens
+    if [[ -f "$TOKEN_FILE" ]]; then
+        while IFS='=' read -r key value; do
+            [[ -z "$key" || "$key" =~ ^# ]] && continue
+            all_tokens["$key"]="$value"
+        done < "$TOKEN_FILE"
+    fi
+
+    # Update with current instance tokens
+    all_tokens["${INSTANCE_NAME}_gateway_token"]="$GATEWAY_TOKEN"
+    all_tokens["${INSTANCE_NAME}_controller_token"]="$CONTROLLER_TOKEN"
+
+    # Write all tokens back
+    cat > "$TOKEN_FILE" <<EOF
+# ClawFactory API Tokens
+# Generated tokens for each instance (do not edit manually)
+# Format: {instance}_gateway_token, {instance}_controller_token
+EOF
+    for key in "${!all_tokens[@]}"; do
+        echo "${key}=${all_tokens[$key]}" >> "$TOKEN_FILE"
+    done
+    chmod 600 "$TOKEN_FILE"
+
+    # Generate env files for containers in instance-specific folder
+    local INSTANCE_SECRETS_DIR="${SECRETS_DIR}/${INSTANCE_NAME}"
+    mkdir -p "${INSTANCE_SECRETS_DIR}"
+    chmod 700 "${INSTANCE_SECRETS_DIR}"
+
+    cat > "${INSTANCE_SECRETS_DIR}/gateway.env" <<EOF
+# Gateway environment for instance: ${INSTANCE_NAME}
 DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
 ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
 GEMINI_API_KEY=${GEMINI_API_KEY}
+
+# Gateway API token (for authenticating requests TO gateway)
+OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}
 EOF
 
-    cat > "${SECRETS_DIR}/controller.env" <<EOF
-# Controller environment
+    cat > "${INSTANCE_SECRETS_DIR}/controller.env" <<EOF
+# Controller environment for instance: ${INSTANCE_NAME}
 GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}
 ALLOWED_MERGE_ACTORS=${GITHUB_ALLOWED_ACTORS}
+
+# Controller's own API token (for authenticating requests TO controller)
+CONTROLLER_API_TOKEN=${CONTROLLER_TOKEN}
+
+# Gateway token (for controller to call gateway API)
+OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}
+
+# Instance name
+INSTANCE_NAME=${INSTANCE_NAME}
 EOF
 
-    chmod 600 "${SECRETS_DIR}"/*.env
+    chmod 600 "${INSTANCE_SECRETS_DIR}"/*.env
 
     # Auto-configure GitHub if requested
     if [[ "${AUTO_GITHUB:-false}" == "true" ]] && [[ -n "${GITHUB_TOKEN:-}" ]]; then
         configure_github_auto
     fi
+
+    # Update config with GITHUB_USERNAME for docker-compose
+    save_config
 
     success "Secrets configured"
 }
@@ -480,7 +579,7 @@ configure_github_auto() {
             -H "$auth_header" \
             -H "Content-Type: application/json" \
             "${api_base}/user/repos" \
-            -d "{\"name\":\"${GITHUB_BRAIN_REPO}\",\"private\":true,\"description\":\"SandyClaws brain repository\"}")
+            -d "{\"name\":\"${GITHUB_BRAIN_REPO}\",\"private\":true,\"description\":\"ClawFactory brain repository\"}")
 
         if echo "$create_result" | grep -q '"id"'; then
             success "Created repository"
@@ -524,12 +623,12 @@ configure_github_auto() {
 
     # Update local brain to push to GitHub
     info "Configuring local brain to push to GitHub..."
-    cd "${SANDYCLAWS_DIR}/brain_work"
+    cd "${DATA_DIR}/brain_work"
     git remote set-url origin "https://github.com/${GITHUB_USERNAME}/${GITHUB_BRAIN_REPO}.git" 2>/dev/null || \
         git remote add origin "https://github.com/${GITHUB_USERNAME}/${GITHUB_BRAIN_REPO}.git"
 
     # Update bare repo remote too
-    cd "${SANDYCLAWS_DIR}/brain.git"
+    cd "${DATA_DIR}/brain.git"
     git remote add github "https://github.com/${GITHUB_USERNAME}/${GITHUB_BRAIN_REPO}.git" 2>/dev/null || true
 
     cd "${SCRIPT_DIR}"
@@ -541,7 +640,7 @@ configure_github_auto() {
     echo "Webhook URL: ${CONTROLLER_URL}/webhook/github"
     echo ""
     echo "Note: You may need to push the initial brain content to GitHub:"
-    echo "  cd sandyclaws/brain_work && git push -u origin main"
+    echo "  cd data/brain_work && git push -u origin main"
     echo ""
 }
 
@@ -637,50 +736,124 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Load default instance configuration
+if [[ -f "${SCRIPT_DIR}/.clawfactory.conf" ]]; then
+    source "${SCRIPT_DIR}/.clawfactory.conf"
+fi
+
+# Parse -i/--instance flag
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -i|--instance)
+            INSTANCE_NAME="$2"
+            shift 2
+            ;;
+        -i=*|--instance=*)
+            INSTANCE_NAME="${1#*=}"
+            shift
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+INSTANCE_NAME="${INSTANCE_NAME:-default}"
+export INSTANCE_NAME
+export COMPOSE_PROJECT_NAME="clawfactory-${INSTANCE_NAME}"
+
+COMPOSE_CMD="docker compose -f ${SCRIPT_DIR}/docker-compose.yml"
+CONTAINER_PREFIX="clawfactory-${INSTANCE_NAME}"
+
 case "${1:-help}" in
     start)
-        docker compose -f "${SCRIPT_DIR}/docker-compose.yml" up -d
-        echo "✓ ClawFactory started"
+        ${COMPOSE_CMD} up -d
+        echo "✓ ClawFactory [${INSTANCE_NAME}] started"
+        echo "  Gateway:    http://localhost:18789"
+        echo "  Controller: http://localhost:8080/controller"
         ;;
     stop)
-        docker compose -f "${SCRIPT_DIR}/docker-compose.yml" down
-        echo "✓ ClawFactory stopped"
+        ${COMPOSE_CMD} down
+        echo "✓ ClawFactory [${INSTANCE_NAME}] stopped"
         ;;
     restart)
-        docker compose -f "${SCRIPT_DIR}/docker-compose.yml" restart
+        ${COMPOSE_CMD} up -d --force-recreate
+        echo "✓ ClawFactory [${INSTANCE_NAME}] restarted"
         ;;
     status)
-        docker compose -f "${SCRIPT_DIR}/docker-compose.yml" ps
+        ${COMPOSE_CMD} ps -a
         ;;
     logs)
         container="${2:-gateway}"
-        docker logs -f "clawfactory-${container}"
+        docker logs -f "${CONTAINER_PREFIX}-${container}"
         ;;
     shell)
         container="${2:-gateway}"
-        docker exec -it "clawfactory-${container}" /bin/bash
+        docker exec -it "${CONTAINER_PREFIX}-${container}" /bin/bash
         ;;
-    promote)
-        echo "Opening promotion UI..."
-        echo "http://127.0.0.1:8080/promote"
+    controller)
+        echo "Controller UI for [${INSTANCE_NAME}]:"
+        echo "http://127.0.0.1:8080/controller"
         ;;
     audit)
         curl -s http://127.0.0.1:8080/audit | jq '.entries[-10:]'
         ;;
-    *)
-        echo "ClawFactory - Agent Runtime"
+    info)
+        echo "Instance: ${INSTANCE_NAME}"
+        echo "Containers: ${CONTAINER_PREFIX}-{gateway,controller,proxy}"
+        # Show tokens if available
+        if [[ -f "${SCRIPT_DIR}/secrets/tokens.env" ]]; then
+            source "${SCRIPT_DIR}/secrets/tokens.env"
+            gw_var="${INSTANCE_NAME}_gateway_token"
+            ctrl_var="${INSTANCE_NAME}_controller_token"
+            echo ""
+            echo "Gateway token:    ${!gw_var:-<not set>}"
+            echo "Controller token: ${!ctrl_var:-<not set>}"
+        fi
+        ;;
+    list)
+        echo "Configured instances:"
+        if [[ -f "${SCRIPT_DIR}/secrets/tokens.env" ]]; then
+            grep '_gateway_token=' "${SCRIPT_DIR}/secrets/tokens.env" 2>/dev/null | sed 's/_gateway_token=.*//' | sort -u | sed 's/^/  /'
+        elif [[ -f "${SCRIPT_DIR}/.clawfactory.conf" ]]; then
+            source "${SCRIPT_DIR}/.clawfactory.conf"
+            echo "  ${INSTANCE_NAME:-default}"
+        else
+            echo "  (none - run install.sh first)"
+        fi
         echo ""
-        echo "Usage: ./clawfactory.sh <command>"
+        echo "Running containers:"
+        docker ps --filter "name=clawfactory-" --format "table {{.Names}}\t{{.Status}}" 2>/dev/null || echo "  (none)"
+        ;;
+    *)
+        echo "ClawFactory - Agent Runtime [${INSTANCE_NAME}]"
+        echo ""
+        echo "Usage: ./clawfactory.sh [-i <instance>] <command>"
+        echo ""
+        echo "Options:"
+        echo "  -i, --instance <name>   Specify instance (default: from .clawfactory.conf)"
         echo ""
         echo "Commands:"
-        echo "  start           Start all containers"
+        echo "  start           Start containers"
         echo "  stop            Stop all containers"
         echo "  restart         Restart all containers"
         echo "  status          Show container status"
-        echo "  logs [name]     Follow logs (gateway/controller)"
-        echo "  shell [name]    Open shell in container"
-        echo "  promote         Open promotion UI"
+        echo "  logs [service]  Follow logs (gateway/proxy/controller)"
+        echo "  shell [service] Open shell in container"
+        echo "  controller      Show controller URL"
         echo "  audit           Show recent audit log"
+        echo "  info            Show instance info and tokens"
+        echo "  list            List all instances and running containers"
+        echo ""
+        echo "Examples:"
+        echo "  ./clawfactory.sh start              # Start default instance"
+        echo "  ./clawfactory.sh -i bot1 start      # Start 'bot1' instance"
+        echo "  ./clawfactory.sh -i bot1 stop       # Stop 'bot1' instance"
+        echo "  ./clawfactory.sh list               # List all instances"
+        echo ""
+        echo "Local access:"
+        echo "  Gateway:    http://localhost:18789"
+        echo "  Controller: http://localhost:8080/controller"
         ;;
 esac
 EOF
@@ -700,8 +873,8 @@ secrets/
 
 # Runtime state
 audit/
-sandyclaws/brain_ro/
-sandyclaws/brain_work/
+data/brain_ro/
+data/brain_work/
 
 # OS
 .DS_Store
@@ -734,10 +907,16 @@ main() {
     echo ""
     success "Installation complete!"
     echo ""
+    echo "Instance: ${INSTANCE_NAME}"
+    echo ""
     echo "Next steps:"
-    echo "  1. Review secrets/secrets.yml"
-    echo "  2. Run: ./clawfactory.sh start"
-    echo "  3. Check: ./clawfactory.sh status"
+    echo "  1. Run: ./clawfactory.sh start"
+    echo "  2. Check: ./clawfactory.sh status"
+    echo "  3. View tokens: ./clawfactory.sh info"
+    echo ""
+    echo "Access:"
+    echo "  Gateway:    http://localhost:18789"
+    echo "  Controller: http://localhost:8080/controller?token=<your-token>"
     echo ""
     echo "For emergencies: ./killswitch.sh lock"
     echo ""

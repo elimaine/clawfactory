@@ -17,7 +17,7 @@ This guide sets up secure remote access to ClawFactory via Cloudflare Zero Trust
 
 ### Option A: Via Dashboard (Recommended)
 
-1. Go to **Zero Trust** → **Networks** → **Tunnels**
+1. Go to **Zero Trust** → **Networks** → **Routes**
 2. Click **Create a tunnel**
 3. Name it `clawfactory`
 4. Choose **Cloudflared** connector

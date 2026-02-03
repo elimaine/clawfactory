@@ -1,6 +1,6 @@
 # TODO: Custom Runner Sandbox
 
-If OpenClaw's native sandbox proves insufficient for the SANDYCLAW security model, implement a dedicated Runner container.
+If OpenClaw's native sandbox proves insufficient for the ClawFactory security model, implement a dedicated Runner container.
 
 ## When to implement
 
@@ -81,8 +81,8 @@ runner:
   cap_drop:
     - ALL
   volumes:
-    - ./sandyclaws/brain_work:/workspace/brain_work:rw
-    - ./sandyclaws/brain.git:/workspace/brain.git:rw
+    - ./data/brain_work:/workspace/brain_work:rw
+    - ./data/brain.git:/workspace/brain.git:rw
     - socket-volume:/run/clawfactory
 ```
 

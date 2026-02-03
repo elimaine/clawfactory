@@ -1,20 +1,21 @@
 # ClawFactory Docker Compose
 # Gateway (OpenClaw) + Controller (authority)
 #
-# Usage:
-#   Local only:    docker compose up -d
-#   With tunnel:   docker compose --profile tunnel up -d
+# Usage: ./clawfactory.sh start
+# See todo/cloudflare/ for remote access setup
+#
+# Instance name is read from .env file (INSTANCE_NAME)
+# Container names: clawfactory-{instance}-{service}
 
 services:
   # ============================================================
   # Proxy: Nginx reverse proxy for local access
   # - Binds to localhost for secure local access
   # - Routes to gateway and controller inside Docker network
-  # - Also serves as entry point for Cloudflare tunnel
   # ============================================================
   proxy:
     image: nginx:alpine
-    container_name: clawfactory-proxy
+    container_name: clawfactory-${INSTANCE_NAME:-default}-proxy
     restart: unless-stopped
     volumes:
       - ./proxy/nginx.conf:/etc/nginx/nginx.conf:ro
@@ -34,26 +35,6 @@ services:
       retries: 3
 
   # ============================================================
-  # Tunnel: Cloudflare Zero Trust tunnel (OPTIONAL)
-  # - Enable with: docker compose --profile tunnel up -d
-  # - Requires CF_TUNNEL_TOKEN in secrets/tunnel.env
-  # - See docs/cloudflare-tunnel-setup.md for setup instructions
-  # ============================================================
-  tunnel:
-    image: cloudflare/cloudflared:latest
-    container_name: clawfactory-tunnel
-    restart: unless-stopped
-    profiles:
-      - tunnel
-    command: tunnel run
-    env_file:
-      - ./secrets/tunnel.env
-    networks:
-      - clawfactory
-    depends_on:
-      - proxy
-
-  # ============================================================
   # Gateway: OpenClaw agent runtime
   # - Connects to Discord
   # - Makes LLM calls
@@ -62,19 +43,21 @@ services:
   # ============================================================
   gateway:
     build:
-      context: ./sandyclaws/brain_ro
+      context: ./data/brain_ro
       dockerfile: Dockerfile
-    image: clawfactory-gateway:local
-    container_name: clawfactory-gateway
+    image: clawfactory-gateway:${INSTANCE_NAME:-local}
+    container_name: clawfactory-${INSTANCE_NAME:-default}-gateway
     restart: unless-stopped
     env_file:
-      - ./secrets/gateway.env
+      - ./secrets/${INSTANCE_NAME:-default}/gateway.env
     environment:
       - OPENCLAW_GATEWAY_MODE=local
       - OPENCLAW_GATEWAY_AUTH=none
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
+        # Secure state directory permissions
+        chmod 700 /home/node/.openclaw 2>/dev/null || true
         # Sync approved brain files from brain_ro/workspace to OpenClaw workspace on startup
         echo "[startup] Syncing workspace from approved brain_ro..."
         cp -r /workspace/brain_ro/workspace/*.md /home/node/.openclaw/workspace/ 2>/dev/null || true
@@ -91,18 +74,18 @@ services:
         # Run minimal setup then start gateway
         node dist/index.js onboard --non-interactive --accept-risk --mode local \
           --skip-daemon --skip-channels --skip-skills --skip-health --skip-ui \
-          --gateway-auth token --gateway-token clawfactory-internal && \
-        node dist/index.js gateway --port 18789
+          --gateway-auth token --gateway-token "$$OPENCLAW_GATEWAY_TOKEN" && \
+        node dist/index.js gateway --port 18789 --bind lan
     user: "1000:1000"  # Run as node user
     volumes:
       # OpenClaw home directory (config, state, workspace)
-      - ./sandyclaws/openclaw-home:/home/node/.openclaw
+      - ./data/openclaw-home:/home/node/.openclaw
       # Approved brain (OpenClaw fork, read-only)
-      - ./sandyclaws/brain_ro:/workspace/brain_ro:ro
+      - ./data/brain_ro:/workspace/brain_ro:ro
       # Proposal workspace (OpenClaw fork clone, agent pushes branches here)
-      - ./sandyclaws/brain_work:/workspace/proposals:rw
+      - ./data/brain_work:/workspace/proposals:rw
       # Memory persists directly in brain_work (survives restarts, can be committed)
-      - ./sandyclaws/brain_work/workspace/memory:/home/node/.openclaw/workspace/memory:rw
+      - ./data/brain_work/workspace/memory:/home/node/.openclaw/workspace/memory:rw
       # Temp filesystem
       - type: tmpfs
         target: /tmp
@@ -127,23 +110,25 @@ services:
     build:
       context: ./controller
       dockerfile: Dockerfile
-    container_name: clawfactory-controller
+    container_name: clawfactory-${INSTANCE_NAME:-default}-controller
     restart: unless-stopped
     env_file:
-      - ./secrets/controller.env
+      - ./secrets/${INSTANCE_NAME:-default}/controller.env
     environment:
-      - BRAIN_RO=/srv/sandyclaws/brain_ro
-      - BRAIN_WORK=/srv/sandyclaws/brain_work
+      - BRAIN_RO=/srv/data/brain_ro
+      - BRAIN_WORK=/srv/data/brain_work
       - OPENCLAW_HOME=/srv/openclaw-home
       - AUDIT_LOG=/srv/audit/audit.jsonl
-      - GITHUB_REPO=elimaine/sandyclaws-brain
+      - GITHUB_REPO=${GITHUB_USERNAME:-}/${INSTANCE_NAME:-default}-brain
+      - INSTANCE_NAME=${INSTANCE_NAME:-default}
+      - GATEWAY_CONTAINER=clawfactory-${INSTANCE_NAME:-default}-gateway
     volumes:
       # Brain directories: Controller pulls from GitHub to brain_ro
-      - ./sandyclaws/brain_ro:/srv/sandyclaws/brain_ro:rw
+      - ./data/brain_ro:/srv/data/brain_ro:rw
       # brain_work: Controller can commit memory backups
-      - ./sandyclaws/brain_work:/srv/sandyclaws/brain_work:rw
+      - ./data/brain_work:/srv/data/brain_work:rw
       # OpenClaw home: Read memory files for backup
-      - ./sandyclaws/openclaw-home:/srv/openclaw-home:ro
+      - ./data/openclaw-home:/srv/openclaw-home:ro
       # Audit log
       - ./audit:/srv/audit:rw
       # Docker socket for restarting gateway
