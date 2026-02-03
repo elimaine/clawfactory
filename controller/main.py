@@ -4,7 +4,7 @@ ClawFactory Controller - Authority & Promotion Service
 
 Responsibilities:
 - Receive GitHub webhooks (PR merged → promote)
-- Perform promotions (brain_work → brain_ro)
+- Perform promotions (working_repo → approved)
 - Restart Gateway after promotion
 - Host approval UI for offline mode
 - Audit logging
@@ -25,8 +25,8 @@ from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Requ
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 # Configuration from environment
-BRAIN_RO = Path(os.environ.get("BRAIN_RO", "/srv/data/brain_ro"))
-BRAIN_WORK = Path(os.environ.get("BRAIN_WORK", "/srv/data/brain_work"))
+APPROVED_DIR = Path(os.environ.get("APPROVED_DIR", "/srv/bot/approved"))
+WORKING_REPO = Path(os.environ.get("WORKING_REPO", "/srv/bot/working_repo"))
 OPENCLAW_HOME = Path(os.environ.get("OPENCLAW_HOME", "/srv/openclaw-home"))
 AUDIT_LOG = Path(os.environ.get("AUDIT_LOG", "/srv/audit/audit.jsonl"))
 GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
@@ -165,7 +165,7 @@ def git_fetch_main() -> bool:
     try:
         result = subprocess.run(
             ["git", "fetch", "origin", "main"],
-            cwd=BRAIN_RO,
+            cwd=APPROVED_DIR,
             capture_output=True,
             text=True,
             timeout=60,
@@ -181,7 +181,7 @@ def git_get_main_sha() -> Optional[str]:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            cwd=BRAIN_RO,
+            cwd=APPROVED_DIR,
             capture_output=True,
             text=True,
         )
@@ -197,7 +197,7 @@ def git_get_remote_sha() -> Optional[str]:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "origin/main"],
-            cwd=BRAIN_RO,
+            cwd=APPROVED_DIR,
             capture_output=True,
             text=True,
         )
@@ -210,7 +210,7 @@ def git_get_remote_sha() -> Optional[str]:
 
 def promote_sha(sha: str) -> bool:
     """
-    Promote a SHA to brain_ro by checking it out.
+    Promote a SHA to approved by checking it out.
 
     This is the ONLY way active config changes.
     """
@@ -218,7 +218,7 @@ def promote_sha(sha: str) -> bool:
         # Fetch first to ensure we have the SHA
         subprocess.run(
             ["git", "fetch", "origin"],
-            cwd=BRAIN_RO,
+            cwd=APPROVED_DIR,
             capture_output=True,
             text=True,
             timeout=60,
@@ -227,7 +227,7 @@ def promote_sha(sha: str) -> bool:
         # Checkout the SHA
         result = subprocess.run(
             ["git", "checkout", sha],
-            cwd=BRAIN_RO,
+            cwd=APPROVED_DIR,
             capture_output=True,
             text=True,
             timeout=30,
@@ -244,11 +244,11 @@ def promote_sha(sha: str) -> bool:
 
 
 def promote_main() -> bool:
-    """Pull latest main branch to brain_ro."""
+    """Pull latest main branch to approved."""
     try:
         result = subprocess.run(
             ["git", "pull", "origin", "main"],
-            cwd=BRAIN_RO,
+            cwd=APPROVED_DIR,
             capture_output=True,
             text=True,
             timeout=60,
@@ -405,13 +405,13 @@ async def promote_ui(
             """, status_code=401)
 
     # Fetch latest from remote
-    subprocess.run(["git", "fetch", "origin"], cwd=BRAIN_RO, capture_output=True)
+    subprocess.run(["git", "fetch", "origin"], cwd=APPROVED_DIR, capture_output=True)
 
     # Get recent commits on origin/main
     try:
         result = subprocess.run(
             ["git", "log", "origin/main", "--oneline", "-10"],
-            cwd=BRAIN_RO,
+            cwd=APPROVED_DIR,
             capture_output=True,
             text=True,
         )
@@ -1002,7 +1002,7 @@ async def status():
         gateway_status = "unknown"
 
     return {
-        "brain_sha": current_sha,
+        "approved_sha": current_sha,
         "gateway_status": gateway_status,
         "audit_log": str(AUDIT_LOG),
     }
@@ -1028,13 +1028,13 @@ async def get_audit(limit: int = 50):
 
 def backup_memory() -> dict:
     """
-    List memory files in brain_work ready for commit.
+    List memory files in working_repo ready for commit.
 
-    Memory now persists directly in brain_work via volume mount,
+    Memory now persists directly in working_repo via volume mount,
     so no copying is needed - just list what's there.
     """
-    memory_dir = BRAIN_WORK / "workspace" / "memory"
-    long_term = BRAIN_WORK / "workspace" / "MEMORY.md"
+    memory_dir = WORKING_REPO / "workspace" / "memory"
+    long_term = WORKING_REPO / "workspace" / "MEMORY.md"
 
     files = []
 
@@ -1053,14 +1053,14 @@ def commit_and_push_memory() -> bool:
         # Add memory files
         subprocess.run(
             ["git", "add", "workspace/memory/", "workspace/MEMORY.md"],
-            cwd=BRAIN_WORK,
+            cwd=WORKING_REPO,
             capture_output=True,
         )
 
         # Check if there are changes to commit
         result = subprocess.run(
             ["git", "diff", "--cached", "--quiet"],
-            cwd=BRAIN_WORK,
+            cwd=WORKING_REPO,
         )
         if result.returncode == 0:
             # No changes
@@ -1071,7 +1071,7 @@ def commit_and_push_memory() -> bool:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         result = subprocess.run(
             ["git", "commit", "-m", f"Backup agent memory - {timestamp}"],
-            cwd=BRAIN_WORK,
+            cwd=WORKING_REPO,
             capture_output=True,
             text=True,
         )
@@ -1082,7 +1082,7 @@ def commit_and_push_memory() -> bool:
         # Push
         result = subprocess.run(
             ["git", "push", "origin", "main"],
-            cwd=BRAIN_WORK,
+            cwd=WORKING_REPO,
             capture_output=True,
             text=True,
             timeout=60,

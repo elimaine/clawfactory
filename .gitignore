@@ -16,9 +16,8 @@ killswitch.sh
 # =====================
 # Runtime state
 # =====================
-# Brain directories (created by install.sh)
-data/
-brain/
+# Bot repos (created by install.sh)
+bot_repos/
 
 # Audit logs
 audit/
@@ -42,4 +41,3 @@ audit/
 __pycache__/
 *.pyc
 .venv/
-data/openclaw-home/

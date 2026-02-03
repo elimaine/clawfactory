@@ -39,11 +39,11 @@ services:
   # - Connects to Discord
   # - Makes LLM calls
   # - Uses OpenClaw's native sandbox for tool execution
-  # - READ-ONLY access to brain_ro, WRITE to brain_work
+  # - READ-ONLY access to approved/, WRITE to workspace/
   # ============================================================
   gateway:
     build:
-      context: ./data/brain_ro
+      context: ./bot_repos/${INSTANCE_NAME:-default}/approved
       dockerfile: Dockerfile
     image: clawfactory-gateway:${INSTANCE_NAME:-local}
     container_name: clawfactory-${INSTANCE_NAME:-default}-gateway
@@ -58,17 +58,17 @@ services:
       - |
         # Secure state directory permissions
         chmod 700 /home/node/.openclaw 2>/dev/null || true
-        # Sync approved brain files from brain_ro/workspace to OpenClaw workspace on startup
-        echo "[startup] Syncing workspace from approved brain_ro..."
-        cp -r /workspace/brain_ro/workspace/*.md /home/node/.openclaw/workspace/ 2>/dev/null || true
-        cp -r /workspace/brain_ro/workspace/skills /home/node/.openclaw/workspace/ 2>/dev/null || true
-        cp -r /workspace/brain_ro/workspace/policies.yml /home/node/.openclaw/workspace/ 2>/dev/null || true
-        # Memory persists directly via volume mount to brain_work/workspace/memory
+        # Sync approved config files to OpenClaw workspace on startup
+        echo "[startup] Syncing workspace from approved config..."
+        cp -r /workspace/approved/workspace/*.md /home/node/.openclaw/workspace/ 2>/dev/null || true
+        cp -r /workspace/approved/workspace/skills /home/node/.openclaw/workspace/ 2>/dev/null || true
+        cp -r /workspace/approved/workspace/policies.yml /home/node/.openclaw/workspace/ 2>/dev/null || true
+        # Memory persists directly via volume mount to workspace/memory
         # No copy needed - memory survives restarts and can be committed to git
         mkdir -p /home/node/.openclaw/workspace/memory
-        # Only copy MEMORY.md if it exists in brain_ro and not locally
-        if [ -f "/workspace/brain_ro/workspace/MEMORY.md" ] && [ ! -f "/home/node/.openclaw/workspace/MEMORY.md" ]; then
-          cp /workspace/brain_ro/workspace/MEMORY.md /home/node/.openclaw/workspace/ 2>/dev/null || true
+        # Only copy MEMORY.md if it exists in approved and not locally
+        if [ -f "/workspace/approved/workspace/MEMORY.md" ] && [ ! -f "/home/node/.openclaw/workspace/MEMORY.md" ]; then
+          cp /workspace/approved/workspace/MEMORY.md /home/node/.openclaw/workspace/ 2>/dev/null || true
         fi
         echo "[startup] Workspace synced"
         # Run minimal setup then start gateway
@@ -79,13 +79,13 @@ services:
     user: "1000:1000"  # Run as node user
     volumes:
       # OpenClaw home directory (config, state, workspace)
-      - ./data/openclaw-home:/home/node/.openclaw
-      # Approved brain (OpenClaw fork, read-only)
-      - ./data/brain_ro:/workspace/brain_ro:ro
+      - ./bot_repos/${INSTANCE_NAME:-default}/state:/home/node/.openclaw
+      # Approved config (OpenClaw fork, read-only)
+      - ./bot_repos/${INSTANCE_NAME:-default}/approved:/workspace/approved:ro
       # Proposal workspace (OpenClaw fork clone, agent pushes branches here)
-      - ./data/brain_work:/workspace/proposals:rw
-      # Memory persists directly in brain_work (survives restarts, can be committed)
-      - ./data/brain_work/workspace/memory:/home/node/.openclaw/workspace/memory:rw
+      - ./bot_repos/${INSTANCE_NAME:-default}/working_repo:/workspace/proposals:rw
+      # Memory persists directly in workspace (survives restarts, can be committed)
+      - ./bot_repos/${INSTANCE_NAME:-default}/working_repo/workspace/memory:/home/node/.openclaw/workspace/memory:rw
       # Temp filesystem
       - type: tmpfs
         target: /tmp
@@ -102,7 +102,7 @@ services:
   # ============================================================
   # Controller: Authority & promotion
   # - Receives GitHub webhooks
-  # - Performs promotions (brain_work → brain_ro)
+  # - Performs promotions (workspace → approved)
   # - Restarts Gateway
   # - Hosts approval UI (for offline mode)
   # ============================================================
@@ -115,20 +115,20 @@ services:
     env_file:
       - ./secrets/${INSTANCE_NAME:-default}/controller.env
     environment:
-      - BRAIN_RO=/srv/data/brain_ro
-      - BRAIN_WORK=/srv/data/brain_work
-      - OPENCLAW_HOME=/srv/openclaw-home
+      - APPROVED_DIR=/srv/bot/approved
+      - WORKING_REPO=/srv/bot/working_repo
+      - OPENCLAW_HOME=/srv/bot/state
       - AUDIT_LOG=/srv/audit/audit.jsonl
-      - GITHUB_REPO=${GITHUB_USERNAME:-}/${INSTANCE_NAME:-default}-brain
+      - GITHUB_REPO=${GITHUB_ORG:-${GITHUB_USERNAME}}/${INSTANCE_NAME:-default}-bot
       - INSTANCE_NAME=${INSTANCE_NAME:-default}
       - GATEWAY_CONTAINER=clawfactory-${INSTANCE_NAME:-default}-gateway
     volumes:
-      # Brain directories: Controller pulls from GitHub to brain_ro
-      - ./data/brain_ro:/srv/data/brain_ro:rw
-      # brain_work: Controller can commit memory backups
-      - ./data/brain_work:/srv/data/brain_work:rw
-      # OpenClaw home: Read memory files for backup
-      - ./data/openclaw-home:/srv/openclaw-home:ro
+      # Approved config: Controller pulls from GitHub here
+      - ./bot_repos/${INSTANCE_NAME:-default}/approved:/srv/bot/approved:rw
+      # Working repo: Controller can commit memory backups
+      - ./bot_repos/${INSTANCE_NAME:-default}/working_repo:/srv/bot/working_repo:rw
+      # OpenClaw state: Read memory files for backup
+      - ./bot_repos/${INSTANCE_NAME:-default}/state:/srv/bot/state:ro
       # Audit log
       - ./audit:/srv/audit:rw
       # Docker socket for restarting gateway

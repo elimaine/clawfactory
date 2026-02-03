@@ -7,7 +7,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SECRETS_DIR="${SCRIPT_DIR}/secrets"
-DATA_DIR="${SCRIPT_DIR}/data"
+BOT_REPOS_DIR="${SCRIPT_DIR}/bot_repos"
 CONFIG_FILE="${SCRIPT_DIR}/.clawfactory.conf"
 
 GREEN='\033[0;32m'
@@ -65,6 +65,7 @@ save_config() {
 # ClawFactory Instance Configuration
 INSTANCE_NAME="${INSTANCE_NAME:-}"
 GITHUB_USERNAME="${GITHUB_USERNAME:-}"
+GITHUB_ORG="${GITHUB_ORG:-}"
 EOF
 
     # Also save to .env for docker-compose
@@ -73,6 +74,7 @@ EOF
 INSTANCE_NAME=${INSTANCE_NAME:-clawfactory}
 COMPOSE_PROJECT_NAME=clawfactory-${INSTANCE_NAME:-default}
 GITHUB_USERNAME=${GITHUB_USERNAME:-}
+GITHUB_ORG=${GITHUB_ORG:-}
 EOF
 }
 
@@ -145,52 +147,70 @@ preflight() {
 }
 
 # ============================================================
-# Initialize Brain Repository (GitHub Fork)
+# Initialize Bot Repository (GitHub Fork)
 # ============================================================
-init_brain() {
-    info "Initializing brain repository..."
+init_bot_repo() {
+    info "Initializing bot repository..."
 
-    mkdir -p "${DATA_DIR}"
-    mkdir -p "${DATA_DIR}/openclaw-home"
+    mkdir -p "${BOT_REPOS_DIR}/${INSTANCE_NAME}"
+    mkdir -p "${BOT_REPOS_DIR}/${INSTANCE_NAME}/state"
 
-    local brain_repo_name="${INSTANCE_NAME}-brain"
-    local fork_repo="${GITHUB_USERNAME}/${brain_repo_name}"
+    # Determine repo owner (org or username)
+    local repo_owner="${GITHUB_REPO_OWNER:-${GITHUB_ORG:-${GITHUB_USERNAME}}}"
+    if [[ -z "$repo_owner" ]]; then
+        # Try to get from gh auth
+        repo_owner=$(gh api user --jq '.login' 2>/dev/null || echo "")
+    fi
+
+    if [[ -z "$repo_owner" ]]; then
+        warn "GitHub not configured yet, skipping repo initialization"
+        return 0
+    fi
+
+    local bot_repo_name="${INSTANCE_NAME}-bot"
+    local fork_repo="${repo_owner}/${bot_repo_name}"
     local fork_url="https://github.com/${fork_repo}.git"
 
     # Check if fork exists, if not create it
     if ! gh repo view "${fork_repo}" &>/dev/null; then
-        info "Forking openclaw/openclaw as ${brain_repo_name}..."
-        gh repo fork openclaw/openclaw --clone=false --fork-name "${brain_repo_name}"
+        info "Forking openclaw/openclaw as ${bot_repo_name} under ${repo_owner}..."
+        if [[ -n "$GITHUB_ORG" && "$GITHUB_ORG" == "$repo_owner" ]]; then
+            # Fork to organization
+            gh repo fork openclaw/openclaw --clone=false --fork-name "${bot_repo_name}" --org "${GITHUB_ORG}"
+        else
+            # Fork to personal account
+            gh repo fork openclaw/openclaw --clone=false --fork-name "${bot_repo_name}"
+        fi
         success "Created fork: ${fork_repo}"
     else
         success "Fork exists: ${fork_repo}"
     fi
 
-    # Clone brain_work if not exists
-    if [[ ! -d "${DATA_DIR}/brain_work/.git" ]]; then
-        info "Cloning fork to brain_work..."
-        git clone "${fork_url}" "${DATA_DIR}/brain_work"
-        success "Cloned to data/brain_work"
+    # Clone working_repo if not exists
+    if [[ ! -d "${BOT_REPOS_DIR}/${INSTANCE_NAME}/working_repo/.git" ]]; then
+        info "Cloning fork to working_repo..."
+        git clone "${fork_url}" "${BOT_REPOS_DIR}/${INSTANCE_NAME}/working_repo"
+        success "Cloned to bot_repos/${INSTANCE_NAME}/working_repo"
     else
-        success "brain_work already exists"
+        success "working_repo already exists"
     fi
 
-    # Clone brain_ro if not exists
-    if [[ ! -d "${DATA_DIR}/brain_ro/.git" ]]; then
-        info "Cloning fork to brain_ro..."
-        git clone "${fork_url}" "${DATA_DIR}/brain_ro"
-        success "Cloned to data/brain_ro"
+    # Clone approved if not exists
+    if [[ ! -d "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/.git" ]]; then
+        info "Cloning fork to approved..."
+        git clone "${fork_url}" "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved"
+        success "Cloned to bot_repos/${INSTANCE_NAME}/approved"
     else
-        success "brain_ro already exists"
+        success "approved already exists"
     fi
 
-    # Create workspace/brain files if they don't exist
-    if [[ ! -f "${DATA_DIR}/brain_work/workspace/SOUL.md" ]]; then
-        info "Creating brain workspace files..."
-        mkdir -p "${DATA_DIR}/brain_work/workspace/skills"
-        mkdir -p "${DATA_DIR}/brain_work/workspace/memory"
+    # Create workspace config files if they don't exist
+    if [[ ! -f "${BOT_REPOS_DIR}/${INSTANCE_NAME}/working_repo/workspace/SOUL.md" ]]; then
+        info "Creating bot config files..."
+        mkdir -p "${BOT_REPOS_DIR}/${INSTANCE_NAME}/working_repo/workspace/skills"
+        mkdir -p "${BOT_REPOS_DIR}/${INSTANCE_NAME}/working_repo/workspace/memory"
 
-        cat > "${DATA_DIR}/brain_work/workspace/SOUL.md" <<'EOF'
+        cat > "${BOT_REPOS_DIR}/${INSTANCE_NAME}/working_repo/workspace/SOUL.md" <<'EOF'
 # Soul
 
 You are a helpful AI assistant running in the ClawFactory secure environment.
@@ -200,7 +220,7 @@ You are a helpful AI assistant running in the ClawFactory secure environment.
 1. Be helpful and honest
 2. Respect user privacy
 3. Admit when you don't know something
-4. Follow the policies defined in this brain
+4. Follow the policies defined in your config
 5. Use the proposal workflow for configuration changes
 
 ## Workspace Security
@@ -221,7 +241,7 @@ See `skills/propose.md` for detailed instructions.
 - Memory search is enabled for context recall
 EOF
 
-        cat > "${DATA_DIR}/brain_work/workspace/policies.yml" <<'EOF'
+        cat > "${BOT_REPOS_DIR}/${INSTANCE_NAME}/working_repo/workspace/policies.yml" <<'EOF'
 # Policies
 
 allowed_actions:
@@ -238,7 +258,7 @@ forbidden_actions:
   - docker_access
 EOF
 
-        cat > "${DATA_DIR}/brain_work/workspace/skills/propose.md" <<'EOF'
+        cat > "${BOT_REPOS_DIR}/${INSTANCE_NAME}/working_repo/workspace/skills/propose.md" <<'EOF'
 # Propose Changes Skill
 
 When you need to modify your configuration, use the proposal workflow.
@@ -251,7 +271,7 @@ When you need to modify your configuration, use the proposal workflow.
 4. Wait for approval
 EOF
 
-        cat > "${DATA_DIR}/brain_work/workspace/skills/memory-backup.md" <<'EOF'
+        cat > "${BOT_REPOS_DIR}/${INSTANCE_NAME}/working_repo/workspace/skills/memory-backup.md" <<'EOF'
 # Memory Backup Skill
 
 Your memories persist across restarts. To backup to GitHub:
@@ -263,23 +283,23 @@ curl -X POST http://controller:8080/memory/backup
 This commits memory files and pushes to GitHub for disaster recovery.
 EOF
 
-        cd "${DATA_DIR}/brain_work"
+        cd "${BOT_REPOS_DIR}/${INSTANCE_NAME}/working_repo"
         git add workspace/
-        git commit -m "Add ClawFactory brain workspace files"
+        git commit -m "Add ClawFactory bot config files"
         git push origin main
         cd "${SCRIPT_DIR}"
 
-        success "Created brain workspace files"
+        success "Created bot config files"
     else
-        success "Brain workspace files already exist"
+        success "Bot config files already exist"
     fi
 
-    # Pull latest to brain_ro
-    cd "${DATA_DIR}/brain_ro"
+    # Pull latest to approved
+    cd "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved"
     git pull origin main 2>/dev/null || true
     cd "${SCRIPT_DIR}"
 
-    success "Brain repository initialized"
+    success "Bot repository initialized"
 }
 
 # ============================================================
@@ -359,17 +379,49 @@ configure_secrets() {
             prompt GITHUB_USERNAME "Your GitHub username"
         fi
 
+        # GitHub org configuration
+        echo ""
+        echo "Bot repos can be stored under a GitHub organization."
+        echo "This keeps them organized (e.g., my-bots-org/bot1-bot, my-bots-org/bot2-bot)"
+        echo "Leave empty to use your personal account (${GITHUB_USERNAME})"
+        echo ""
+
+        # Load saved org if exists
+        local saved_github_org=""
+        if [[ -f "$CONFIG_FILE" ]]; then
+            saved_github_org=$(grep "^GITHUB_ORG=" "$CONFIG_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '"')
+        fi
+
+        if [[ -n "$saved_github_org" ]]; then
+            GITHUB_ORG="$saved_github_org"
+            success "GitHub org: $GITHUB_ORG (saved)"
+        else
+            prompt GITHUB_ORG "GitHub organization (or leave empty for personal)" ""
+        fi
+
+        # Determine the repo owner (org or username)
+        if [[ -n "$GITHUB_ORG" ]]; then
+            GITHUB_REPO_OWNER="$GITHUB_ORG"
+            info "Bot repos will be created under: $GITHUB_ORG"
+        else
+            GITHUB_REPO_OWNER="$GITHUB_USERNAME"
+            info "Bot repos will be created under: $GITHUB_USERNAME"
+        fi
+
         if [[ -n "$saved_github_webhook" ]]; then
             GITHUB_WEBHOOK_SECRET="$saved_github_webhook"
-            GITHUB_BRAIN_REPO="${INSTANCE_NAME}-brain"
+            GITHUB_BOT_REPO="${INSTANCE_NAME}-bot"
             success "GitHub webhook secret (saved)"
-            success "Brain repo: $GITHUB_BRAIN_REPO"
+            success "Bot repo: ${GITHUB_REPO_OWNER}/${GITHUB_BOT_REPO}"
             AUTO_GITHUB=false
         else
             echo ""
             echo "Do you want to automatically configure GitHub webhooks?"
             echo "This requires a classic GitHub personal access token (not fine-grained)."
             echo "Scopes needed: 'repo' and 'admin:repo_hook'"
+            if [[ -n "$GITHUB_ORG" ]]; then
+                echo "For org repos, you also need 'admin:org' scope."
+            fi
             echo ""
             echo "Create a classic token here:"
             echo "  https://github.com/settings/tokens/new?scopes=repo,admin:repo_hook&description=ClawFactory"
@@ -380,7 +432,7 @@ configure_secrets() {
 
             if [[ "$auto_github" =~ ^[Yy]$ ]]; then
                 prompt GITHUB_TOKEN "GitHub personal access token" "" true
-                prompt GITHUB_BRAIN_REPO "Brain repository name (will be created if doesn't exist)" "${INSTANCE_NAME}-brain"
+                prompt GITHUB_BOT_REPO "Bot repository name (will be created if doesn't exist)" "${INSTANCE_NAME}-bot"
 
                 GITHUB_WEBHOOK_SECRET=$(openssl rand -hex 32)
                 info "Generated webhook secret automatically"
@@ -389,7 +441,7 @@ configure_secrets() {
             else
                 AUTO_GITHUB=false
                 GITHUB_TOKEN=""
-                GITHUB_BRAIN_REPO="${INSTANCE_NAME}-brain"
+                GITHUB_BOT_REPO="${INSTANCE_NAME}-bot"
                 echo ""
                 echo "Manual webhook setup required."
                 echo ""
@@ -398,8 +450,8 @@ configure_secrets() {
                 echo ""
                 echo "Generate one with:  openssl rand -hex 32"
                 echo ""
-                echo "After setup, add this secret to your brain repo's webhook settings:"
-                echo "  https://github.com/${GITHUB_USERNAME}/${GITHUB_BRAIN_REPO}/settings/hooks/new"
+                echo "After setup, add this secret to your bot repo's webhook settings:"
+                echo "  https://github.com/${GITHUB_REPO_OWNER}/${GITHUB_BOT_REPO}/settings/hooks/new"
                 echo ""
                 echo "Webhook settings:"
                 echo "  Payload URL: https://your-controller/webhook/github"
@@ -437,7 +489,7 @@ configure_secrets() {
         GITHUB_USERNAME=""
         GITHUB_WEBHOOK_SECRET=""
         GITHUB_ALLOWED_ACTORS=""
-        GITHUB_BRAIN_REPO=""
+        GITHUB_BOT_REPO=""
         echo ""
         echo "=== AI Provider (optional for offline) ==="
         if [[ -n "$saved_anthropic" ]]; then
@@ -565,21 +617,33 @@ configure_github_auto() {
 
     local api_base="https://api.github.com"
     local auth_header="Authorization: Bearer ${GITHUB_TOKEN}"
+    local repo_owner="${GITHUB_REPO_OWNER:-${GITHUB_ORG:-${GITHUB_USERNAME}}}"
 
     # Check if repo exists
     local repo_check
     repo_check=$(curl -s -o /dev/null -w "%{http_code}" \
         -H "$auth_header" \
-        "${api_base}/repos/${GITHUB_USERNAME}/${GITHUB_BRAIN_REPO}")
+        "${api_base}/repos/${repo_owner}/${GITHUB_BOT_REPO}")
 
     if [[ "$repo_check" == "404" ]]; then
-        info "Creating repository ${GITHUB_USERNAME}/${GITHUB_BRAIN_REPO}..."
+        info "Creating repository ${repo_owner}/${GITHUB_BOT_REPO}..."
         local create_result
-        create_result=$(curl -s -X POST \
-            -H "$auth_header" \
-            -H "Content-Type: application/json" \
-            "${api_base}/user/repos" \
-            -d "{\"name\":\"${GITHUB_BRAIN_REPO}\",\"private\":true,\"description\":\"ClawFactory brain repository\"}")
+
+        if [[ -n "$GITHUB_ORG" && "$GITHUB_ORG" == "$repo_owner" ]]; then
+            # Create in organization
+            create_result=$(curl -s -X POST \
+                -H "$auth_header" \
+                -H "Content-Type: application/json" \
+                "${api_base}/orgs/${GITHUB_ORG}/repos" \
+                -d "{\"name\":\"${GITHUB_BOT_REPO}\",\"private\":true,\"description\":\"ClawFactory bot repository\"}")
+        else
+            # Create in personal account
+            create_result=$(curl -s -X POST \
+                -H "$auth_header" \
+                -H "Content-Type: application/json" \
+                "${api_base}/user/repos" \
+                -d "{\"name\":\"${GITHUB_BOT_REPO}\",\"private\":true,\"description\":\"ClawFactory bot repository\"}")
+        fi
 
         if echo "$create_result" | grep -q '"id"'; then
             success "Created repository"
@@ -602,7 +666,7 @@ configure_github_auto() {
     webhook_result=$(curl -s -X POST \
         -H "$auth_header" \
         -H "Content-Type: application/json" \
-        "${api_base}/repos/${GITHUB_USERNAME}/${GITHUB_BRAIN_REPO}/hooks" \
+        "${api_base}/repos/${repo_owner}/${GITHUB_BOT_REPO}/hooks" \
         -d "{
             \"name\": \"web\",
             \"active\": true,
@@ -621,26 +685,22 @@ configure_github_auto() {
         warn "Failed to create webhook (may already exist): $webhook_result"
     fi
 
-    # Update local brain to push to GitHub
-    info "Configuring local brain to push to GitHub..."
-    cd "${DATA_DIR}/brain_work"
-    git remote set-url origin "https://github.com/${GITHUB_USERNAME}/${GITHUB_BRAIN_REPO}.git" 2>/dev/null || \
-        git remote add origin "https://github.com/${GITHUB_USERNAME}/${GITHUB_BRAIN_REPO}.git"
-
-    # Update bare repo remote too
-    cd "${DATA_DIR}/brain.git"
-    git remote add github "https://github.com/${GITHUB_USERNAME}/${GITHUB_BRAIN_REPO}.git" 2>/dev/null || true
+    # Update local repo to push to GitHub
+    info "Configuring local repo to push to GitHub..."
+    cd "${BOT_REPOS_DIR}/${INSTANCE_NAME}/working_repo"
+    git remote set-url origin "https://github.com/${repo_owner}/${GITHUB_BOT_REPO}.git" 2>/dev/null || \
+        git remote add origin "https://github.com/${repo_owner}/${GITHUB_BOT_REPO}.git"
 
     cd "${SCRIPT_DIR}"
 
     echo ""
     success "GitHub configured!"
     echo ""
-    echo "Your brain repo: https://github.com/${GITHUB_USERNAME}/${GITHUB_BRAIN_REPO}"
+    echo "Your bot repo: https://github.com/${repo_owner}/${GITHUB_BOT_REPO}"
     echo "Webhook URL: ${CONTROLLER_URL}/webhook/github"
     echo ""
-    echo "Note: You may need to push the initial brain content to GitHub:"
-    echo "  cd data/brain_work && git push -u origin main"
+    echo "Note: You may need to push the initial bot content to GitHub:"
+    echo "  cd bot_repos/${INSTANCE_NAME}/working_repo && git push -u origin main"
     echo ""
 }
 
@@ -873,8 +933,7 @@ secrets/
 
 # Runtime state
 audit/
-data/brain_ro/
-data/brain_work/
+bot_repos/
 
 # OS
 .DS_Store
@@ -898,8 +957,8 @@ main() {
     echo ""
 
     preflight
-    init_brain
     configure_secrets
+    init_bot_repo
     create_killswitch
     create_helper
     create_gitignore

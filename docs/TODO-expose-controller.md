@@ -62,10 +62,10 @@ Webhook URL: `https://<random>.ngrok.io/webhook/github`
 1. Re-run `./install.sh`
 2. Choose auto-configure GitHub → Y
 3. Enter your public controller URL
-4. Script will create webhook on your brain repository
+4. Script will create webhook on your bot repository
 
 Or manually add webhook at:
-https://github.com/YOUR_USERNAME/{instance}-brain/settings/hooks/new
+https://github.com/YOUR_USERNAME/{instance}-bot/settings/hooks/new
 
 ## Security Notes
 
