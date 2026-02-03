@@ -1,7 +1,58 @@
 # ClawFactory Docker Compose
 # Gateway (OpenClaw) + Controller (authority)
+#
+# Usage:
+#   Local only:    docker compose up -d
+#   With tunnel:   docker compose --profile tunnel up -d
 
 services:
+  # ============================================================
+  # Proxy: Nginx reverse proxy for local access
+  # - Binds to localhost for secure local access
+  # - Routes to gateway and controller inside Docker network
+  # - Also serves as entry point for Cloudflare tunnel
+  # ============================================================
+  proxy:
+    image: nginx:alpine
+    container_name: clawfactory-proxy
+    restart: unless-stopped
+    volumes:
+      - ./proxy/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      # Local access only (localhost)
+      - "127.0.0.1:18789:80"      # Gateway UI
+      - "127.0.0.1:8080:8080"     # Controller
+    networks:
+      - clawfactory
+    depends_on:
+      - gateway
+      - controller
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ============================================================
+  # Tunnel: Cloudflare Zero Trust tunnel (OPTIONAL)
+  # - Enable with: docker compose --profile tunnel up -d
+  # - Requires CF_TUNNEL_TOKEN in secrets/tunnel.env
+  # - See docs/cloudflare-tunnel-setup.md for setup instructions
+  # ============================================================
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: clawfactory-tunnel
+    restart: unless-stopped
+    profiles:
+      - tunnel
+    command: tunnel run
+    env_file:
+      - ./secrets/tunnel.env
+    networks:
+      - clawfactory
+    depends_on:
+      - proxy
+
   # ============================================================
   # Gateway: OpenClaw agent runtime
   # - Connects to Discord
@@ -10,7 +61,10 @@ services:
   # - READ-ONLY access to brain_ro, WRITE to brain_work
   # ============================================================
   gateway:
-    image: ghcr.io/openclaw/openclaw:latest
+    build:
+      context: ./sandyclaws/brain_ro
+      dockerfile: Dockerfile
+    image: clawfactory-gateway:local
     container_name: clawfactory-gateway
     restart: unless-stopped
     env_file:
@@ -52,6 +106,7 @@ services:
       # Temp filesystem
       - type: tmpfs
         target: /tmp
+    # No ports exposed - access via proxy
     networks:
       - clawfactory
     healthcheck:
@@ -93,9 +148,7 @@ services:
       - ./audit:/srv/audit:rw
       # Docker socket for restarting gateway
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    ports:
-      # Webhook endpoint (protect with Tailscale/Cloudflare in production)
-      - "127.0.0.1:8080:8080"
+    # No ports exposed - access via proxy
     networks:
       - clawfactory
     healthcheck:
@@ -107,7 +160,5 @@ services:
 networks:
   clawfactory:
     driver: bridge
-    # TODO: Add Cloudflare Zero Trust egress for stricter control
-    # See docs/TODO-cloudflare-zerotrust.md
 
 volumes: {}
