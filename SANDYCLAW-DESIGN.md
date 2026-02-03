@@ -1,7 +1,3 @@
-Below is a single, clean, regenerated design document that incorporates everything decided so far, with no legacy ambiguity. This is meant to be handed directly to another LLM (or engineer) to implement.
-
-I’ve written it as a system/architecture spec, not conversational guidance.
-
 ⸻
 
 Design Document
