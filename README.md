@@ -106,7 +106,7 @@ cp secrets/controller.env.example secrets/controller.env
 chmod 600 secrets/*.env
 
 # 5. Start
-docker compose up -d
+./clawfactory.sh start
 ```
 
 ### Verify
