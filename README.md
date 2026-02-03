@@ -1,5 +1,25 @@
 # ClawFactory
 
+This is a work in progress! Currently the bot can still write to self and persist changes (this is risky), but it does at least allow repo changes and long term memory to be backed up and versioned.
+
+currently the gateway ui isnt accessible.. kind of by design until i implement the runner
+(quarantine) layer. 
+
+NOTE: automated install asks for all your keys and stores them in a permission 600 file 
+
+
+the purpose is to make locked down openclaw vms easy to spin up, kill and rotate keys.
+
+coming in the next few days..
+- fixes for deployment cycle that requires external approval through github
+- support for zerotrust, 
+- fixes to full local option, 
+- cloudflare ai gateway, tails, and external websocket..
+- "fishiness" detection, text gating, honeypot
+
+
+and here ill pass it over to claude
+
 Local-first autonomous agent runtime with hard separation between proposal and authority.
 
 ## Philosophy
@@ -86,7 +106,7 @@ cp secrets/controller.env.example secrets/controller.env
 chmod 600 secrets/*.env
 
 # 5. Start
-docker compose up -d
+./clawfactory.sh start
 ```
 
 ### Verify
