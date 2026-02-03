@@ -6,6 +6,12 @@
 #
 # Instance name is read from .env file (INSTANCE_NAME)
 # Container names: clawfactory-{instance}-{service}
+#
+# Architecture:
+#   approved/     - Git clone (bot pushes branches, PRs merged on GitHub)
+#   state/        - Runtime state (encrypted snapshots)
+#     memory/     - Embeddings database
+#     installed/  - npm packages (rebuilt from {instance}_save/package.json)
 
 services:
   # ============================================================
@@ -39,7 +45,7 @@ services:
   # - Connects to Discord
   # - Makes LLM calls
   # - Uses OpenClaw's native sandbox for tool execution
-  # - READ-ONLY access to approved/, WRITE to workspace/
+  # - Bot pushes branches to approved/, PRs merged on GitHub
   # ============================================================
   gateway:
     build:
@@ -53,24 +59,54 @@ services:
     environment:
       - OPENCLAW_GATEWAY_MODE=local
       - OPENCLAW_GATEWAY_AUTH=none
+      - INSTANCE_NAME=${INSTANCE_NAME:-default}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         # Secure state directory permissions
         chmod 700 /home/node/.openclaw 2>/dev/null || true
+
         # Sync approved config files to OpenClaw workspace on startup
         echo "[startup] Syncing workspace from approved config..."
         cp -r /workspace/approved/workspace/*.md /home/node/.openclaw/workspace/ 2>/dev/null || true
         cp -r /workspace/approved/workspace/skills /home/node/.openclaw/workspace/ 2>/dev/null || true
         cp -r /workspace/approved/workspace/policies.yml /home/node/.openclaw/workspace/ 2>/dev/null || true
-        # Memory persists directly via volume mount to workspace/memory
-        # No copy needed - memory survives restarts and can be committed to git
-        mkdir -p /home/node/.openclaw/workspace/memory
-        # Only copy MEMORY.md if it exists in approved and not locally
-        if [ -f "/workspace/approved/workspace/MEMORY.md" ] && [ ! -f "/home/node/.openclaw/workspace/MEMORY.md" ]; then
-          cp /workspace/approved/workspace/MEMORY.md /home/node/.openclaw/workspace/ 2>/dev/null || true
+
+        # Memory markdown persists in approved repo (git tracked)
+        # Symlink to OpenClaw workspace so bot can read/write
+        mkdir -p /workspace/approved/workspace/memory
+        rm -rf /home/node/.openclaw/workspace/memory
+        ln -sf /workspace/approved/workspace/memory /home/node/.openclaw/workspace/memory
+
+        # MEMORY.md also in approved repo
+        if [ -f "/workspace/approved/workspace/MEMORY.md" ]; then
+          ln -sf /workspace/approved/workspace/MEMORY.md /home/node/.openclaw/workspace/MEMORY.md
         fi
+
+        # Install packages from {instance}_save/package.json if changed
+        SAVE_DIR="/workspace/approved/workspace/$${INSTANCE_NAME}_save"
+        INSTALL_DIR="/home/node/.openclaw/installed"
+        if [ -f "$$SAVE_DIR/package.json" ]; then
+          mkdir -p "$$INSTALL_DIR"
+          CURRENT_HASH=$$(sha256sum "$$SAVE_DIR/package.json" | cut -d' ' -f1)
+          LAST_HASH=""
+          if [ -f "$$INSTALL_DIR/.package-hash" ]; then
+            LAST_HASH=$$(cat "$$INSTALL_DIR/.package-hash")
+          fi
+          if [ "$$CURRENT_HASH" != "$$LAST_HASH" ]; then
+            echo "[startup] Installing packages from $${INSTANCE_NAME}_save/package.json..."
+            cp "$$SAVE_DIR/package.json" "$$INSTALL_DIR/"
+            [ -f "$$SAVE_DIR/package-lock.json" ] && cp "$$SAVE_DIR/package-lock.json" "$$INSTALL_DIR/"
+            cd "$$INSTALL_DIR" && npm install --production
+            echo "$$CURRENT_HASH" > "$$INSTALL_DIR/.package-hash"
+            echo "[startup] Packages installed"
+          else
+            echo "[startup] Packages unchanged, skipping install"
+          fi
+        fi
+
         echo "[startup] Workspace synced"
+
         # Run minimal setup then start gateway
         node dist/index.js onboard --non-interactive --accept-risk --mode local \
           --skip-daemon --skip-channels --skip-skills --skip-health --skip-ui \
@@ -78,14 +114,10 @@ services:
         node dist/index.js gateway --port 18789 --bind lan
     user: "1000:1000"  # Run as node user
     volumes:
-      # OpenClaw home directory (config, state, workspace)
+      # OpenClaw home directory (config, state, embeddings, installed packages)
       - ./bot_repos/${INSTANCE_NAME:-default}/state:/home/node/.openclaw
-      # Approved config (OpenClaw fork, read-only)
-      - ./bot_repos/${INSTANCE_NAME:-default}/approved:/workspace/approved:ro
-      # Proposal workspace (OpenClaw fork clone, agent pushes branches here)
-      - ./bot_repos/${INSTANCE_NAME:-default}/working_repo:/workspace/proposals:rw
-      # Memory persists directly in workspace (survives restarts, can be committed)
-      - ./bot_repos/${INSTANCE_NAME:-default}/working_repo/workspace/memory:/home/node/.openclaw/workspace/memory:rw
+      # Git repo clone (bot pushes branches, PRs merged on GitHub)
+      - ./bot_repos/${INSTANCE_NAME:-default}/approved:/workspace/approved:rw
       # Temp filesystem
       - type: tmpfs
         target: /tmp
@@ -102,8 +134,9 @@ services:
   # ============================================================
   # Controller: Authority & promotion
   # - Receives GitHub webhooks
-  # - Performs promotions (workspace → approved)
+  # - Performs promotions (pulls main after PR merge)
   # - Restarts Gateway
+  # - Manages encrypted snapshots
   # - Hosts approval UI (for offline mode)
   # ============================================================
   controller:
@@ -116,19 +149,22 @@ services:
       - ./secrets/${INSTANCE_NAME:-default}/controller.env
     environment:
       - APPROVED_DIR=/srv/bot/approved
-      - WORKING_REPO=/srv/bot/working_repo
       - OPENCLAW_HOME=/srv/bot/state
       - AUDIT_LOG=/srv/audit/audit.jsonl
       - GITHUB_REPO=${GITHUB_ORG:-${GITHUB_USERNAME}}/${INSTANCE_NAME:-default}-bot
       - INSTANCE_NAME=${INSTANCE_NAME:-default}
       - GATEWAY_CONTAINER=clawfactory-${INSTANCE_NAME:-default}-gateway
+      - SNAPSHOTS_DIR=/srv/snapshots
+      - AGE_KEY=/srv/secrets/snapshot.key
     volumes:
-      # Approved config: Controller pulls from GitHub here
+      # Git repo clone: Controller pulls main after PR merge
       - ./bot_repos/${INSTANCE_NAME:-default}/approved:/srv/bot/approved:rw
-      # Working repo: Controller can commit memory backups
-      - ./bot_repos/${INSTANCE_NAME:-default}/working_repo:/srv/bot/working_repo:rw
-      # OpenClaw state: Read memory files for backup
-      - ./bot_repos/${INSTANCE_NAME:-default}/state:/srv/bot/state:ro
+      # OpenClaw state: For snapshots
+      - ./bot_repos/${INSTANCE_NAME:-default}/state:/srv/bot/state:rw
+      # Snapshots directory
+      - ./snapshots/${INSTANCE_NAME:-default}:/srv/snapshots:rw
+      # Secrets (for snapshot encryption key)
+      - ./secrets/${INSTANCE_NAME:-default}:/srv/secrets:ro
       # Audit log
       - ./audit:/srv/audit:rw
       # Docker socket for restarting gateway

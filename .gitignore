@@ -19,6 +19,9 @@ killswitch.sh
 # Bot repos (created by install.sh)
 bot_repos/
 
+# Encrypted snapshots
+snapshots/
+
 # Audit logs
 audit/
 

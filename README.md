@@ -38,15 +38,15 @@ The install script generates authentication tokens. Run `./clawfactory.sh info` 
 │  │  │         │───►│               │    │              │   ││
 │  │  └────┬────┘    │ • Discord     │    │ • Webhooks   │   ││
 │  │       │         │ • LLM calls   │    │ • Promotion  │   ││
-│  │       │         │ • Sandbox     │    │ • Memory     │   ││
-│  │  localhost      │ • Memory      │    │   backup     │   ││
+│  │       │         │ • Sandbox     │    │ • Snapshots  │   ││
+│  │  localhost      │ • Memory      │    │ • Pairing    │   ││
 │  │  :18789/:8080   └───────────────┘    └──────────────┘   ││
 │  └──────────────────────────────────────────────────────────┘│
 │                                                              │
 │  ┌──────────────────────────────────────────────────────────┐│
 │  │                   Volumes                                ││
-│  │  approved/     working_repo/   secrets/    audit/       ││
-│  │  (live config) (proposals)     (600)       (append)     ││
+│  │  approved/     state/          snapshots/    secrets/   ││
+│  │  (git repo)    (runtime)       (encrypted)   (600)      ││
 │  └──────────────────────────────────────────────────────────┘│
 │                                                              │
 │  [Kill Switch] ─────────────────────────────────────────────│
@@ -56,7 +56,9 @@ GitHub: your-org/{instance}-bot (fork of openclaw/openclaw)
          └── workspace/
              ├── SOUL.md, TOOLS.md, etc.
              ├── skills/
-             └── memory/  ← agent memories backed up here
+             ├── memory/           ← memory markdown (git tracked)
+             └── {instance}_save/  ← bot's declarative state
+                 └── package.json  ← dependencies (installed on startup)
 ```
 
 ## Directory Structure
@@ -64,11 +66,31 @@ GitHub: your-org/{instance}-bot (fork of openclaw/openclaw)
 ```
 bot_repos/
 ├── bot1/
-│   ├── approved/       # Live config (read-only at runtime)
-│   ├── working_repo/   # Proposals (agent pushes branches here)
-│   └── state/          # OpenClaw runtime state
-├── bot2/
-│   └── ...
+│   ├── approved/              # Git clone (bot pushes branches, PRs merged)
+│   │   └── workspace/
+│   │       ├── SOUL.md        # Bot personality
+│   │       ├── skills/        # Bot skills
+│   │       ├── memory/        # Memory markdown (git tracked)
+│   │       └── bot1_save/     # Bot's declarative save state
+│   │           └── package.json
+│   └── state/                 # Runtime state (encrypted snapshots)
+│       ├── memory/main.sqlite # Embeddings database
+│       ├── openclaw.json      # Runtime config
+│       ├── devices/           # Paired devices
+│       ├── credentials/       # Allowlists
+│       └── installed/         # npm packages (rebuilt, not snapshotted)
+
+snapshots/
+└── bot1/
+    ├── snapshot-2026-02-03T12-00-00Z.tar.age
+    └── latest.tar.age -> snapshot-...
+
+secrets/
+├── bot1/
+│   ├── gateway.env            # API keys
+│   ├── controller.env         # Webhook secrets
+│   └── snapshot.key           # Age encryption key
+└── tokens.env                 # Token registry
 ```
 
 ## Components
@@ -76,8 +98,8 @@ bot_repos/
 | Component | Role | Listens On | Can Write To |
 |-----------|------|------------|--------------|
 | **Proxy** | Reverse proxy, localhost access | localhost:18789, :8080 | - |
-| **Gateway** | Agent runtime (OpenClaw) | Docker network only | working_repo, memory |
-| **Controller** | Authority & promotion | Docker network only | approved (via git) |
+| **Gateway** | Agent runtime (OpenClaw) | Docker network only | approved/ (git branches), state/ |
+| **Controller** | Authority & promotion | Docker network only | approved/ (git pull), snapshots/ |
 
 ## Setup Options
 
@@ -88,16 +110,17 @@ bot_repos/
 ```
 
 This prompts for:
-- **Instance name** (e.g., `bot1`, `prod-agent`) - used for container naming and multi-instance support
+- **Instance name** (e.g., `bot1`, `prod-agent`) - used for container naming
 - Discord bot token
 - Anthropic API key
 - Gemini API key (for memory embeddings)
 - GitHub organization (optional) - keeps bot repos organized under an org
 - GitHub setup (forks openclaw/openclaw as {instance}-bot)
 
-The installer generates two tokens:
+The installer generates:
 - **Gateway token** - for authenticating to the OpenClaw gateway API
 - **Controller token** - for accessing the Controller dashboard
+- **Snapshot key** - age keypair for encrypted state snapshots
 
 ### Option B: Manual Setup
 
@@ -108,18 +131,17 @@ The installer generates two tokens:
 # Optional: Fork to an organization (e.g., my-bots-org/bot1-bot)
 
 # 2. Create instance directory structure
-mkdir -p bot_repos/bot1/{approved,working_repo,state}
+mkdir -p bot_repos/bot1/{approved,state}
 
-# 3. Clone your fork (use your org or username)
-git clone https://github.com/YOUR_ORG_OR_USERNAME/bot1-bot.git bot_repos/bot1/working_repo
+# 3. Clone your fork
 git clone https://github.com/YOUR_ORG_OR_USERNAME/bot1-bot.git bot_repos/bot1/approved
 
 # 4. Add config files to workspace/
-mkdir -p bot_repos/bot1/working_repo/workspace
+mkdir -p bot_repos/bot1/approved/workspace/bot1_save
 # Create SOUL.md, TOOLS.md, etc. in workspace/
-git -C bot_repos/bot1/working_repo add workspace/
-git -C bot_repos/bot1/working_repo commit -m "Add config files"
-git -C bot_repos/bot1/working_repo push
+git -C bot_repos/bot1/approved add workspace/
+git -C bot_repos/bot1/approved commit -m "Add config files"
+git -C bot_repos/bot1/approved push
 
 # 5. Copy and edit secrets
 mkdir -p secrets/bot1
@@ -128,7 +150,10 @@ cp secrets/controller.env.example secrets/bot1/controller.env
 # Edit with your values
 chmod 600 secrets/bot1/*.env
 
-# 6. Start
+# 6. Generate snapshot encryption key
+./clawfactory.sh snapshot keygen
+
+# 7. Start
 ./clawfactory.sh start
 ```
 
@@ -140,17 +165,18 @@ Each instance has its own secrets folder:
 secrets/
 ├── bot1/
 │   ├── gateway.env      # Discord token, Anthropic key, Gemini key
-│   └── controller.env   # GitHub webhook secret, tokens
+│   ├── controller.env   # GitHub webhook secret, tokens
+│   └── snapshot.key     # Age private key (for encrypted snapshots)
 ├── bot2/
-│   ├── gateway.env
-│   └── controller.env
+│   └── ...
 └── tokens.env           # Token registry for all instances
 ```
 
 | File | Contents |
 |------|----------|
 | `secrets/<instance>/gateway.env` | Discord token, Anthropic key, Gemini key, Gateway token |
-| `secrets/<instance>/controller.env` | GitHub webhook secret, Controller token, Gateway token |
+| `secrets/<instance>/controller.env` | GitHub webhook secret, Controller token |
+| `secrets/<instance>/snapshot.key` | Age private key for encrypted snapshots |
 | `secrets/tokens.env` | Token registry for all instances |
 | `.clawfactory.conf` | Default instance name |
 
@@ -174,6 +200,12 @@ Tokens are auto-generated by `install.sh`. To view them:
 ./clawfactory.sh controller         # Show controller URL
 ./clawfactory.sh audit              # Show recent audit log
 
+# Snapshots (encrypted state backup)
+./clawfactory.sh snapshot create    # Create encrypted snapshot
+./clawfactory.sh snapshot list      # List available snapshots
+./clawfactory.sh snapshot restore <file>  # Restore from snapshot
+./clawfactory.sh snapshot keygen    # Generate encryption keys
+
 # Multi-instance support
 ./clawfactory.sh -i bot1 start      # Start 'bot1' instance
 ./clawfactory.sh -i bot1 stop       # Stop 'bot1' instance
@@ -184,34 +216,91 @@ Tokens are auto-generated by `install.sh`. To view them:
 
 ### Online (GitHub)
 
-1. Bot edits files in `working_repo/workspace/`
+1. Bot edits files in `approved/workspace/`
 2. Bot commits and pushes to proposal branch
 3. Bot opens PR on GitHub
 4. **Human merges PR** ← Authority checkpoint
 5. GitHub webhook → Controller
-6. Controller pulls to `approved/`
+6. Controller pulls main to `approved/`
 7. Gateway restarts with new config
 
 ### Offline (Local UI)
 
-1. Bot commits to `working_repo/`
+1. Bot commits to `approved/` (feature branch)
 2. Human opens Controller dashboard (http://localhost:8080/controller?token=...)
 3. **Human clicks Promote** ← Authority checkpoint
-4. Controller pulls to `approved/`
+4. Controller pulls main
 5. Gateway restarts
 
-## Memory
+## Memory & Embeddings
 
-Agent memory is stored as Markdown files:
+**Memory markdown** (git tracked):
 - `workspace/memory/YYYY-MM-DD.md` - Daily logs
 - `workspace/MEMORY.md` - Long-term curated memory
+- Changes go through PR approval like other config
 
-Memory persists across restarts. To backup to GitHub:
+**Embeddings database** (encrypted snapshots):
+- `state/memory/main.sqlite` - Vector embeddings for semantic search
+- NOT in git (binary, potentially large)
+- Backed up via encrypted snapshots
+- Rebuilt from markdown if needed (slower but works)
+
+To backup memory markdown to GitHub:
 ```bash
 curl -X POST http://localhost:8080/memory/backup
 ```
 
-The agent can also trigger this via the `memory-backup` skill.
+## Encrypted Snapshots
+
+Snapshots capture runtime state that isn't in git:
+- Embeddings database (`memory/main.sqlite`)
+- Configuration (`openclaw.json`)
+- Paired devices and credentials
+- Device identity keys
+
+**NOT included** (rebuilt from git):
+- `installed/` - npm packages from `{instance}_save/package.json`
+
+### Usage
+
+```bash
+# Generate encryption key (once per instance)
+./clawfactory.sh snapshot keygen
+
+# Create snapshot
+./clawfactory.sh snapshot create
+
+# List snapshots
+./clawfactory.sh snapshot list
+
+# Restore (stop gateway first!)
+./clawfactory.sh stop
+./clawfactory.sh snapshot restore latest
+./clawfactory.sh start
+```
+
+The bot can also trigger snapshots via the Controller API:
+```bash
+curl -X POST http://localhost:8080/snapshot
+```
+
+## Bot Save State
+
+The `{instance}_save/` directory holds declarative state that the bot wants persisted:
+
+```
+workspace/{instance}_save/
+├── package.json        # npm dependencies (installed on container start)
+├── config.json         # Bot-specific configuration
+└── tools/              # Scripts the bot created
+```
+
+Changes to `{instance}_save/` go through the normal PR flow:
+1. Bot edits files
+2. Bot commits and pushes branch
+3. Bot opens PR
+4. Human merges
+5. Gateway restarts and installs any new packages
 
 ## Controller API
 
@@ -223,7 +312,9 @@ All endpoints require authentication via `?token=` query param or session cookie
 | `/controller` | POST | Promote specific SHA |
 | `/controller/promote-main` | POST | Pull latest main & restart |
 | `/memory/backup` | POST | Backup memory to GitHub |
-| `/memory/status` | GET | List memory files |
+| `/memory/status` | GET | Memory files and embeddings status |
+| `/snapshot` | POST | Create encrypted snapshot |
+| `/snapshot` | GET | List available snapshots |
 | `/status` | GET | System status |
 | `/health` | GET | Health check |
 | `/audit` | GET | Get audit log entries |
@@ -243,26 +334,25 @@ All endpoints require authentication via `?token=` query param or session cookie
 
 ## Safety Invariants
 
-1. Live config is immutable at runtime (read from approved/)
+1. Bot proposes changes via git branches, cannot merge to main itself
 2. Bot cannot promote itself (requires human merge or UI action)
 3. Gateway sandbox cannot escalate to host
 4. Discord is not an authority signal
 5. Kill switch always wins
-6. Memory persists but requires explicit backup to GitHub
+6. Sensitive state is encrypted (snapshots use age encryption)
+7. Private keys never go to GitHub
 
 ## Updating OpenClaw
 
 Since bot repos are forks of OpenClaw, merge upstream updates:
 
 ```bash
-cd bot_repos/bot1/working_repo
+cd bot_repos/bot1/approved
 git remote add upstream https://github.com/openclaw/openclaw.git
 git fetch upstream
 git merge upstream/main
 git push origin main
 ```
-
-Repeat for approved/ if needed.
 
 ## Remote Access
 

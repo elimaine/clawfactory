@@ -186,16 +186,7 @@ init_bot_repo() {
         success "Fork exists: ${fork_repo}"
     fi
 
-    # Clone working_repo if not exists
-    if [[ ! -d "${BOT_REPOS_DIR}/${INSTANCE_NAME}/working_repo/.git" ]]; then
-        info "Cloning fork to working_repo..."
-        git clone "${fork_url}" "${BOT_REPOS_DIR}/${INSTANCE_NAME}/working_repo"
-        success "Cloned to bot_repos/${INSTANCE_NAME}/working_repo"
-    else
-        success "working_repo already exists"
-    fi
-
-    # Clone approved if not exists
+    # Clone approved if not exists (single clone - bot pushes branches here)
     if [[ ! -d "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/.git" ]]; then
         info "Cloning fork to approved..."
         git clone "${fork_url}" "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved"
@@ -204,13 +195,17 @@ init_bot_repo() {
         success "approved already exists"
     fi
 
-    # Create workspace config files if they don't exist
-    if [[ ! -f "${BOT_REPOS_DIR}/${INSTANCE_NAME}/working_repo/workspace/SOUL.md" ]]; then
-        info "Creating bot config files..."
-        mkdir -p "${BOT_REPOS_DIR}/${INSTANCE_NAME}/working_repo/workspace/skills"
-        mkdir -p "${BOT_REPOS_DIR}/${INSTANCE_NAME}/working_repo/workspace/memory"
+    # Create state directory
+    mkdir -p "${BOT_REPOS_DIR}/${INSTANCE_NAME}/state"
 
-        cat > "${BOT_REPOS_DIR}/${INSTANCE_NAME}/working_repo/workspace/SOUL.md" <<'EOF'
+    # Create workspace config files if they don't exist
+    if [[ ! -f "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/workspace/SOUL.md" ]]; then
+        info "Creating bot config files..."
+        mkdir -p "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/workspace/skills"
+        mkdir -p "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/workspace/memory"
+        mkdir -p "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/workspace/${INSTANCE_NAME}_save"
+
+        cat > "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/workspace/SOUL.md" <<'EOF'
 # Soul
 
 You are a helpful AI assistant running in the ClawFactory secure environment.
@@ -226,9 +221,9 @@ You are a helpful AI assistant running in the ClawFactory secure environment.
 ## Workspace Security
 
 Your workspace is version-controlled. To modify your configuration:
-1. Write changes to `/workspace/proposals/workspace/`
-2. Commit and push to create a proposal branch
-3. Notify your operator for review
+1. Write changes to `/workspace/approved/workspace/`
+2. Create a branch, commit, and push
+3. Open a PR for review
 4. Wait for approval before changes take effect
 
 See `skills/propose.md` for detailed instructions.
@@ -239,9 +234,10 @@ See `skills/propose.md` for detailed instructions.
 - You can propose changes to SOUL.md, TOOLS.md, etc.
 - Changes require human approval before they take effect
 - Memory search is enabled for context recall
+- Your save state goes in the {instance}_save/ directory
 EOF
 
-        cat > "${BOT_REPOS_DIR}/${INSTANCE_NAME}/working_repo/workspace/policies.yml" <<'EOF'
+        cat > "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/workspace/policies.yml" <<'EOF'
 # Policies
 
 allowed_actions:
@@ -250,6 +246,7 @@ allowed_actions:
   - create_commits
   - open_pull_requests
   - backup_memory
+  - create_snapshots
 
 forbidden_actions:
   - direct_promotion
@@ -258,20 +255,22 @@ forbidden_actions:
   - docker_access
 EOF
 
-        cat > "${BOT_REPOS_DIR}/${INSTANCE_NAME}/working_repo/workspace/skills/propose.md" <<'EOF'
+        cat > "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/workspace/skills/propose.md" <<'EOF'
 # Propose Changes Skill
 
 When you need to modify your configuration, use the proposal workflow.
 
 ## How to Propose
 
-1. Write changes to `/workspace/proposals/workspace/`
-2. Commit and push: `git add . && git commit -m "Proposal: description" && git push origin HEAD:refs/heads/proposal/name`
-3. Notify your operator for review
-4. Wait for approval
+1. Write changes to `/workspace/approved/workspace/`
+2. Create a branch: `git checkout -b proposal/my-change`
+3. Commit and push: `git add . && git commit -m "Proposal: description" && git push origin proposal/my-change`
+4. Open a PR on GitHub
+5. Notify your operator for review
+6. Wait for approval
 EOF
 
-        cat > "${BOT_REPOS_DIR}/${INSTANCE_NAME}/working_repo/workspace/skills/memory-backup.md" <<'EOF'
+        cat > "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/workspace/skills/memory-backup.md" <<'EOF'
 # Memory Backup Skill
 
 Your memories persist across restarts. To backup to GitHub:
@@ -281,9 +280,25 @@ curl -X POST http://controller:8080/memory/backup
 ```
 
 This commits memory files and pushes to GitHub for disaster recovery.
+
+To create an encrypted snapshot of your full state (including embeddings):
+
+```bash
+curl -X POST http://controller:8080/snapshot
+```
 EOF
 
-        cd "${BOT_REPOS_DIR}/${INSTANCE_NAME}/working_repo"
+        # Create initial package.json for bot save state
+        cat > "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/workspace/${INSTANCE_NAME}_save/package.json" <<EOF
+{
+  "name": "${INSTANCE_NAME}-save",
+  "version": "1.0.0",
+  "description": "Declarative dependencies for ${INSTANCE_NAME}",
+  "dependencies": {}
+}
+EOF
+
+        cd "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved"
         git add workspace/
         git commit -m "Add ClawFactory bot config files"
         git push origin main
@@ -293,11 +308,6 @@ EOF
     else
         success "Bot config files already exist"
     fi
-
-    # Pull latest to approved
-    cd "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved"
-    git pull origin main 2>/dev/null || true
-    cd "${SCRIPT_DIR}"
 
     success "Bot repository initialized"
 }
@@ -687,7 +697,7 @@ configure_github_auto() {
 
     # Update local repo to push to GitHub
     info "Configuring local repo to push to GitHub..."
-    cd "${BOT_REPOS_DIR}/${INSTANCE_NAME}/working_repo"
+    cd "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved"
     git remote set-url origin "https://github.com/${repo_owner}/${GITHUB_BOT_REPO}.git" 2>/dev/null || \
         git remote add origin "https://github.com/${repo_owner}/${GITHUB_BOT_REPO}.git"
 
@@ -700,7 +710,7 @@ configure_github_auto() {
     echo "Webhook URL: ${CONTROLLER_URL}/webhook/github"
     echo ""
     echo "Note: You may need to push the initial bot content to GitHub:"
-    echo "  cd bot_repos/${INSTANCE_NAME}/working_repo && git push -u origin main"
+    echo "  cd bot_repos/${INSTANCE_NAME}/approved && git push -u origin main"
     echo ""
 }
 

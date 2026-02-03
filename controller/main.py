@@ -3,9 +3,10 @@
 ClawFactory Controller - Authority & Promotion Service
 
 Responsibilities:
-- Receive GitHub webhooks (PR merged → promote)
-- Perform promotions (working_repo → approved)
+- Receive GitHub webhooks (PR merged → pull main)
+- Perform promotions (pull main after PR merge)
 - Restart Gateway after promotion
+- Create encrypted snapshots of bot state
 - Host approval UI for offline mode
 - Audit logging
 """
@@ -26,8 +27,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 # Configuration from environment
 APPROVED_DIR = Path(os.environ.get("APPROVED_DIR", "/srv/bot/approved"))
-WORKING_REPO = Path(os.environ.get("WORKING_REPO", "/srv/bot/working_repo"))
-OPENCLAW_HOME = Path(os.environ.get("OPENCLAW_HOME", "/srv/openclaw-home"))
+OPENCLAW_HOME = Path(os.environ.get("OPENCLAW_HOME", "/srv/bot/state"))
 AUDIT_LOG = Path(os.environ.get("AUDIT_LOG", "/srv/audit/audit.jsonl"))
 GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
 ALLOWED_MERGE_ACTORS = os.environ.get("ALLOWED_MERGE_ACTORS", "").split(",")
@@ -35,6 +35,8 @@ INSTANCE_NAME = os.environ.get("INSTANCE_NAME", "default")
 GATEWAY_CONTAINER = os.environ.get("GATEWAY_CONTAINER", f"clawfactory-{INSTANCE_NAME}-gateway")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "")
 CONTROLLER_API_TOKEN = os.environ.get("CONTROLLER_API_TOKEN", "")
+SNAPSHOTS_DIR = Path(os.environ.get("SNAPSHOTS_DIR", "/srv/snapshots"))
+AGE_KEY = Path(os.environ.get("AGE_KEY", "/srv/secrets/snapshot.key"))
 
 app = FastAPI(title="ClawFactory Controller", version="1.0.0")
 
@@ -1028,13 +1030,12 @@ async def get_audit(limit: int = 50):
 
 def backup_memory() -> dict:
     """
-    List memory files in working_repo ready for commit.
+    List memory files in approved repo ready for commit.
 
-    Memory now persists directly in working_repo via volume mount,
-    so no copying is needed - just list what's there.
+    Memory persists directly in approved/workspace/memory/ via volume mount.
     """
-    memory_dir = WORKING_REPO / "workspace" / "memory"
-    long_term = WORKING_REPO / "workspace" / "MEMORY.md"
+    memory_dir = APPROVED_DIR / "workspace" / "memory"
+    long_term = APPROVED_DIR / "workspace" / "MEMORY.md"
 
     files = []
 
@@ -1053,25 +1054,24 @@ def commit_and_push_memory() -> bool:
         # Add memory files
         subprocess.run(
             ["git", "add", "workspace/memory/", "workspace/MEMORY.md"],
-            cwd=WORKING_REPO,
+            cwd=APPROVED_DIR,
             capture_output=True,
         )
 
         # Check if there are changes to commit
         result = subprocess.run(
             ["git", "diff", "--cached", "--quiet"],
-            cwd=WORKING_REPO,
+            cwd=APPROVED_DIR,
         )
         if result.returncode == 0:
             # No changes
             return True
 
         # Commit
-        from datetime import datetime
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         result = subprocess.run(
             ["git", "commit", "-m", f"Backup agent memory - {timestamp}"],
-            cwd=WORKING_REPO,
+            cwd=APPROVED_DIR,
             capture_output=True,
             text=True,
         )
@@ -1082,7 +1082,7 @@ def commit_and_push_memory() -> bool:
         # Push
         result = subprocess.run(
             ["git", "push", "origin", "main"],
-            cwd=WORKING_REPO,
+            cwd=APPROVED_DIR,
             capture_output=True,
             text=True,
             timeout=60,
@@ -1134,19 +1134,160 @@ async def memory_status(
     if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    memory_src = OPENCLAW_HOME / "workspace" / "memory"
-    long_term_src = OPENCLAW_HOME / "workspace" / "MEMORY.md"
+    # Memory markdown in approved repo
+    memory_dir = APPROVED_DIR / "workspace" / "memory"
+    long_term = APPROVED_DIR / "workspace" / "MEMORY.md"
 
     files = []
-    if memory_src.exists():
-        files.extend([f.name for f in memory_src.glob("*.md")])
-    if long_term_src.exists():
+    if memory_dir.exists():
+        files.extend([f.name for f in memory_dir.glob("*.md")])
+    if long_term.exists():
         files.append("MEMORY.md")
+
+    # Embeddings database in state
+    embeddings_db = OPENCLAW_HOME / "memory" / "main.sqlite"
 
     return {
         "memory_files": files,
-        "openclaw_home": str(OPENCLAW_HOME),
+        "embeddings_db": str(embeddings_db) if embeddings_db.exists() else None,
+        "embeddings_size": embeddings_db.stat().st_size if embeddings_db.exists() else 0,
     }
+
+
+# ============================================================
+# Encrypted Snapshots
+# ============================================================
+
+def create_snapshot() -> dict:
+    """Create an encrypted snapshot of bot state."""
+    if not AGE_KEY.exists():
+        return {"error": "No encryption key found. Run: ./clawfactory.sh snapshot keygen"}
+
+    # Get public key from private key file
+    pubkey = None
+    with open(AGE_KEY) as f:
+        for line in f:
+            if "public key:" in line:
+                pubkey = line.split(": ")[1].strip()
+                break
+
+    if not pubkey:
+        return {"error": "Could not read public key from key file"}
+
+    SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+    snapshot_name = f"snapshot-{timestamp}.tar.age"
+    snapshot_path = SNAPSHOTS_DIR / snapshot_name
+
+    # Create tarball of state (excluding installed packages and session logs)
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    try:
+        # Create tar
+        result = subprocess.run(
+            [
+                "tar", "-C", str(OPENCLAW_HOME), "-cf", tmp_path,
+                "--exclude=*.tmp*",
+                "--exclude=agents/*/sessions/*.jsonl",
+                "--exclude=installed",
+                "--exclude=installed/*",
+                "."
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return {"error": f"Failed to create tarball: {result.stderr}"}
+
+        # Encrypt with age
+        result = subprocess.run(
+            ["age", "-r", pubkey, "-o", str(snapshot_path), tmp_path],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return {"error": f"Failed to encrypt: {result.stderr}"}
+
+        # Update latest symlink
+        latest_link = SNAPSHOTS_DIR / "latest.tar.age"
+        if latest_link.is_symlink():
+            latest_link.unlink()
+        latest_link.symlink_to(snapshot_name)
+
+        # Get size
+        size = snapshot_path.stat().st_size
+
+        audit_log("snapshot_created", {"name": snapshot_name, "size": size})
+
+        return {
+            "status": "created",
+            "name": snapshot_name,
+            "size": size,
+            "path": str(snapshot_path),
+        }
+    finally:
+        # Clean up temp file
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+def list_snapshots() -> list:
+    """List available snapshots."""
+    if not SNAPSHOTS_DIR.exists():
+        return []
+
+    snapshots = []
+    latest_target = None
+
+    latest_link = SNAPSHOTS_DIR / "latest.tar.age"
+    if latest_link.is_symlink():
+        latest_target = latest_link.resolve().name
+
+    for f in sorted(SNAPSHOTS_DIR.glob("snapshot-*.tar.age"), reverse=True):
+        snapshots.append({
+            "name": f.name,
+            "size": f.stat().st_size,
+            "latest": f.name == latest_target,
+            "created": f.name.replace("snapshot-", "").replace(".tar.age", ""),
+        })
+
+    return snapshots
+
+
+@app.post("/snapshot")
+@app.post("/controller/snapshot")
+async def snapshot_create(
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Create an encrypted snapshot of bot state."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    audit_log("snapshot_requested", {})
+    result = create_snapshot()
+
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+
+    return result
+
+
+@app.get("/snapshot")
+@app.get("/controller/snapshot")
+async def snapshot_list(
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """List available snapshots."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    return {"snapshots": list_snapshots()}
 
 
 # ============================================================
