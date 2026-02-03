@@ -1,6 +1,6 @@
 # ClawFactory
 
-This is a work in progress! Currently the bot can still write to self and persist changes, but it does at least allow repo changes and long term memory to be backed up and versioned.
+This is a work in progress! Currently the bot can still write to self and persist changes (this is risky), but it does at least allow repo changes and long term memory to be backed up and versioned.
 
 currently the gateway ui isnt accessible.. kind of by design until i implement the runner
 (quarantine) layer. 
