@@ -57,7 +57,7 @@ This guide walks you through obtaining each API key needed for a fresh ClawFacto
 
 ## AI Provider Keys (Choose at least one)
 
-### Anthropic (Claude) - Recommended
+### Anthropic (Claude) - note (best model, expensive)
 
 Best for: Primary model, high-quality reasoning
 
@@ -74,7 +74,7 @@ Best for: Primary model, high-quality reasoning
 
 ---
 
-### Kimi K2 (Moonshot AI)
+### Kimi K2 (Moonshot AI) Recommended (2nd best, more then 8x cheaper than claude!)
 
 Best for: High-performance alternative, 256k context window
 
@@ -90,7 +90,7 @@ Best for: High-performance alternative, 256k context window
 
 ---
 
-### OpenAI (GPT-4)
+### OpenAI (GPT-4) - note: you want one of these for memory embeddings, unless you want to do local.
 
 Best for: GPT models, widely compatible
 
@@ -103,25 +103,6 @@ Best for: GPT models, widely compatible
 **Key format**: `sk-proj-...` or `sk-...`
 
 **Pricing**: ~$2.50/M input, ~$10/M output (GPT-4o)
-
----
-
-### Google Gemini
-
-Best for: Gemini models + memory embeddings (recommended for embeddings)
-
-1. Go to [Google AI Studio](https://aistudio.google.com/)
-2. Sign in with Google account
-3. Click **Get API key** (top right)
-4. Click **Create API key**
-5. Select a Google Cloud project (or create one)
-6. Copy the key
-
-**Key format**: `AIza...` (39 characters)
-
-**Pricing**: Free tier available, then ~$0.075/M input (Flash)
-
-**Note**: Gemini keys also work for embedding models used in memory search.
 
 ---
 
