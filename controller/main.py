@@ -545,10 +545,19 @@ async def promote_ui(
                 <div class="card">
                     <button onclick="fetchHealth()">Health Check</button>
                     <button onclick="fetchStatus()" class="secondary">Full Status</button>
-                    <button onclick="runSecurityAudit()" class="secondary">Security Audit</button>
-                    <button onclick="runSecurityAudit(true)" class="secondary">Deep Audit</button>
+                    <button onclick="restartGateway()" class="danger">Restart Gateway</button>
                     <div id="status-result" class="result"></div>
+                    <button onclick="runSecurityAudit()" class="secondary" style="margin-top: 0.5rem;">Security Audit</button>
+                    <button onclick="runSecurityAudit(true)" class="secondary">Deep Audit</button>
                     <div id="security-result" class="result"></div>
+                </div>
+
+                <h2>Snapshots</h2>
+                <div class="card">
+                    <button onclick="createSnapshot()">Create Snapshot</button>
+                    <button onclick="fetchSnapshots()" class="secondary">Refresh List</button>
+                    <div id="snapshot-result" class="result"></div>
+                    <div id="snapshot-list" style="margin-top: 0.5rem;"></div>
                 </div>
 
                 <h2>Audit Log</h2>
@@ -558,6 +567,28 @@ async def promote_ui(
                     <pre id="audit-log">Click Refresh to load audit log...</pre>
                 </div>
             </div>
+        </div>
+
+        <h2>Gateway Config</h2>
+        <div class="card">
+            <p style="color: #888; font-size: 0.85rem;">Edit openclaw.json. Save will stop gateway, apply changes, and restart.</p>
+            <div style="margin-bottom: 0.5rem;">
+                <label style="color: #888; font-size: 0.85rem;">Available RAM for Ollama: </label>
+                <input type="number" id="available-ram" value="64" min="8" max="512" style="width: 60px; padding: 0.3rem; background: #2d2d2d; border: 1px solid #444; color: #e0e0e0; border-radius: 4px;">
+                <span style="color: #888; font-size: 0.85rem;">GB</span>
+                <span style="color: #666; font-size: 0.75rem; margin-left: 1rem;">(used to calculate safe context windows)</span>
+            </div>
+            <button onclick="loadConfig()">Load Config</button>
+            <button onclick="validateConfig()" class="secondary">Validate</button>
+            <button onclick="saveConfig()" class="danger">Save &amp; Restart</button>
+            <button onclick="formatConfig()" class="secondary">Format JSON</button>
+            <div id="config-result" class="result"></div>
+            <div id="ollama-models" style="margin-top: 0.5rem;"></div>
+            <div style="display: flex; justify-content: space-between; margin-top: 0.5rem; font-size: 0.75rem; color: #888;">
+                <span id="cursor-pos">Line 1, Col 1</span>
+                <span id="json-status"></span>
+            </div>
+            <textarea id="config-editor" style="width: 100%; height: 400px; margin-top: 0.25rem; font-family: monospace; font-size: 0.8rem; background: #1a1a1a; color: #e0e0e0; border: 1px solid #444; border-radius: 4px; padding: 0.5rem; resize: vertical; line-height: 1.4;" placeholder="Click 'Load Config' to view..."></textarea>
         </div>
 
         <h2>Gateway Pairing</h2>
@@ -678,6 +709,474 @@ async def promote_ui(
                     result.className = 'result error';
                     result.textContent = 'Error: ' + e.message;
                 }}
+            }}
+
+            // Gateway restart
+            async function restartGateway() {{
+                if (!confirm('Restart the gateway? This will briefly interrupt the bot.')) return;
+                const result = document.getElementById('status-result');
+                result.style.display = 'block';
+                result.className = 'result';
+                result.textContent = 'Restarting gateway...';
+                try {{
+                    const resp = await fetch(basePath + '/gateway/restart', {{ method: 'POST' }});
+                    const data = await resp.json();
+                    if (data.error) {{
+                        result.className = 'result error';
+                        result.textContent = data.error;
+                    }} else {{
+                        result.textContent = 'Gateway restarting... Status: ' + (data.status || 'ok');
+                    }}
+                }} catch(e) {{
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
+                }}
+            }}
+
+            // Snapshots
+            async function createSnapshot() {{
+                const result = document.getElementById('snapshot-result');
+                result.style.display = 'block';
+                result.className = 'result';
+                result.textContent = 'Creating snapshot...';
+                try {{
+                    const resp = await fetch(basePath + '/snapshot', {{ method: 'POST' }});
+                    const data = await resp.json();
+                    if (data.error) {{
+                        result.className = 'result error';
+                        result.textContent = data.error;
+                    }} else {{
+                        result.textContent = 'Created: ' + data.name + ' (' + formatSize(data.size) + ')';
+                        fetchSnapshots();
+                    }}
+                }} catch(e) {{
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
+                }}
+            }}
+
+            async function fetchSnapshots() {{
+                const list = document.getElementById('snapshot-list');
+                list.innerHTML = '<p style="color: #888;">Loading...</p>';
+                try {{
+                    const resp = await fetch(basePath + '/snapshot');
+                    const data = await resp.json();
+                    if (!data.snapshots || data.snapshots.length === 0) {{
+                        list.innerHTML = '<p style="color: #888; font-size: 0.85rem;">No snapshots yet.</p>';
+                        return;
+                    }}
+                    let html = '<div style="max-height: 200px; overflow-y: auto;">';
+                    data.snapshots.forEach(s => {{
+                        const latest = s.latest ? ' <span style="color: #4CAF50;">(latest)</span>' : '';
+                        html += `<div style="padding: 0.3rem 0; border-bottom: 1px solid #333; font-size: 0.85rem;">
+                            <code>${{s.name}}</code>${{latest}}<br>
+                            <small style="color: #888;">${{formatSize(s.size)}} · ${{s.created}}</small>
+                        </div>`;
+                    }});
+                    html += '</div>';
+                    list.innerHTML = html;
+                }} catch(e) {{
+                    list.innerHTML = `<p class="error" style="color: #ef9a9a;">Error: ${{e.message}}</p>`;
+                }}
+            }}
+
+            function formatSize(bytes) {{
+                if (bytes < 1024) return bytes + ' B';
+                if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
+                return (bytes/(1024*1024)).toFixed(1) + ' MB';
+            }}
+
+            // Store config path for editor links
+            let configHostPath = '';
+
+            // Parse JSON error to extract line/column
+            function parseJsonError(errorMsg, jsonText) {{
+                // Try to extract position from error message
+                // Common formats: "at position 123", "at line 5 column 10", "Unexpected token X in JSON at position 456"
+                let line = 1, col = 1, pos = -1;
+
+                const posMatch = errorMsg.match(/position\s+(\d+)/i);
+                if (posMatch) {{
+                    pos = parseInt(posMatch[1]);
+                    // Convert position to line/column
+                    let currentPos = 0;
+                    const lines = jsonText.split('\\n');
+                    for (let i = 0; i < lines.length; i++) {{
+                        if (currentPos + lines[i].length >= pos) {{
+                            line = i + 1;
+                            col = pos - currentPos + 1;
+                            break;
+                        }}
+                        currentPos += lines[i].length + 1; // +1 for newline
+                    }}
+                }}
+
+                const lineMatch = errorMsg.match(/line\s+(\d+)/i);
+                if (lineMatch) line = parseInt(lineMatch[1]);
+
+                const colMatch = errorMsg.match(/column\s+(\d+)/i);
+                if (colMatch) col = parseInt(colMatch[1]);
+
+                return {{ line, col, pos }};
+            }}
+
+            // Format JSON error with clickable link
+            function formatJsonError(errorMsg, jsonText) {{
+                const {{ line, col }} = parseJsonError(errorMsg, jsonText);
+                let html = `<span style="color: #ef9a9a;">Invalid JSON: ${{errorMsg}}</span><br>`;
+                if (configHostPath) {{
+                    const vscodeUrl = `vscode://file/${{window.location.origin.includes('localhost') ? '/Users/elimaine/code/clawfactory/' : ''}}${{configHostPath}}:${{line}}:${{col}}`;
+                    html += `<a href="${{vscodeUrl}}" style="color: #2196F3;">Open in VS Code at line ${{line}}</a>`;
+                    html += ` | <a href="#" onclick="jumpToLine(${{line}}); return false;" style="color: #4CAF50;">Jump to line ${{line}}</a>`;
+                }} else {{
+                    html += `<a href="#" onclick="jumpToLine(${{line}}); return false;" style="color: #4CAF50;">Jump to line ${{line}}</a>`;
+                }}
+                return html;
+            }}
+
+            // Jump to line in textarea
+            function jumpToLine(lineNum) {{
+                const editor = document.getElementById('config-editor');
+                const lines = editor.value.split('\\n');
+                let pos = 0;
+                for (let i = 0; i < lineNum - 1 && i < lines.length; i++) {{
+                    pos += lines[i].length + 1;
+                }}
+                editor.focus();
+                editor.setSelectionRange(pos, pos + (lines[lineNum - 1]?.length || 0));
+                // Scroll to position
+                const lineHeight = 16;
+                editor.scrollTop = (lineNum - 5) * lineHeight;
+            }}
+
+            // Config editor
+            async function loadConfig() {{
+                const editor = document.getElementById('config-editor');
+                const result = document.getElementById('config-result');
+                const ollamaDiv = document.getElementById('ollama-models');
+                result.style.display = 'block';
+                result.className = 'result';
+                result.textContent = 'Loading...';
+                try {{
+                    const resp = await fetch(basePath + '/gateway/config');
+                    const data = await resp.json();
+                    if (data.error) {{
+                        result.className = 'result error';
+                        result.textContent = data.error;
+                        return;
+                    }}
+                    editor.value = JSON.stringify(data.config, null, 2);
+                    configHostPath = data.config_path || '';
+
+                    // Show Ollama models if available
+                    if (data.ollama_models && data.ollama_models.length > 0) {{
+                        // Store raw model data globally
+                        window.ollamaModelsRaw = data.ollama_models;
+
+                        renderOllamaModels();
+                    }} else {{
+                        ollamaDiv.innerHTML = '<p style="color: #888; font-size: 0.85rem;">No Ollama models detected. Is Ollama running?</p>';
+                    }}
+
+                    result.textContent = 'Config loaded. Validating...';
+                    // Also validate the config
+                    validateConfig();
+                }} catch(e) {{
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
+                }}
+            }}
+
+            async function saveConfig() {{
+                const editor = document.getElementById('config-editor');
+                const result = document.getElementById('config-result');
+
+                // Validate JSON first
+                let config;
+                try {{
+                    config = JSON.parse(editor.value);
+                }} catch(e) {{
+                    result.style.display = 'block';
+                    result.className = 'result error';
+                    result.innerHTML = formatJsonError(e.message, editor.value);
+                    return;
+                }}
+
+                if (!confirm('This will stop the gateway, save the config, and restart. Continue?')) return;
+
+                result.style.display = 'block';
+                result.className = 'result';
+                result.textContent = 'Saving config and restarting gateway...';
+
+                try {{
+                    const resp = await fetch(basePath + '/gateway/config', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ config }})
+                    }});
+                    const data = await resp.json();
+                    if (data.error) {{
+                        result.className = 'result error';
+                        result.textContent = data.error;
+                    }} else {{
+                        result.textContent = 'Config saved. Gateway restarting...';
+                    }}
+                }} catch(e) {{
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
+                }}
+            }}
+
+            function formatConfig() {{
+                const editor = document.getElementById('config-editor');
+                const result = document.getElementById('config-result');
+                try {{
+                    const config = JSON.parse(editor.value);
+                    editor.value = JSON.stringify(config, null, 2);
+                    result.style.display = 'block';
+                    result.className = 'result';
+                    result.textContent = 'JSON formatted.';
+                }} catch(e) {{
+                    result.style.display = 'block';
+                    result.className = 'result error';
+                    result.innerHTML = formatJsonError(e.message, editor.value);
+                }}
+            }}
+
+            async function validateConfig() {{
+                const result = document.getElementById('config-result');
+                result.style.display = 'block';
+                result.className = 'result';
+                result.textContent = 'Validating config against OpenClaw schema...';
+
+                try {{
+                    const resp = await fetch(basePath + '/gateway/config/validate');
+                    const data = await resp.json();
+
+                    if (data.error) {{
+                        result.className = 'result error';
+                        result.textContent = data.error;
+                        return;
+                    }}
+
+                    if (data.valid) {{
+                        result.innerHTML = '<span style="color: #4CAF50;">Config is valid</span>';
+                    }} else {{
+                        let html = '<span style="color: #ef9a9a; font-weight: bold;">Config has errors:</span><br>';
+                        if (data.issues && data.issues.length > 0) {{
+                            data.issues.forEach(issue => {{
+                                const color = issue.severity === 'error' ? '#ef9a9a' : '#ffcc80';
+                                html += `<div style="margin: 0.3rem 0; padding: 0.3rem; background: #333; border-radius: 3px;">`;
+                                html += `<span style="color: ${{color}};">${{issue.message}}</span>`;
+                                if (issue.key) {{
+                                    html += ` <a href="#" onclick="searchInEditor('${{issue.key}}'); return false;" style="color: #2196F3; font-size: 0.85rem;">Find in editor</a>`;
+                                }}
+                                html += `</div>`;
+                            }});
+                        }}
+                        if (data.raw) {{
+                            html += `<pre style="margin-top: 0.5rem; font-size: 0.75rem; color: #888; white-space: pre-wrap;">${{data.raw}}</pre>`;
+                        }}
+                        result.className = 'result error';
+                        result.innerHTML = html;
+                    }}
+                }} catch(e) {{
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
+                }}
+            }}
+
+            function searchInEditor(text) {{
+                const editor = document.getElementById('config-editor');
+                const pos = editor.value.indexOf(text);
+                if (pos >= 0) {{
+                    editor.focus();
+                    editor.setSelectionRange(pos, pos + text.length);
+                    // Calculate line number for scroll
+                    const lines = editor.value.substring(0, pos).split('\\n');
+                    const lineHeight = 16;
+                    editor.scrollTop = (lines.length - 3) * lineHeight;
+                }}
+            }}
+
+            // Calculate safe context window based on RAM and model size
+            function calcSafeContext(paramBillions, maxContext, availableRamGb) {{
+                // Model weights (Q4 quantized): ~0.5-0.6 GB per billion params
+                const modelRam = paramBillions * 0.6;
+                // System overhead
+                const systemRam = 6;
+                // Available for KV cache
+                const kvRam = availableRamGb - modelRam - systemRam;
+
+                if (kvRam <= 0) return 4096; // Minimum
+
+                // KV cache estimates (fp16, typical GQA models):
+                // - 7B model: ~0.5GB per 8k context
+                // - 14B model: ~1GB per 8k context
+                // - 32B model: ~2GB per 8k context (GQA helps)
+                // - 70B model: ~4GB per 8k context
+                // Formula: GB per 8k ≈ paramBillions * 0.06
+                const gbPer8k = paramBillions * 0.06;
+                const maxContextFromRam = Math.floor((kvRam / gbPer8k) * 8192);
+
+                // Cap at model's actual max and round to nice number
+                let safeContext = Math.min(maxContextFromRam, maxContext);
+                // Round down to nearest 4k
+                safeContext = Math.floor(safeContext / 4096) * 4096;
+                // Minimum 4k, max what model supports
+                return Math.max(4096, Math.min(safeContext, maxContext));
+            }}
+
+            function renderOllamaModels() {{
+                const ollamaDiv = document.getElementById('ollama-models');
+                const availableRam = parseInt(document.getElementById('available-ram').value) || 64;
+                const editor = document.getElementById('config-editor');
+
+                if (!window.ollamaModelsRaw || window.ollamaModelsRaw.length === 0) {{
+                    ollamaDiv.innerHTML = '<p style="color: #888; font-size: 0.85rem;">No Ollama models detected.</p>';
+                    return;
+                }}
+
+                // Get already configured model IDs
+                let configuredIds = new Set();
+                try {{
+                    const config = JSON.parse(editor.value);
+                    const models = config?.models?.providers?.ollama?.models || [];
+                    models.forEach(m => configuredIds.add(m.id));
+                }} catch(e) {{
+                    // Ignore parse errors
+                }}
+
+                // Build config entries with RAM-adjusted context
+                window.ollamaModels = {{}};
+                window.ollamaModelsRaw.forEach(m => {{
+                    const safeCtx = calcSafeContext(m.param_billions || 7, m.context_window || 4096, availableRam);
+                    window.ollamaModels[m.id] = {{
+                        id: m.id,
+                        name: m.friendly_name,
+                        reasoning: m.reasoning,
+                        input: ["text"],
+                        cost: {{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }},
+                        contextWindow: safeCtx,
+                        maxTokens: Math.min(Math.floor(safeCtx / 4), 8192)
+                    }};
+                }});
+
+                // Filter out models already in config
+                const availableModels = window.ollamaModelsRaw.filter(m => !configuredIds.has(m.id));
+
+                if (availableModels.length === 0) {{
+                    ollamaDiv.innerHTML = '<p style="color: #888; font-size: 0.85rem;">All Ollama models already in config.</p>';
+                    return;
+                }}
+
+                let html = '<div style="background: #252525; padding: 0.5rem; border-radius: 4px; margin-bottom: 0.5rem;">';
+                html += '<strong style="color: #4CAF50;">Ollama Models:</strong> ';
+                html += '<span style="color: #888; font-size: 0.85rem;">(click to add to config, context adjusted for ' + availableRam + 'GB RAM)</span><br>';
+                availableModels.forEach(m => {{
+                    const safeCtx = window.ollamaModels[m.id].contextWindow;
+                    const maxCtx = m.context_window || 4096;
+                    const reasoningBadge = m.reasoning ? ' <span style="color: #ff9800; font-size: 0.7rem;">⚡reasoning</span>' : '';
+                    const ctxColor = safeCtx < maxCtx ? '#ff9800' : '#4CAF50';
+                    const ctxStr = ` <span style="color: ${{ctxColor}}; font-size: 0.7rem;">${{(safeCtx/1024).toFixed(0)}}k</span>`;
+                    const paramStr = m.parameters ? ` <span style="color: #666; font-size: 0.7rem;">${{m.parameters}}</span>` : '';
+                    html += `<code style="cursor: pointer; background: #333; padding: 0.2rem 0.4rem; margin: 0.2rem; display: inline-block; border-radius: 3px;" onclick="addOllamaModel('${{m.id}}')">${{m.id}}${{paramStr}}${{ctxStr}}${{reasoningBadge}}</code>`;
+                }});
+                html += '</div>';
+                ollamaDiv.innerHTML = html;
+            }}
+
+            // Re-render when RAM changes
+            document.getElementById('available-ram').addEventListener('change', renderOllamaModels);
+
+            // Update cursor position display
+            document.getElementById('config-editor').addEventListener('keyup', updateCursorPos);
+            document.getElementById('config-editor').addEventListener('click', updateCursorPos);
+            document.getElementById('config-editor').addEventListener('input', function() {{
+                updateCursorPos();
+                validateJsonLive();
+            }});
+
+            function updateCursorPos() {{
+                const editor = document.getElementById('config-editor');
+                const pos = editor.selectionStart;
+                const text = editor.value.substring(0, pos);
+                const lines = text.split('\\n');
+                const line = lines.length;
+                const col = lines[lines.length - 1].length + 1;
+                document.getElementById('cursor-pos').textContent = `Line ${{line}}, Col ${{col}}`;
+            }}
+
+            function validateJsonLive() {{
+                const editor = document.getElementById('config-editor');
+                const status = document.getElementById('json-status');
+                if (!editor.value.trim()) {{
+                    status.textContent = '';
+                    return;
+                }}
+                try {{
+                    JSON.parse(editor.value);
+                    status.innerHTML = '<span style="color: #4CAF50;">Valid JSON</span>';
+                }} catch(e) {{
+                    const {{ line }} = parseJsonError(e.message, editor.value);
+                    status.innerHTML = `<span style="color: #ef9a9a;">Error at line ${{line}}</span>`;
+                }}
+            }}
+
+            function addOllamaModel(modelId) {{
+                const editor = document.getElementById('config-editor');
+                const result = document.getElementById('config-result');
+
+                if (!window.ollamaModels || !window.ollamaModels[modelId]) {{
+                    result.style.display = 'block';
+                    result.className = 'result error';
+                    result.textContent = 'Model config not found. Reload config first.';
+                    return;
+                }}
+
+                let config;
+                try {{
+                    config = JSON.parse(editor.value);
+                }} catch(e) {{
+                    result.style.display = 'block';
+                    result.className = 'result error';
+                    result.textContent = 'Invalid JSON in editor. Load config first.';
+                    return;
+                }}
+
+                // Ensure path exists: models.providers.ollama.models
+                if (!config.models) config.models = {{}};
+                if (!config.models.providers) config.models.providers = {{}};
+                if (!config.models.providers.ollama) {{
+                    config.models.providers.ollama = {{
+                        baseUrl: "http://host.docker.internal:11434/v1",
+                        apiKey: "ollama-local",
+                        models: []
+                    }};
+                }}
+                if (!config.models.providers.ollama.models) {{
+                    config.models.providers.ollama.models = [];
+                }}
+
+                // Check if already exists
+                const existing = config.models.providers.ollama.models.find(m => m.id === modelId);
+                if (existing) {{
+                    result.style.display = 'block';
+                    result.className = 'result';
+                    result.textContent = modelId + ' already in config.';
+                    return;
+                }}
+
+                // Add the model
+                config.models.providers.ollama.models.push(window.ollamaModels[modelId]);
+                editor.value = JSON.stringify(config, null, 2);
+
+                result.style.display = 'block';
+                result.className = 'result';
+                result.textContent = 'Added ' + modelId + ' to config. Click Save & Restart to apply.';
+
+                // Re-render to remove the button
+                renderOllamaModels();
             }}
 
             // Tab switching
@@ -881,8 +1380,9 @@ async def promote_ui(
                 }}
             }}
 
-            // Load audit on page load
+            // Load data on page load
             fetchAudit();
+            fetchSnapshots();
         </script>
     </body>
     </html>
@@ -1291,6 +1791,185 @@ async def snapshot_list(
 
 
 # ============================================================
+# Gateway Config Editor
+# ============================================================
+
+GATEWAY_CONFIG_PATH = OPENCLAW_HOME / "openclaw.json"
+
+
+def fetch_ollama_models() -> list:
+    """Fetch available models from Ollama with full details."""
+    import urllib.request
+    import urllib.error
+
+    # Try common Ollama endpoints
+    base_urls = [
+        "http://host.docker.internal:11434",
+        "http://localhost:11434",
+        "http://ollama:11434",
+    ]
+
+    working_base = None
+    models_list = []
+
+    # First get list of models
+    for base in base_urls:
+        try:
+            req = urllib.request.Request(f"{base}/api/tags", method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode())
+                models_list = data.get("models", [])
+                working_base = base
+                break
+        except Exception:
+            continue
+
+    if not working_base or not models_list:
+        return []
+
+    # Fetch details for each model
+    models = []
+    for m in models_list:
+        name = m.get("name", "")
+        details = m.get("details", {})
+
+        # Get full model info for context window
+        context_window = 4096  # default
+        is_reasoning = False
+        try:
+            show_data = json.dumps({"name": name}).encode()
+            req = urllib.request.Request(
+                f"{working_base}/api/show",
+                data=show_data,
+                method="POST",
+                headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                info = json.loads(resp.read().decode())
+                model_info = info.get("model_info", {})
+
+                # Find context length (different models use different keys)
+                for key, val in model_info.items():
+                    if "context_length" in key.lower() and isinstance(val, int):
+                        context_window = val
+                        break
+
+                # Check if it's a reasoning model
+                model_file = info.get("modelfile", "").lower()
+                if "reason" in name.lower() or "qwq" in name.lower() or "r1" in name.lower():
+                    is_reasoning = True
+        except Exception:
+            pass
+
+        # Build friendly name
+        family = details.get("family", "")
+        params = details.get("parameter_size", "")
+        friendly_name = name.split(":")[0].upper()
+        if params:
+            friendly_name += f" {params}"
+
+        # Parse parameter count from string like "32.8B" or "14B"
+        param_billions = 0
+        if params:
+            try:
+                param_billions = float(params.replace("B", "").replace("b", ""))
+            except ValueError:
+                pass
+
+        models.append({
+            "name": name,
+            "id": name,  # Just the model name, not ollama/ prefix
+            "friendly_name": friendly_name,
+            "size": m.get("size", 0),
+            "family": family,
+            "parameters": params,
+            "param_billions": param_billions,
+            "quantization": details.get("quantization_level", ""),
+            "context_window": context_window,  # Model's max capability
+            "reasoning": is_reasoning,
+        })
+
+    return models
+
+
+@app.get("/gateway/config")
+@app.get("/controller/gateway/config")
+async def gateway_config_get(
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Get the gateway openclaw.json config and available Ollama models."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if not GATEWAY_CONFIG_PATH.exists():
+        return {"error": "Config file not found"}
+
+    try:
+        with open(GATEWAY_CONFIG_PATH) as f:
+            config = json.load(f)
+
+        # Fetch available Ollama models
+        ollama_models = fetch_ollama_models()
+
+        # Build the host path for editor links
+        # Container path: /srv/bot/state/openclaw.json
+        # Host path: bot_repos/{instance}/state/openclaw.json
+        host_config_path = f"bot_repos/{INSTANCE_NAME}/state/openclaw.json"
+
+        return {
+            "config": config,
+            "ollama_models": ollama_models,
+            "config_path": host_config_path,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/gateway/config")
+@app.post("/controller/gateway/config")
+async def gateway_config_save(
+    request: Request,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Save gateway config. Stops gateway, writes config, restarts gateway."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    body = await request.json()
+    config = body.get("config")
+
+    if not config:
+        return {"error": "No config provided"}
+
+    audit_log("gateway_config_save", {"keys": list(config.keys())})
+
+    try:
+        # Stop the gateway first
+        client = docker.from_env()
+        gateway = client.containers.get(GATEWAY_CONTAINER)
+        gateway.stop(timeout=30)
+        audit_log("gateway_stopped_for_config", {})
+
+        # Write the config
+        with open(GATEWAY_CONFIG_PATH, "w") as f:
+            json.dump(config, f, indent=2)
+        audit_log("gateway_config_written", {})
+
+        # Start the gateway
+        gateway.start()
+        audit_log("gateway_started_after_config", {})
+
+        return {"status": "saved", "restarted": True}
+    except Exception as e:
+        audit_log("gateway_config_error", {"error": str(e)})
+        return {"error": str(e)}
+
+
+# ============================================================
 # Gateway Pairing (Device + DM)
 # ============================================================
 
@@ -1303,6 +1982,25 @@ def run_gateway_command(cmd: list[str], timeout: int = 30) -> tuple[bool, str]:
         return exit_code == 0, output.decode() if output else ""
     except Exception as e:
         return False, str(e)
+
+
+@app.post("/gateway/restart")
+@app.post("/controller/gateway/restart")
+async def gateway_restart_endpoint(
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Restart the gateway container."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    audit_log("gateway_restart_requested", {"source": "api"})
+
+    if not restart_gateway():
+        raise HTTPException(status_code=500, detail="Failed to restart gateway")
+
+    return {"status": "restarting", "container": GATEWAY_CONTAINER}
 
 
 @app.get("/gateway/devices")
@@ -1464,3 +2162,270 @@ async def gateway_security_audit(
         return data
     except json.JSONDecodeError:
         return {"error": f"Invalid JSON response: {output[:500]}"}
+
+
+@app.get("/gateway/config/validate")
+@app.get("/controller/gateway/config/validate")
+async def gateway_config_validate(
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Validate gateway config using openclaw doctor."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Run openclaw doctor --json in the gateway container
+    success, output = run_gateway_command(["node", "dist/index.js", "doctor", "--json"], timeout=30)
+
+    # Try to parse JSON output
+    try:
+        data = json.loads(output)
+        return {
+            "valid": data.get("valid", success),
+            "issues": data.get("issues", []),
+            "raw": None,
+        }
+    except json.JSONDecodeError:
+        # Doctor may output non-JSON on error - parse the text
+        issues = []
+        if "Unrecognized key" in output or "Unknown config" in output:
+            # Extract the problematic keys
+            import re
+            key_matches = re.findall(r'["\']?([\w.]+)["\']?\s*:\s*Unrecognized key', output)
+            unknown_matches = re.findall(r'- ([\w.]+)', output)
+            for key in key_matches + unknown_matches:
+                issues.append({
+                    "severity": "error",
+                    "message": f"Unknown config key: {key}",
+                    "key": key,
+                })
+
+        if "Config invalid" in output:
+            # Try to extract the problem description
+            problem_match = re.search(r'Problem:\s*\n\s*-\s*(.+)', output)
+            if problem_match:
+                issues.append({
+                    "severity": "error",
+                    "message": problem_match.group(1).strip(),
+                })
+
+        return {
+            "valid": success and not issues,
+            "issues": issues,
+            "raw": output[:1000] if not issues else None,
+        }
+
+
+# ============================================================
+# Internal Endpoints (no auth - Docker network only)
+# ============================================================
+# These endpoints are NOT exposed via the proxy, only accessible
+# from within the Docker network (gateway container).
+
+@app.post("/internal/snapshot")
+async def internal_snapshot_create():
+    """Create snapshot - internal endpoint (no auth)."""
+    audit_log("snapshot_requested", {"source": "internal"})
+    result = create_snapshot()
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    return result
+
+
+@app.get("/internal/snapshot")
+async def internal_snapshot_list():
+    """List snapshots - internal endpoint (no auth)."""
+    return {"snapshots": list_snapshots()}
+
+
+@app.post("/internal/memory/backup")
+async def internal_memory_backup():
+    """Backup memory - internal endpoint (no auth)."""
+    audit_log("memory_backup_requested", {"source": "internal"})
+    result = backup_memory()
+    if not result["files"]:
+        return {"status": "no_changes", "files": []}
+    if not commit_and_push_memory():
+        raise HTTPException(status_code=500, detail="Failed to push memory backup")
+    audit_log("memory_backup_success", {"files": result["files"]})
+    return {"status": "backed_up", "files": result["files"]}
+
+
+@app.get("/internal/memory/status")
+async def internal_memory_status():
+    """Get memory status - internal endpoint (no auth)."""
+    memory_dir = APPROVED_DIR / "workspace" / "memory"
+    long_term = APPROVED_DIR / "workspace" / "MEMORY.md"
+    files = []
+    if memory_dir.exists():
+        files.extend([f.name for f in memory_dir.glob("*.md")])
+    if long_term.exists():
+        files.append("MEMORY.md")
+    embeddings_db = OPENCLAW_HOME / "memory" / "main.sqlite"
+    return {
+        "memory_files": files,
+        "embeddings_db": str(embeddings_db) if embeddings_db.exists() else None,
+        "embeddings_size": embeddings_db.stat().st_size if embeddings_db.exists() else 0,
+    }
+
+
+class GitPushRequest(BaseModel):
+    branch: str
+
+
+@app.post("/internal/git/push")
+async def internal_git_push(request: GitPushRequest):
+    """Push a branch to origin - internal endpoint (no auth).
+
+    Only allows pushing proposal/* branches for security.
+    The bot commits locally, then calls this to push.
+    """
+    branch = request.branch
+
+    # Security: Only allow proposal branches
+    if not branch.startswith("proposal/"):
+        audit_log("git_push_rejected", {"branch": branch, "reason": "not a proposal branch"})
+        raise HTTPException(
+            status_code=400,
+            detail="Only proposal/* branches can be pushed. Create a branch like 'proposal/my-change'"
+        )
+
+    # Validate branch name (no shell injection)
+    import re
+    if not re.match(r'^proposal/[a-zA-Z0-9_\-/]+$', branch):
+        audit_log("git_push_rejected", {"branch": branch, "reason": "invalid branch name"})
+        raise HTTPException(status_code=400, detail="Invalid branch name")
+
+    audit_log("git_push_requested", {"branch": branch})
+
+    try:
+        # Check if branch exists locally
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", branch],
+            cwd=APPROVED_DIR,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return {"error": f"Branch '{branch}' does not exist locally"}
+
+        # Get GitHub token from environment for authentication
+        github_token = os.environ.get("GITHUB_TOKEN", "")
+
+        # Build environment with credentials if available
+        push_env = os.environ.copy()
+        if github_token:
+            # Use token for HTTPS authentication
+            push_env["GIT_ASKPASS"] = "echo"
+            push_env["GIT_USERNAME"] = "x-access-token"
+            push_env["GIT_PASSWORD"] = github_token
+
+            # Configure git to use the token via credential helper
+            subprocess.run(
+                ["git", "config", "credential.helper", ""],
+                cwd=APPROVED_DIR,
+                capture_output=True,
+            )
+
+            # Get remote URL and inject token
+            remote_result = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=APPROVED_DIR,
+                capture_output=True,
+                text=True,
+            )
+            remote_url = remote_result.stdout.strip()
+
+            # Convert https://github.com/... to https://x-access-token:TOKEN@github.com/...
+            if remote_url.startswith("https://github.com/"):
+                auth_url = remote_url.replace(
+                    "https://github.com/",
+                    f"https://x-access-token:{github_token}@github.com/"
+                )
+                # Temporarily set the authenticated URL
+                subprocess.run(
+                    ["git", "remote", "set-url", "origin", auth_url],
+                    cwd=APPROVED_DIR,
+                    capture_output=True,
+                )
+
+        # Push the branch
+        result = subprocess.run(
+            ["git", "push", "-u", "origin", branch],
+            cwd=APPROVED_DIR,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=push_env,
+        )
+
+        # Restore original remote URL (remove token from URL)
+        if github_token and remote_url:
+            subprocess.run(
+                ["git", "remote", "set-url", "origin", remote_url],
+                cwd=APPROVED_DIR,
+                capture_output=True,
+            )
+
+        if result.returncode != 0:
+            audit_log("git_push_failed", {"branch": branch, "stderr": result.stderr})
+            return {
+                "error": f"Push failed: {result.stderr}",
+                "hint": "Check if GITHUB_TOKEN is configured in controller.env"
+            }
+
+        audit_log("git_push_success", {"branch": branch})
+        return {
+            "status": "pushed",
+            "branch": branch,
+            "output": result.stdout or result.stderr,
+        }
+
+    except subprocess.TimeoutExpired:
+        audit_log("git_push_timeout", {"branch": branch})
+        return {"error": "Push timed out"}
+    except Exception as e:
+        audit_log("git_push_error", {"branch": branch, "error": str(e)})
+        return {"error": str(e)}
+
+
+@app.get("/internal/git/status")
+async def internal_git_status():
+    """Get git status - internal endpoint (no auth)."""
+    try:
+        # Get current branch
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=APPROVED_DIR,
+            capture_output=True,
+            text=True,
+        )
+        current_branch = result.stdout.strip()
+
+        # Get status
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=APPROVED_DIR,
+            capture_output=True,
+            text=True,
+        )
+        changes = result.stdout.strip().split("\n") if result.stdout.strip() else []
+
+        # List local branches
+        result = subprocess.run(
+            ["git", "branch", "--list"],
+            cwd=APPROVED_DIR,
+            capture_output=True,
+            text=True,
+        )
+        branches = [b.strip().lstrip("* ") for b in result.stdout.strip().split("\n") if b.strip()]
+
+        return {
+            "current_branch": current_branch,
+            "changes": changes,
+            "branches": branches,
+            "approved_dir": str(APPROVED_DIR),
+        }
+    except Exception as e:
+        return {"error": str(e)}

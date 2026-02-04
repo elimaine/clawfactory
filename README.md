@@ -112,10 +112,17 @@ secrets/
 This prompts for:
 - **Instance name** (e.g., `bot1`, `prod-agent`) - used for container naming
 - Discord bot token
-- Anthropic API key
-- Gemini API key (for memory embeddings)
+- **AI Providers** (select one or more):
+  - `1` Anthropic (Claude) - Recommended primary
+  - `2` Kimi-K2 (Moonshot) - High-performance alternative
+  - `3` OpenAI (GPT-4)
+  - `4` Google (Gemini) - Also used for memory embeddings
+  - `5` Ollama (Local) - Run models locally
+  - `6` OpenRouter - Multi-provider gateway
 - GitHub organization (optional) - keeps bot repos organized under an org
 - GitHub setup (forks openclaw/openclaw as {instance}-bot)
+
+Example: Enter `1 4 5` to use Anthropic + Gemini + Ollama.
 
 The installer generates:
 - **Gateway token** - for authenticating to the OpenClaw gateway API
@@ -174,7 +181,7 @@ secrets/
 
 | File | Contents |
 |------|----------|
-| `secrets/<instance>/gateway.env` | Discord token, Anthropic key, Gemini key, Gateway token |
+| `secrets/<instance>/gateway.env` | Discord token, AI provider keys (Anthropic, Kimi, OpenAI, Gemini, OpenRouter, Ollama), Gateway token |
 | `secrets/<instance>/controller.env` | GitHub webhook secret, Controller token |
 | `secrets/<instance>/snapshot.key` | Age private key for encrypted snapshots |
 | `secrets/tokens.env` | Token registry for all instances |
@@ -318,12 +325,27 @@ All endpoints require authentication via `?token=` query param or session cookie
 | `/status` | GET | System status |
 | `/health` | GET | Health check |
 | `/audit` | GET | Get audit log entries |
+| `/gateway/restart` | POST | Restart the gateway container |
+| `/gateway/config` | GET | Get gateway openclaw.json + Ollama models |
+| `/gateway/config` | POST | Save config & restart gateway |
+| `/gateway/config/validate` | GET | Validate config against OpenClaw schema |
 | `/gateway/devices` | GET | List pending/paired devices |
 | `/gateway/devices/approve` | POST | Approve device pairing |
 | `/gateway/devices/reject` | POST | Reject device pairing |
 | `/gateway/pairing/{channel}` | GET | List DM pairing requests |
 | `/gateway/pairing/approve` | POST | Approve DM pairing code |
 | `/gateway/security-audit` | GET | Run OpenClaw security audit |
+
+### Config Editor
+
+The Controller dashboard includes a Gateway Config editor with:
+
+- **Load/Save** - Edit `openclaw.json` directly, saves and restarts gateway
+- **Validation** - Validates config against OpenClaw schema before saving
+- **Ollama detection** - Auto-discovers local Ollama models with click-to-add
+- **RAM-based context** - Calculates safe context windows based on available RAM
+- **Error navigation** - Clickable JSON errors with "Open in VS Code" and "Jump to line" links
+- **Live validation** - Shows JSON syntax errors as you type
 
 ## Kill Switch
 

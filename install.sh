@@ -111,10 +111,10 @@ load_env_value() {
 
     # Determine which file to check based on key
     case "$key" in
-        DISCORD_BOT_TOKEN|ANTHROPIC_API_KEY|GEMINI_API_KEY|OPENCLAW_GATEWAY_TOKEN)
+        DISCORD_BOT_TOKEN|ANTHROPIC_API_KEY|KIMI_API_KEY|OPENAI_API_KEY|GEMINI_API_KEY|OLLAMA_API_KEY|OPENROUTER_API_KEY|OPENCLAW_GATEWAY_TOKEN)
             file="${SECRETS_DIR}/${instance}/gateway.env"
             ;;
-        GITHUB_WEBHOOK_SECRET|ALLOWED_MERGE_ACTORS|CONTROLLER_API_TOKEN)
+        GITHUB_WEBHOOK_SECRET|ALLOWED_MERGE_ACTORS|CONTROLLER_API_TOKEN|GITHUB_TOKEN)
             file="${SECRETS_DIR}/${instance}/controller.env"
             ;;
         *)
@@ -346,6 +346,151 @@ EOF
 }
 
 # ============================================================
+# AI Provider Selection Menu
+# ============================================================
+configure_ai_providers() {
+    echo ""
+    echo "=== AI Provider Selection ==="
+    echo ""
+    echo "Select which AI providers to configure:"
+    echo ""
+    echo "  1) Anthropic (Claude)      - Recommended primary model"
+    echo "  2) Kimi-K2 (Moonshot)      - High-performance alternative"
+    echo "  3) OpenAI (GPT-4)          - GPT models"
+    echo "  4) Google (Gemini)         - Gemini models + embeddings"
+    echo "  5) Ollama (Local)          - Run models locally"
+    echo "  6) OpenRouter              - Multi-provider gateway"
+    echo ""
+    echo "Enter numbers separated by spaces (e.g., '1 4 5' for Anthropic + Gemini + Ollama)"
+    echo "Press Enter for default: Anthropic + Gemini embeddings"
+    echo ""
+
+    read -p "Providers [1 4]: " provider_selection
+    provider_selection="${provider_selection:-1 4}"
+
+    # Initialize all provider keys as empty
+    ANTHROPIC_API_KEY=""
+    KIMI_API_KEY=""
+    OPENAI_API_KEY=""
+    GEMINI_API_KEY=""
+    OLLAMA_ENABLED=""
+    OPENROUTER_API_KEY=""
+
+    # Load any existing values
+    local saved_anthropic=$(load_env_value "ANTHROPIC_API_KEY")
+    local saved_kimi=$(load_env_value "KIMI_API_KEY")
+    local saved_openai=$(load_env_value "OPENAI_API_KEY")
+    local saved_gemini=$(load_env_value "GEMINI_API_KEY")
+    local saved_ollama=$(load_env_value "OLLAMA_API_KEY")
+    local saved_openrouter=$(load_env_value "OPENROUTER_API_KEY")
+
+    for provider in $provider_selection; do
+        case "$provider" in
+            1)
+                echo ""
+                echo "--- Anthropic (Claude) ---"
+                echo "Get your API key at: https://console.anthropic.com/settings/keys"
+                if [[ -n "$saved_anthropic" ]]; then
+                    ANTHROPIC_API_KEY="$saved_anthropic"
+                    success "Anthropic API key (saved)"
+                else
+                    prompt ANTHROPIC_API_KEY "Anthropic API key" "" true
+                fi
+                ;;
+            2)
+                echo ""
+                echo "--- Kimi-K2 (Moonshot AI) ---"
+                echo "Get your API key at: https://platform.moonshot.cn/console/api-keys"
+                echo "Model: kimi-k2-0905-preview (256k context)"
+                if [[ -n "$saved_kimi" ]]; then
+                    KIMI_API_KEY="$saved_kimi"
+                    success "Kimi API key (saved)"
+                else
+                    prompt KIMI_API_KEY "Kimi/Moonshot API key" "" true
+                fi
+                ;;
+            3)
+                echo ""
+                echo "--- OpenAI (GPT-4) ---"
+                echo "Get your API key at: https://platform.openai.com/api-keys"
+                if [[ -n "$saved_openai" ]]; then
+                    OPENAI_API_KEY="$saved_openai"
+                    success "OpenAI API key (saved)"
+                else
+                    prompt OPENAI_API_KEY "OpenAI API key" "" true
+                fi
+                ;;
+            4)
+                echo ""
+                echo "--- Google (Gemini) ---"
+                echo "Get your API key at: https://aistudio.google.com/app/apikey"
+                echo "Used for: Gemini models + memory embeddings"
+                if [[ -n "$saved_gemini" ]]; then
+                    GEMINI_API_KEY="$saved_gemini"
+                    success "Gemini API key (saved)"
+                else
+                    prompt GEMINI_API_KEY "Gemini API key" "" true
+                fi
+                ;;
+            5)
+                echo ""
+                echo "--- Ollama (Local Models) ---"
+                echo "Run models locally with Ollama: https://ollama.ai"
+                echo "Make sure Ollama is running on your machine."
+                OLLAMA_ENABLED="true"
+                if [[ -n "$saved_ollama" ]]; then
+                    success "Ollama enabled (saved)"
+                else
+                    success "Ollama will be configured"
+                fi
+                ;;
+            6)
+                echo ""
+                echo "--- OpenRouter ---"
+                echo "Get your API key at: https://openrouter.ai/keys"
+                echo "Access multiple providers through one API"
+                if [[ -n "$saved_openrouter" ]]; then
+                    OPENROUTER_API_KEY="$saved_openrouter"
+                    success "OpenRouter API key (saved)"
+                else
+                    prompt OPENROUTER_API_KEY "OpenRouter API key" "" true
+                fi
+                ;;
+            *)
+                warn "Unknown provider: $provider (skipping)"
+                ;;
+        esac
+    done
+
+    # Determine primary model based on what's configured
+    echo ""
+    if [[ -n "$ANTHROPIC_API_KEY" ]]; then
+        PRIMARY_MODEL="anthropic/claude-sonnet-4-20250514"
+        info "Primary model: Claude Sonnet 4 (Anthropic)"
+    elif [[ -n "$KIMI_API_KEY" ]]; then
+        PRIMARY_MODEL="moonshot/kimi-k2-0905-preview"
+        info "Primary model: Kimi K2 (Moonshot)"
+    elif [[ -n "$OPENAI_API_KEY" ]]; then
+        PRIMARY_MODEL="openai/gpt-4o"
+        info "Primary model: GPT-4o (OpenAI)"
+    elif [[ -n "$GEMINI_API_KEY" ]]; then
+        PRIMARY_MODEL="google/gemini-2.0-flash"
+        info "Primary model: Gemini 2.0 Flash (Google)"
+    elif [[ -n "$OPENROUTER_API_KEY" ]]; then
+        PRIMARY_MODEL="openrouter/anthropic/claude-sonnet-4"
+        info "Primary model: Claude Sonnet 4 via OpenRouter"
+    elif [[ -n "$OLLAMA_ENABLED" ]]; then
+        PRIMARY_MODEL="ollama/llama3.2"
+        info "Primary model: Llama 3.2 (Ollama local)"
+    else
+        PRIMARY_MODEL=""
+        warn "No AI provider configured - bot will not be functional"
+    fi
+
+    success "AI providers configured"
+}
+
+# ============================================================
 # Configure Secrets
 # ============================================================
 configure_secrets() {
@@ -388,8 +533,6 @@ configure_secrets() {
 
     # Load any existing values from env files as defaults
     local saved_discord_token=$(load_env_value "DISCORD_BOT_TOKEN")
-    local saved_anthropic=$(load_env_value "ANTHROPIC_API_KEY")
-    local saved_gemini=$(load_env_value "GEMINI_API_KEY")
     local saved_github_webhook=$(load_env_value "GITHUB_WEBHOOK_SECRET")
     local saved_github_actors=$(load_env_value "ALLOWED_MERGE_ACTORS")
 
@@ -508,48 +651,13 @@ configure_secrets() {
 
         GITHUB_ALLOWED_ACTORS="${GITHUB_USERNAME}"
 
-        echo ""
-        echo "=== AI Provider ==="
-        if [[ -n "$saved_anthropic" ]]; then
-            ANTHROPIC_API_KEY="$saved_anthropic"
-            success "Anthropic API key (saved)"
-        else
-            prompt ANTHROPIC_API_KEY "Anthropic API key" "" true
-        fi
-
-        echo ""
-        echo "=== Memory (Gemini Embeddings) ==="
-        echo "For agent memory/search. Get a key at:"
-        echo "  https://aistudio.google.com/app/apikey"
-        echo ""
-        if [[ -n "$saved_gemini" ]]; then
-            GEMINI_API_KEY="$saved_gemini"
-            success "Gemini API key (saved)"
-        else
-            prompt GEMINI_API_KEY "Gemini API key (optional, for memory)" "" true
-        fi
+        configure_ai_providers
     else
         GITHUB_USERNAME=""
         GITHUB_WEBHOOK_SECRET=""
         GITHUB_ALLOWED_ACTORS=""
         GITHUB_BOT_REPO=""
-        echo ""
-        echo "=== AI Provider (optional for offline) ==="
-        if [[ -n "$saved_anthropic" ]]; then
-            ANTHROPIC_API_KEY="$saved_anthropic"
-            success "Anthropic API key (saved)"
-        else
-            prompt ANTHROPIC_API_KEY "Anthropic API key (or leave empty for local LLM)" "" true
-        fi
-
-        echo ""
-        echo "=== Memory (Gemini Embeddings) ==="
-        if [[ -n "$saved_gemini" ]]; then
-            GEMINI_API_KEY="$saved_gemini"
-            success "Gemini API key (saved)"
-        else
-            prompt GEMINI_API_KEY "Gemini API key (optional)" "" true
-        fi
+        configure_ai_providers
     fi
 
     # Generate or load API tokens (instance-specific)
@@ -614,11 +722,33 @@ EOF
     mkdir -p "${INSTANCE_SECRETS_DIR}"
     chmod 700 "${INSTANCE_SECRETS_DIR}"
 
+    # Build gateway.env with configured providers
     cat > "${INSTANCE_SECRETS_DIR}/gateway.env" <<EOF
 # Gateway environment for instance: ${INSTANCE_NAME}
 DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
-ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-GEMINI_API_KEY=${GEMINI_API_KEY}
+
+# AI Providers (only non-empty keys are used)
+EOF
+
+    # Add each provider key if configured
+    [[ -n "${ANTHROPIC_API_KEY:-}" ]] && echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> "${INSTANCE_SECRETS_DIR}/gateway.env"
+    [[ -n "${KIMI_API_KEY:-}" ]] && echo "KIMI_API_KEY=${KIMI_API_KEY}" >> "${INSTANCE_SECRETS_DIR}/gateway.env"
+    [[ -n "${OPENAI_API_KEY:-}" ]] && echo "OPENAI_API_KEY=${OPENAI_API_KEY}" >> "${INSTANCE_SECRETS_DIR}/gateway.env"
+    [[ -n "${GEMINI_API_KEY:-}" ]] && echo "GEMINI_API_KEY=${GEMINI_API_KEY}" >> "${INSTANCE_SECRETS_DIR}/gateway.env"
+    [[ -n "${OPENROUTER_API_KEY:-}" ]] && echo "OPENROUTER_API_KEY=${OPENROUTER_API_KEY}" >> "${INSTANCE_SECRETS_DIR}/gateway.env"
+
+    # Ollama configuration
+    if [[ -n "${OLLAMA_ENABLED:-}" ]]; then
+        cat >> "${INSTANCE_SECRETS_DIR}/gateway.env" <<EOF
+
+# Ollama (local LLM)
+OLLAMA_API_KEY=ollama-local
+OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
+EOF
+    fi
+
+    # Add gateway token
+    cat >> "${INSTANCE_SECRETS_DIR}/gateway.env" <<EOF
 
 # Gateway API token (for authenticating requests TO gateway)
 OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}
@@ -638,6 +768,13 @@ OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}
 # Instance name
 INSTANCE_NAME=${INSTANCE_NAME}
 EOF
+
+    # Add GITHUB_TOKEN if provided (for bot push capability)
+    if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+        echo "" >> "${INSTANCE_SECRETS_DIR}/controller.env"
+        echo "# GitHub token for pushing proposal branches" >> "${INSTANCE_SECRETS_DIR}/controller.env"
+        echo "GITHUB_TOKEN=${GITHUB_TOKEN}" >> "${INSTANCE_SECRETS_DIR}/controller.env"
+    fi
 
     chmod 600 "${INSTANCE_SECRETS_DIR}"/*.env
 
