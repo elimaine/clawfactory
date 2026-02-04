@@ -1,8 +1,7 @@
 # ClawFactory
+> **Status**: Work in progress (but looking promising).
 
-Local-first autonomous agent runtime with hard separation between proposal and authority.
-
-> **Status**: Work in progress. The bot can propose changes but requires human approval (via GitHub PR or Controller UI) to promote them.
+Local-capable openclaw sandboxed agent manager. support for easily starting multiple local bots (with orchestration for remote bots possibly coming), current security features are snapshots, an external sandboxed controller gui so you dont need to use the control cli, git control of personality backups, a restore system, killswitch.. and more!
 
 ## Quick Start
 
