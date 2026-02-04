@@ -75,8 +75,8 @@ services:
         # Memory markdown persists in approved repo (git tracked)
         # Symlink to OpenClaw workspace so bot can read/write
         mkdir -p /workspace/approved/workspace/memory
-        rm -rf /home/node/.openclaw/workspace/memory
-        ln -sf /workspace/approved/workspace/memory /home/node/.openclaw/workspace/memory
+        rm -f /home/node/.openclaw/workspace/memory 2>/dev/null || true
+        ln -sfn /workspace/approved/workspace/memory /home/node/.openclaw/workspace/memory
 
         # MEMORY.md also in approved repo
         if [ -f "/workspace/approved/workspace/MEMORY.md" ]; then

@@ -7,6 +7,12 @@ RUN apt-get update && apt-get install -y \
     docker.io \
     && rm -rf /var/lib/apt/lists/*
 
+# Install age for encrypted snapshots (detect architecture)
+RUN ARCH=$(dpkg --print-architecture) && \
+    if [ "$ARCH" = "arm64" ]; then AGE_ARCH="linux-arm64"; else AGE_ARCH="linux-amd64"; fi && \
+    curl -sL "https://github.com/FiloSottile/age/releases/download/v1.2.0/age-v1.2.0-${AGE_ARCH}.tar.gz" | \
+    tar xz -C /usr/local/bin --strip-components=1 age/age age/age-keygen
+
 WORKDIR /app
 
 # Install Python dependencies

@@ -270,22 +270,55 @@ When you need to modify your configuration, use the proposal workflow.
 6. Wait for approval
 EOF
 
-        cat > "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/workspace/skills/memory-backup.md" <<'EOF'
-# Memory Backup Skill
+        cat > "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/workspace/skills/self-management.md" <<EOF
+# Self-Management Skill
 
-Your memories persist across restarts. To backup to GitHub:
+This skill covers how you manage your own state, memories, and configuration.
 
-```bash
+## Architecture Overview
+
+Your state is split into two categories:
+
+1. **Git-tracked** (in \`approved/workspace/\`) - Goes through PR approval
+   - Memory markdown files (\`memory/*.md\`)
+   - Configuration (SOUL.md, skills/, policies.yml)
+   - Your save directory (\`${INSTANCE_NAME}_save/\`)
+
+2. **Encrypted snapshots** (in \`state/\`) - Not in git, backed up via encryption
+   - Embeddings database (\`memory/main.sqlite\`)
+   - Runtime config (\`openclaw.json\`)
+   - Paired devices and credentials
+
+## Memory Backup
+
+To save memories to GitHub:
+
+\`\`\`bash
 curl -X POST http://controller:8080/memory/backup
-```
+\`\`\`
 
-This commits memory files and pushes to GitHub for disaster recovery.
+## Encrypted Snapshots
 
-To create an encrypted snapshot of your full state (including embeddings):
+For full state backup (including embeddings):
 
-```bash
+\`\`\`bash
 curl -X POST http://controller:8080/snapshot
-```
+\`\`\`
+
+## Your Save Directory
+
+You have a persistent save directory at \`/workspace/approved/workspace/${INSTANCE_NAME}_save/\`.
+
+Add npm dependencies to \`package.json\` there - they install on container startup.
+
+## Proposing Changes
+
+1. Write changes to \`/workspace/approved/workspace/\`
+2. Create a branch, commit, push
+3. Open a PR for approval
+4. Changes take effect after merge and restart
+
+You cannot merge your own PRs - this requires human approval.
 EOF
 
         # Create initial package.json for bot save state
