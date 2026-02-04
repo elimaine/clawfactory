@@ -24,6 +24,7 @@ from typing import Optional
 import docker
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from pydantic import BaseModel
 
 # Configuration from environment
 APPROVED_DIR = Path(os.environ.get("APPROVED_DIR", "/srv/bot/approved"))
@@ -194,9 +195,147 @@ def git_get_main_sha() -> Optional[str]:
     return None
 
 
-def git_get_remote_sha() -> Optional[str]:
+def git_list_remote_branches() -> list:
+    """List remote branches with their latest commit info."""
+    branches = []
+    try:
+        # Get all remote branches
+        result = subprocess.run(
+            ["git", "branch", "-r", "--format=%(refname:short)|%(objectname:short)|%(committerdate:relative)|%(subject)"],
+            cwd=APPROVED_DIR,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.strip().split("\n"):
+                if not line or "origin/HEAD" in line:
+                    continue
+                parts = line.split("|", 3)
+                if len(parts) >= 4:
+                    branch_name = parts[0].replace("origin/", "")
+                    branches.append({
+                        "name": branch_name,
+                        "sha": parts[1],
+                        "date": parts[2],
+                        "message": parts[3][:60] + ("..." if len(parts[3]) > 60 else ""),
+                        "is_main": branch_name == "main",
+                        "is_proposal": branch_name.startswith("proposal/"),
+                    })
+    except Exception as e:
+        audit_log("git_list_branches_error", {"error": str(e)})
+    return branches
+
+
+def git_get_branch_diff(branch: str) -> dict:
+    """Get diff between a branch and main."""
+    result = {"commits": [], "files": [], "diff": "", "ahead": 0, "behind": 0}
+    try:
+        # Get commit count ahead/behind
+        count_result = subprocess.run(
+            ["git", "rev-list", "--left-right", "--count", f"origin/main...origin/{branch}"],
+            cwd=APPROVED_DIR,
+            capture_output=True,
+            text=True,
+        )
+        if count_result.returncode == 0:
+            parts = count_result.stdout.strip().split()
+            if len(parts) == 2:
+                result["behind"] = int(parts[0])
+                result["ahead"] = int(parts[1])
+
+        # Get commits on branch not in main
+        log_result = subprocess.run(
+            ["git", "log", "--format=%h %s", f"origin/main..origin/{branch}"],
+            cwd=APPROVED_DIR,
+            capture_output=True,
+            text=True,
+        )
+        if log_result.returncode == 0 and log_result.stdout.strip():
+            result["commits"] = log_result.stdout.strip().split("\n")
+
+        # Get changed files
+        files_result = subprocess.run(
+            ["git", "diff", "--name-only", f"origin/main...origin/{branch}"],
+            cwd=APPROVED_DIR,
+            capture_output=True,
+            text=True,
+        )
+        if files_result.returncode == 0 and files_result.stdout.strip():
+            result["files"] = files_result.stdout.strip().split("\n")
+
+        # Get diff (truncated)
+        diff_result = subprocess.run(
+            ["git", "diff", f"origin/main...origin/{branch}"],
+            cwd=APPROVED_DIR,
+            capture_output=True,
+            text=True,
+        )
+        if diff_result.returncode == 0:
+            diff_content = diff_result.stdout
+            if len(diff_content) > 50000:
+                diff_content = diff_content[:50000] + "\n\n... (diff truncated) ..."
+            result["diff"] = diff_content
+
+    except Exception as e:
+        audit_log("git_branch_diff_error", {"branch": branch, "error": str(e)})
+    return result
+
+
+def git_fetch_origin() -> bool:
+    """Fetch latest from origin."""
+    try:
+        # Get GitHub token for authentication
+        github_token = os.environ.get("GITHUB_TOKEN", "")
+        remote_url = None
+
+        if github_token:
+            # Get and modify remote URL with token
+            url_result = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=APPROVED_DIR,
+                capture_output=True,
+                text=True,
+            )
+            remote_url = url_result.stdout.strip()
+
+            if remote_url.startswith("https://github.com/"):
+                auth_url = remote_url.replace(
+                    "https://github.com/",
+                    f"https://x-access-token:{github_token}@github.com/"
+                )
+                subprocess.run(
+                    ["git", "remote", "set-url", "origin", auth_url],
+                    cwd=APPROVED_DIR,
+                    capture_output=True,
+                )
+
+        result = subprocess.run(
+            ["git", "fetch", "origin"],
+            cwd=APPROVED_DIR,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        # Restore original remote URL
+        if github_token and remote_url:
+            subprocess.run(
+                ["git", "remote", "set-url", "origin", remote_url],
+                cwd=APPROVED_DIR,
+                capture_output=True,
+            )
+
+        return result.returncode == 0
+    except Exception as e:
+        audit_log("git_fetch_error", {"error": str(e)})
+        return False
+
+
+def git_get_remote_sha(fetch_first: bool = False) -> Optional[str]:
     """Get the SHA of origin/main."""
     try:
+        if fetch_first:
+            git_fetch_origin()
         result = subprocess.run(
             ["git", "rev-parse", "origin/main"],
             cwd=APPROVED_DIR,
@@ -217,6 +356,31 @@ def promote_sha(sha: str) -> bool:
     This is the ONLY way active config changes.
     """
     try:
+        # Get GitHub token for authentication
+        github_token = os.environ.get("GITHUB_TOKEN", "")
+        remote_url = None
+
+        if github_token:
+            # Get and modify remote URL with token
+            url_result = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=APPROVED_DIR,
+                capture_output=True,
+                text=True,
+            )
+            remote_url = url_result.stdout.strip()
+
+            if remote_url.startswith("https://github.com/"):
+                auth_url = remote_url.replace(
+                    "https://github.com/",
+                    f"https://x-access-token:{github_token}@github.com/"
+                )
+                subprocess.run(
+                    ["git", "remote", "set-url", "origin", auth_url],
+                    cwd=APPROVED_DIR,
+                    capture_output=True,
+                )
+
         # Fetch first to ensure we have the SHA
         subprocess.run(
             ["git", "fetch", "origin"],
@@ -225,6 +389,14 @@ def promote_sha(sha: str) -> bool:
             text=True,
             timeout=60,
         )
+
+        # Restore original remote URL after fetch
+        if github_token and remote_url:
+            subprocess.run(
+                ["git", "remote", "set-url", "origin", remote_url],
+                cwd=APPROVED_DIR,
+                capture_output=True,
+            )
 
         # Checkout the SHA
         result = subprocess.run(
@@ -245,9 +417,123 @@ def promote_sha(sha: str) -> bool:
         return False
 
 
+def git_get_pending_changes() -> dict:
+    """Get commits and changed files between local and origin/main."""
+    result = {
+        "commits": [],
+        "files": [],
+        "diff_stat": "",
+        "diff": "",
+    }
+
+    try:
+        # Get full commit log with messages between HEAD and origin/main
+        log_result = subprocess.run(
+            ["git", "log", "--format=%h %s%n%b%n---", "HEAD..origin/main"],
+            cwd=APPROVED_DIR,
+            capture_output=True,
+            text=True,
+        )
+        if log_result.returncode == 0 and log_result.stdout.strip():
+            # Parse commits - split by --- separator
+            raw_commits = log_result.stdout.strip().split("\n---\n")
+            result["commits"] = [c.strip() for c in raw_commits if c.strip()]
+
+        # Get changed files
+        files_result = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD..origin/main"],
+            cwd=APPROVED_DIR,
+            capture_output=True,
+            text=True,
+        )
+        if files_result.returncode == 0 and files_result.stdout.strip():
+            result["files"] = files_result.stdout.strip().split("\n")
+
+        # Get diff stat
+        stat_result = subprocess.run(
+            ["git", "diff", "--stat", "HEAD..origin/main"],
+            cwd=APPROVED_DIR,
+            capture_output=True,
+            text=True,
+        )
+        if stat_result.returncode == 0:
+            result["diff_stat"] = stat_result.stdout.strip()
+
+        # Get actual diff (truncate if too large)
+        diff_result = subprocess.run(
+            ["git", "diff", "HEAD..origin/main"],
+            cwd=APPROVED_DIR,
+            capture_output=True,
+            text=True,
+        )
+        if diff_result.returncode == 0:
+            diff_content = diff_result.stdout
+            # Truncate if over 50KB
+            if len(diff_content) > 50000:
+                diff_content = diff_content[:50000] + "\n\n... (diff truncated, too large to display) ..."
+            result["diff"] = diff_content
+
+    except Exception as e:
+        audit_log("git_pending_changes_error", {"error": str(e)})
+
+    return result
+
+
+def format_diff_html(diff_text: str) -> str:
+    """Format diff text with syntax highlighting HTML."""
+    if not diff_text:
+        return "No diff"
+
+    import html
+    lines = diff_text.split("\n")
+    formatted_lines = []
+
+    for line in lines:
+        escaped = html.escape(line)
+        if line.startswith("diff --git"):
+            formatted_lines.append(f'<span class="diff-header">{escaped}</span>')
+        elif line.startswith("---") or line.startswith("+++"):
+            formatted_lines.append(f'<span class="diff-file">{escaped}</span>')
+        elif line.startswith("@@"):
+            formatted_lines.append(f'<span class="diff-hunk">{escaped}</span>')
+        elif line.startswith("+"):
+            formatted_lines.append(f'<span class="diff-add">{escaped}</span>')
+        elif line.startswith("-"):
+            formatted_lines.append(f'<span class="diff-del">{escaped}</span>')
+        else:
+            formatted_lines.append(f'<span class="diff-context">{escaped}</span>')
+
+    return "\n".join(formatted_lines)
+
+
 def promote_main() -> bool:
     """Pull latest main branch to approved."""
     try:
+        # Get GitHub token for authentication
+        github_token = os.environ.get("GITHUB_TOKEN", "")
+        remote_url = None
+
+        if github_token:
+            # Get and modify remote URL with token
+            url_result = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=APPROVED_DIR,
+                capture_output=True,
+                text=True,
+            )
+            remote_url = url_result.stdout.strip()
+
+            if remote_url.startswith("https://github.com/"):
+                auth_url = remote_url.replace(
+                    "https://github.com/",
+                    f"https://x-access-token:{github_token}@github.com/"
+                )
+                subprocess.run(
+                    ["git", "remote", "set-url", "origin", auth_url],
+                    cwd=APPROVED_DIR,
+                    capture_output=True,
+                )
+
         result = subprocess.run(
             ["git", "pull", "origin", "main"],
             cwd=APPROVED_DIR,
@@ -255,6 +541,15 @@ def promote_main() -> bool:
             text=True,
             timeout=60,
         )
+
+        # Restore original remote URL
+        if github_token and remote_url:
+            subprocess.run(
+                ["git", "remote", "set-url", "origin", remote_url],
+                cwd=APPROVED_DIR,
+                capture_output=True,
+            )
+
         if result.returncode != 0:
             audit_log("promote_error", {"stderr": result.stderr})
             return False
@@ -388,6 +683,7 @@ async def promote_ui(
                 <html>
                 <head>
                     <title>ClawFactory - Login</title>
+                    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='12' y='28' width='40' height='28' fill='%23455a64' rx='2'/><rect x='16' y='32' width='8' height='10' fill='%2390caf9'/><rect x='28' y='32' width='8' height='10' fill='%2390caf9'/><rect x='40' y='32' width='8' height='10' fill='%2390caf9'/><rect x='20' y='20' width='24' height='10' fill='%23546e7a'/><rect x='30' y='8' width='8' height='14' fill='%23607d8b'/><ellipse cx='34' cy='6' rx='5' ry='3' fill='%23ff5722'/><path d='M8 38 Q2 32 8 26 L12 30 Q10 34 12 38 Z' fill='%23e64a19'/><path d='M4 34 Q-2 30 4 24' stroke='%23ff7043' stroke-width='3' fill='none' stroke-linecap='round'/><path d='M56 38 Q62 32 56 26 L52 30 Q54 34 52 38 Z' fill='%23e64a19'/><path d='M60 34 Q66 30 60 24' stroke='%23ff7043' stroke-width='3' fill='none' stroke-linecap='round'/><circle cx='6' cy='22' r='3' fill='%23ff8a65'/><circle cx='58' cy='22' r='3' fill='%23ff8a65'/><rect x='24' y='48' width='16' height='8' fill='%23546e7a'/></svg>">
                     <style>
                         body {{ font-family: monospace; padding: 2rem; background: #1a1a1a; color: #e0e0e0; }}
                         h1 {{ color: #4CAF50; }}
@@ -406,8 +702,8 @@ async def promote_ui(
                 </html>
             """, status_code=401)
 
-    # Fetch latest from remote
-    subprocess.run(["git", "fetch", "origin"], cwd=APPROVED_DIR, capture_output=True)
+    # Fetch latest from remote (uses GITHUB_TOKEN for auth)
+    git_fetch_origin()
 
     # Get recent commits on origin/main
     try:
@@ -422,11 +718,15 @@ async def promote_ui(
         commits = f"Error: {e}"
 
     current_sha = git_get_main_sha() or "unknown"
-    remote_sha = git_get_remote_sha() or "unknown"
-    needs_update = current_sha != remote_sha
+    # Fetch from origin to get latest remote SHA
+    remote_sha = git_get_remote_sha(fetch_first=True) or "unknown"
+    needs_update = current_sha != remote_sha and remote_sha != "unknown"
 
-    status_msg = "Up to date" if not needs_update else f"Update available: {remote_sha[:8]}"
+    status_msg = "Up to date" if not needs_update else f"⚠️ Update available"
     status_class = "success" if not needs_update else "warning"
+
+    # Get pending changes if update available
+    pending_changes = git_get_pending_changes() if needs_update else {"commits": [], "files": [], "diff_stat": ""}
 
     # Get gateway status
     try:
@@ -443,6 +743,20 @@ async def promote_ui(
     <html>
     <head>
         <title>ClawFactory [{INSTANCE_NAME}]</title>
+        <!-- Favicon: Factory with lobster claws -->
+        <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='12' y='28' width='40' height='28' fill='%23455a64' rx='2'/><rect x='16' y='32' width='8' height='10' fill='%2390caf9'/><rect x='28' y='32' width='8' height='10' fill='%2390caf9'/><rect x='40' y='32' width='8' height='10' fill='%2390caf9'/><rect x='20' y='20' width='24' height='10' fill='%23546e7a'/><rect x='30' y='8' width='8' height='14' fill='%23607d8b'/><ellipse cx='34' cy='6' rx='5' ry='3' fill='%23ff5722'/><path d='M8 38 Q2 32 8 26 L12 30 Q10 34 12 38 Z' fill='%23e64a19'/><path d='M4 34 Q-2 30 4 24' stroke='%23ff7043' stroke-width='3' fill='none' stroke-linecap='round'/><path d='M56 38 Q62 32 56 26 L52 30 Q54 34 52 38 Z' fill='%23e64a19'/><path d='M60 34 Q66 30 60 24' stroke='%23ff7043' stroke-width='3' fill='none' stroke-linecap='round'/><circle cx='6' cy='22' r='3' fill='%23ff8a65'/><circle cx='58' cy='22' r='3' fill='%23ff8a65'/><rect x='24' y='48' width='16' height='8' fill='%23546e7a'/></svg>">
+        <!-- CodeMirror for JSON editing -->
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/material-darker.min.css">
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/foldgutter.min.css">
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/javascript/javascript.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/matchbrackets.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/closebrackets.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/foldcode.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/foldgutter.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/brace-fold.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/search/searchcursor.min.js"></script>
         <style>
             * {{ box-sizing: border-box; }}
             body {{ font-family: monospace; padding: 1rem; background: #1a1a1a; color: #e0e0e0; max-width: 1200px; margin: 0 auto; }}
@@ -457,6 +771,7 @@ async def promote_ui(
             button.secondary:hover {{ background: #1976D2; }}
             button.danger {{ background: #f44336; }}
             button.danger:hover {{ background: #d32f2f; }}
+            @keyframes pulse {{ 0%, 100% {{ opacity: 1; }} 50% {{ opacity: 0.7; }} }}
             button.small {{ padding: 0.4rem 0.6rem; font-size: 0.8rem; }}
             input {{ padding: 0.5rem; font-family: monospace; background: #2d2d2d; border: 1px solid #444; color: #e0e0e0; border-radius: 4px; width: 100%; max-width: 300px; }}
             .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }}
@@ -482,6 +797,18 @@ async def promote_ui(
             .tab-button.active {{ background: #252525; color: #4CAF50; }}
             .tab-content {{ display: none; }}
             .tab-content.active {{ display: block; }}
+            /* Diff syntax highlighting */
+            .diff-view {{ font-family: monospace; font-size: 0.75rem; line-height: 1.4; }}
+            .diff-view .diff-header {{ color: #61afef; font-weight: bold; }}
+            .diff-view .diff-file {{ color: #e5c07b; font-weight: bold; }}
+            .diff-view .diff-hunk {{ color: #c678dd; }}
+            .diff-view .diff-add {{ color: #98c379; background: rgba(152, 195, 121, 0.1); }}
+            .diff-view .diff-del {{ color: #e06c75; background: rgba(224, 108, 117, 0.1); }}
+            .diff-view .diff-context {{ color: #abb2bf; }}
+            /* CodeMirror customizations */
+            .CodeMirror {{ height: 400px; font-size: 0.8rem; border: 1px solid #444; border-radius: 4px; }}
+            .CodeMirror-gutters {{ background: #1e1e1e; border-right: 1px solid #333; }}
+            .CodeMirror-linenumber {{ color: #5c6370; }}
             /* Mobile responsive */
             @media (max-width: 768px) {{
                 body {{ padding: 0.75rem; }}
@@ -516,10 +843,39 @@ async def promote_ui(
             <div>
                 <h2>Promotion</h2>
                 <div class="card">
-                    <p>Remote main: <span class="sha">{remote_sha[:8]}</span></p>
-                    <form action="/controller/promote-main" method="POST" style="display: inline;">
-                        <button type="submit">Pull Main & Restart</button>
-                    </form>
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                        <div>
+                            <span style="color: #888;">Local:</span> <span class="sha">{current_sha[:8]}</span>
+                            <span style="margin: 0 0.5rem; color: #444;">→</span>
+                            <span style="color: #888;">Remote:</span> <span class="sha">{remote_sha[:8]}</span>
+                        </div>
+                    </div>
+                    {"<div style='background: #ff9800; color: #000; padding: 0.75rem; border-radius: 4px; margin-bottom: 1rem; font-weight: bold;'>🔄 New version available on GitHub!</div>" if needs_update else ""}
+                    {f'''<details style="margin-bottom: 1rem; background: #1a1a1a; border: 1px solid #ff9800; border-radius: 4px; padding: 0.5rem;">
+                        <summary style="cursor: pointer; color: #ff9800; font-weight: bold;">📋 View {len(pending_changes["commits"])} pending commit(s) and {len(pending_changes["files"])} file(s)</summary>
+                        <div style="margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid #333;">
+                            <div style="margin-bottom: 0.75rem;">
+                                <strong style="color: #4CAF50;">Commits:</strong>
+                                <pre style="margin: 0.5rem 0; font-size: 0.8rem; color: #ccc; background: #252525; padding: 0.5rem; border-radius: 3px; overflow-x: auto; white-space: pre-wrap;">{chr(10).join(pending_changes["commits"]) or "No commits"}</pre>
+                            </div>
+                            <div style="margin-bottom: 0.75rem;">
+                                <strong style="color: #2196F3;">Changed Files:</strong>
+                                <pre style="margin: 0.5rem 0; font-size: 0.8rem; color: #ccc; background: #252525; padding: 0.5rem; border-radius: 3px; overflow-x: auto;">{chr(10).join(pending_changes["files"]) or "No files"}</pre>
+                            </div>
+                            <details style="margin-bottom: 0.75rem;">
+                                <summary style="cursor: pointer; color: #9c27b0; font-size: 0.9rem;">📄 View Full Diff</summary>
+                                <pre class="diff-view" style="margin: 0.5rem 0; background: #1e1e1e; padding: 0.5rem; border-radius: 3px; overflow-x: auto; max-height: 400px; overflow-y: auto;">{format_diff_html(pending_changes.get("diff", ""))}</pre>
+                            </details>
+                            <div>
+                                <strong style="color: #888;">Stats:</strong>
+                                <pre style="margin: 0.5rem 0; font-size: 0.75rem; color: #888; background: #252525; padding: 0.5rem; border-radius: 3px; overflow-x: auto;">{pending_changes["diff_stat"] or "No changes"}</pre>
+                            </div>
+                        </div>
+                    </details>''' if needs_update else ""}
+                    <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                        <button onclick="mergeAllAndDeploy()" {"style='background: #ff9800; border-color: #ff9800; animation: pulse 2s infinite;'" if needs_update else ""}>Merge All & Deploy</button>
+                        <button onclick="promoteMain()" class="secondary">Deploy Main Only</button>
+                    </div>
                     <div id="promote-result" class="result"></div>
 
                     <h3 style="margin-top: 1.5rem; font-size: 0.9rem; color: #888;">Promote Specific SHA</h3>
@@ -534,6 +890,16 @@ async def promote_ui(
                     <button onclick="backupMemory()" class="secondary">Backup Memory to GitHub</button>
                     <button onclick="fetchMemoryStatus()" class="secondary">Check Status</button>
                     <div id="memory-result" class="result"></div>
+                </div>
+
+                <h2>Branches</h2>
+                <div class="card">
+                    <button onclick="fetchBranches()">Refresh Branches</button>
+                    <div id="branches-list" style="margin-top: 0.5rem;"></div>
+                    <div id="branch-diff-view" style="display: none; margin-top: 1rem; border-top: 1px solid #333; padding-top: 1rem;">
+                        <h3 style="color: #2196F3; margin: 0 0 0.5rem 0;">Branch: <span id="branch-diff-name"></span></h3>
+                        <div id="branch-diff-content"></div>
+                    </div>
                 </div>
 
                 <h2>Recent Commits</h2>
@@ -588,7 +954,8 @@ async def promote_ui(
                 <span id="cursor-pos">Line 1, Col 1</span>
                 <span id="json-status"></span>
             </div>
-            <textarea id="config-editor" style="width: 100%; height: 400px; margin-top: 0.25rem; font-family: monospace; font-size: 0.8rem; background: #1a1a1a; color: #e0e0e0; border: 1px solid #444; border-radius: 4px; padding: 0.5rem; resize: vertical; line-height: 1.4;" placeholder="Click 'Load Config' to view..."></textarea>
+            <textarea id="config-editor-raw" style="display: none;"></textarea>
+            <div id="config-editor-wrapper" style="margin-top: 0.25rem;"></div>
         </div>
 
         <h2>Gateway Pairing</h2>
@@ -637,6 +1004,61 @@ async def promote_ui(
             // Detect base path from current URL (handles /controller via Tailscale)
             const basePath = window.location.pathname.includes('/controller') ? '/controller' : '';
 
+            // Initialize CodeMirror editor
+            let configEditor;
+            document.addEventListener('DOMContentLoaded', function() {{
+                configEditor = CodeMirror(document.getElementById('config-editor-wrapper'), {{
+                    mode: {{ name: 'javascript', json: true }},
+                    theme: 'material-darker',
+                    lineNumbers: true,
+                    matchBrackets: true,
+                    autoCloseBrackets: true,
+                    foldGutter: true,
+                    gutters: ['CodeMirror-linenumbers', 'CodeMirror-foldgutter'],
+                    tabSize: 2,
+                    indentWithTabs: false,
+                    lineWrapping: false,
+                    placeholder: 'Click "Load Config" to view...'
+                }});
+
+                // Update cursor position display
+                configEditor.on('cursorActivity', function() {{
+                    const cursor = configEditor.getCursor();
+                    document.getElementById('cursor-pos').textContent = `Line ${{cursor.line + 1}}, Col ${{cursor.ch + 1}}`;
+                }});
+
+                // Live JSON validation
+                configEditor.on('change', function() {{
+                    const jsonStatus = document.getElementById('json-status');
+                    const value = configEditor.getValue();
+                    if (!value.trim()) {{
+                        jsonStatus.textContent = '';
+                        return;
+                    }}
+                    try {{
+                        JSON.parse(value);
+                        jsonStatus.innerHTML = '<span style="color: #4CAF50;">✓ Valid JSON</span>';
+                    }} catch(e) {{
+                        const match = e.message.match(/position\s+(\d+)/i);
+                        if (match) {{
+                            const pos = parseInt(match[1]);
+                            const cmPos = configEditor.posFromIndex(pos);
+                            jsonStatus.innerHTML = `<span style="color: #ef9a9a;">✗ Error at line ${{cmPos.line + 1}}</span>`;
+                        }} else {{
+                            jsonStatus.innerHTML = '<span style="color: #ef9a9a;">✗ Invalid JSON</span>';
+                        }}
+                    }}
+                }});
+            }});
+
+            // Helper to get/set editor value
+            function getEditorValue() {{
+                return configEditor ? configEditor.getValue() : '';
+            }}
+            function setEditorValue(value) {{
+                if (configEditor) configEditor.setValue(value);
+            }}
+
             async function fetchHealth() {{
                 const result = document.getElementById('status-result');
                 result.style.display = 'block';
@@ -679,6 +1101,161 @@ async def promote_ui(
                     }}
                 }} catch(e) {{
                     document.getElementById('audit-log').textContent = 'Error: ' + e.message;
+                }}
+            }}
+
+            // Branch management
+            async function fetchBranches() {{
+                const list = document.getElementById('branches-list');
+                list.innerHTML = '<p style="color: #888;">Loading branches...</p>';
+                try {{
+                    const resp = await fetch(basePath + '/branches');
+                    const data = await resp.json();
+                    if (data.error) {{
+                        list.innerHTML = `<p style="color: #ef9a9a;">${{data.error}}</p>`;
+                        return;
+                    }}
+                    if (!data.branches || data.branches.length === 0) {{
+                        list.innerHTML = '<p style="color: #888;">No branches found.</p>';
+                        return;
+                    }}
+
+                    let html = '';
+                    // Sort: main first, then proposals, then others
+                    const sorted = data.branches.sort((a, b) => {{
+                        if (a.is_main) return -1;
+                        if (b.is_main) return 1;
+                        if (a.is_proposal && !b.is_proposal) return -1;
+                        if (!a.is_proposal && b.is_proposal) return 1;
+                        return a.name.localeCompare(b.name);
+                    }});
+
+                    for (const branch of sorted) {{
+                        const color = branch.is_main ? '#4CAF50' : branch.is_proposal ? '#ff9800' : '#2196F3';
+                        const badge = branch.is_main ? '(active)' : branch.is_proposal ? '(proposal)' : '';
+                        html += `
+                            <div class="pending-item">
+                                <div class="pending-item-info">
+                                    <span style="color: ${{color}}; font-weight: bold;">${{branch.name}}</span>
+                                    <span style="color: #666; font-size: 0.8rem;">${{badge}}</span><br>
+                                    <span style="color: #888; font-size: 0.8rem;">
+                                        <span class="sha">${{branch.sha}}</span> · ${{branch.date}} · ${{branch.message}}
+                                    </span>
+                                </div>
+                                <div class="pending-item-actions">
+                                    ${{!branch.is_main ? `<button class="small secondary" onclick="viewBranchDiff('${{branch.name}}')">View Diff</button>` : ''}}
+                                    ${{branch.is_proposal ? `<button class="small" onclick="mergeBranch('${{branch.name}}')">Merge</button>` : ''}}
+                                </div>
+                            </div>
+                        `;
+                    }}
+                    list.innerHTML = html;
+                }} catch(e) {{
+                    list.innerHTML = `<p style="color: #ef9a9a;">Error: ${{e.message}}</p>`;
+                }}
+            }}
+
+            async function viewBranchDiff(branch) {{
+                const diffView = document.getElementById('branch-diff-view');
+                const diffName = document.getElementById('branch-diff-name');
+                const diffContent = document.getElementById('branch-diff-content');
+
+                diffView.style.display = 'block';
+                diffName.textContent = branch;
+                diffContent.innerHTML = '<p style="color: #888;">Loading diff...</p>';
+
+                try {{
+                    const resp = await fetch(basePath + '/branches/' + encodeURIComponent(branch) + '/diff');
+                    const data = await resp.json();
+
+                    if (data.error) {{
+                        diffContent.innerHTML = `<p style="color: #ef9a9a;">${{data.error}}</p>`;
+                        return;
+                    }}
+
+                    let html = `
+                        <p style="color: #888; font-size: 0.85rem;">
+                            <span style="color: #4CAF50;">+${{data.ahead}} ahead</span> /
+                            <span style="color: #ef9a9a;">-${{data.behind}} behind</span> main
+                        </p>
+                    `;
+
+                    if (data.commits && data.commits.length > 0) {{
+                        html += `<details open style="margin: 0.5rem 0;">
+                            <summary style="cursor: pointer; color: #4CAF50;">Commits (${{data.commits.length}})</summary>
+                            <pre style="margin: 0.5rem 0; font-size: 0.8rem; background: #252525; padding: 0.5rem; border-radius: 3px;">${{data.commits.join('\\n')}}</pre>
+                        </details>`;
+                    }}
+
+                    if (data.files && data.files.length > 0) {{
+                        html += `<details style="margin: 0.5rem 0;">
+                            <summary style="cursor: pointer; color: #2196F3;">Changed Files (${{data.files.length}})</summary>
+                            <pre style="margin: 0.5rem 0; font-size: 0.8rem; background: #252525; padding: 0.5rem; border-radius: 3px;">${{data.files.join('\\n')}}</pre>
+                        </details>`;
+                    }}
+
+                    if (data.diff) {{
+                        html += `<details style="margin: 0.5rem 0;">
+                            <summary style="cursor: pointer; color: #9c27b0;">Full Diff</summary>
+                            <pre class="diff-view" style="margin: 0.5rem 0; font-size: 0.75rem; background: #1e1e1e; padding: 0.5rem; border-radius: 3px; max-height: 400px; overflow: auto;">${{formatDiffHtml(data.diff)}}</pre>
+                        </details>`;
+                    }}
+
+                    html += `<button class="small" onclick="mergeBranch('${{branch}}')" style="margin-top: 0.5rem;">Merge to Main</button>`;
+                    html += `<button class="small secondary" onclick="document.getElementById('branch-diff-view').style.display='none'" style="margin-left: 0.5rem;">Close</button>`;
+
+                    diffContent.innerHTML = html;
+                }} catch(e) {{
+                    diffContent.innerHTML = `<p style="color: #ef9a9a;">Error: ${{e.message}}</p>`;
+                }}
+            }}
+
+            function formatDiffHtml(diff) {{
+                if (!diff) return 'No diff';
+                return diff.split('\\n').map(line => {{
+                    const escaped = line.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                    if (line.startsWith('diff --git')) return `<span class="diff-header">${{escaped}}</span>`;
+                    if (line.startsWith('---') || line.startsWith('+++')) return `<span class="diff-file">${{escaped}}</span>`;
+                    if (line.startsWith('@@')) return `<span class="diff-hunk">${{escaped}}</span>`;
+                    if (line.startsWith('+')) return `<span class="diff-add">${{escaped}}</span>`;
+                    if (line.startsWith('-')) return `<span class="diff-del">${{escaped}}</span>`;
+                    return `<span class="diff-context">${{escaped}}</span>`;
+                }}).join('\\n');
+            }}
+
+            async function mergeBranch(branch) {{
+                if (!confirm(`Merge branch "${{branch}}" into main?`)) return;
+
+                const diffContent = document.getElementById('branch-diff-content');
+                if (diffContent) {{
+                    diffContent.innerHTML = '<p style="color: #888;">Merging...</p>';
+                }}
+
+                try {{
+                    const resp = await fetch(basePath + '/branches/' + encodeURIComponent(branch) + '/merge', {{ method: 'POST' }});
+                    const data = await resp.json();
+
+                    if (data.error) {{
+                        if (diffContent) {{
+                            diffContent.innerHTML = `<p style="color: #ef9a9a;">Error: ${{data.error}}</p>`;
+                        }} else {{
+                            alert('Error: ' + data.error);
+                        }}
+                        return;
+                    }}
+
+                    // Refresh branches and hide diff view
+                    document.getElementById('branch-diff-view').style.display = 'none';
+                    fetchBranches();
+
+                    // Show success
+                    alert('Branch merged successfully! Refresh the page to see updates.');
+                }} catch(e) {{
+                    if (diffContent) {{
+                        diffContent.innerHTML = `<p style="color: #ef9a9a;">Error: ${{e.message}}</p>`;
+                    }} else {{
+                        alert('Error: ' + e.message);
+                    }}
                 }}
             }}
 
@@ -726,6 +1303,73 @@ async def promote_ui(
                         result.textContent = data.error;
                     }} else {{
                         result.textContent = 'Gateway restarting... Status: ' + (data.status || 'ok');
+                    }}
+                }} catch(e) {{
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
+                }}
+            }}
+
+            async function mergeAllAndDeploy() {{
+                const result = document.getElementById('promote-result');
+                result.style.display = 'block';
+                result.className = 'result';
+                result.textContent = 'Merging all proposal branches...';
+
+                try {{
+                    // First merge all proposal branches
+                    const mergeResp = await fetch(basePath + '/branches/merge-all', {{ method: 'POST' }});
+                    const mergeData = await mergeResp.json();
+
+                    if (mergeData.error) {{
+                        result.className = 'result error';
+                        result.textContent = 'Merge failed: ' + mergeData.error;
+                        return;
+                    }}
+
+                    let statusText = '';
+                    if (mergeData.merged && mergeData.merged.length > 0) {{
+                        statusText += `✅ Merged: ${{mergeData.merged.join(', ')}}\\n`;
+                    }}
+                    if (mergeData.errors && mergeData.errors.length > 0) {{
+                        statusText += `⚠️ Errors: ${{mergeData.errors.map(e => e.branch).join(', ')}}\\n`;
+                    }}
+                    if (mergeData.status === 'no_branches') {{
+                        statusText = 'No proposal branches to merge. ';
+                    }}
+
+                    result.textContent = statusText + 'Now deploying main...';
+
+                    // Then deploy main
+                    const deployResp = await fetch(basePath + '/controller/promote-main', {{ method: 'POST' }});
+                    if (deployResp.ok) {{
+                        result.innerHTML = statusText.replace(/\\n/g, '<br>') + '<br><span style="color: #4CAF50;">✅ Deployed! Restarting gateway...</span>';
+                        setTimeout(() => window.location.reload(), 3000);
+                    }} else {{
+                        const text = await deployResp.text();
+                        result.className = 'result error';
+                        result.innerHTML = statusText.replace(/\\n/g, '<br>') + '<br>Deploy failed: ' + (text || deployResp.statusText);
+                    }}
+                }} catch(e) {{
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
+                }}
+            }}
+
+            async function promoteMain() {{
+                const result = document.getElementById('promote-result');
+                result.style.display = 'block';
+                result.className = 'result';
+                result.textContent = 'Deploying main branch...';
+                try {{
+                    const resp = await fetch(basePath + '/controller/promote-main', {{ method: 'POST' }});
+                    if (resp.ok) {{
+                        result.innerHTML = '<span style="color: #4CAF50;">✅ Deployed! Restarting gateway...</span>';
+                        setTimeout(() => window.location.reload(), 3000);
+                    }} else {{
+                        const text = await resp.text();
+                        result.className = 'result error';
+                        result.textContent = 'Failed: ' + (text || resp.statusText);
                     }}
                 }} catch(e) {{
                     result.className = 'result error';
@@ -834,24 +1478,23 @@ async def promote_ui(
                 return html;
             }}
 
-            // Jump to line in textarea
+            // Jump to line in CodeMirror editor
             function jumpToLine(lineNum) {{
-                const editor = document.getElementById('config-editor');
-                const lines = editor.value.split('\\n');
-                let pos = 0;
-                for (let i = 0; i < lineNum - 1 && i < lines.length; i++) {{
-                    pos += lines[i].length + 1;
-                }}
-                editor.focus();
-                editor.setSelectionRange(pos, pos + (lines[lineNum - 1]?.length || 0));
-                // Scroll to position
-                const lineHeight = 16;
-                editor.scrollTop = (lineNum - 5) * lineHeight;
+                if (!configEditor) return;
+                const line = lineNum - 1;
+                configEditor.focus();
+                configEditor.setCursor({{ line: line, ch: 0 }});
+                configEditor.setSelection(
+                    {{ line: line, ch: 0 }},
+                    {{ line: line, ch: configEditor.getLine(line)?.length || 0 }}
+                );
+                // Scroll to center the line
+                const coords = configEditor.charCoords({{ line: line, ch: 0 }}, 'local');
+                configEditor.scrollTo(null, coords.top - configEditor.getScrollInfo().clientHeight / 2);
             }}
 
             // Config editor
             async function loadConfig() {{
-                const editor = document.getElementById('config-editor');
                 const result = document.getElementById('config-result');
                 const ollamaDiv = document.getElementById('ollama-models');
                 result.style.display = 'block';
@@ -865,7 +1508,7 @@ async def promote_ui(
                         result.textContent = data.error;
                         return;
                     }}
-                    editor.value = JSON.stringify(data.config, null, 2);
+                    setEditorValue(JSON.stringify(data.config, null, 2));
                     configHostPath = data.config_path || '';
 
                     // Show Ollama models if available
@@ -888,17 +1531,17 @@ async def promote_ui(
             }}
 
             async function saveConfig() {{
-                const editor = document.getElementById('config-editor');
                 const result = document.getElementById('config-result');
+                const editorValue = getEditorValue();
 
                 // Validate JSON first
                 let config;
                 try {{
-                    config = JSON.parse(editor.value);
+                    config = JSON.parse(editorValue);
                 }} catch(e) {{
                     result.style.display = 'block';
                     result.className = 'result error';
-                    result.innerHTML = formatJsonError(e.message, editor.value);
+                    result.innerHTML = formatJsonError(e.message, editorValue);
                     return;
                 }}
 
@@ -928,18 +1571,18 @@ async def promote_ui(
             }}
 
             function formatConfig() {{
-                const editor = document.getElementById('config-editor');
                 const result = document.getElementById('config-result');
+                const editorValue = getEditorValue();
                 try {{
-                    const config = JSON.parse(editor.value);
-                    editor.value = JSON.stringify(config, null, 2);
+                    const config = JSON.parse(editorValue);
+                    setEditorValue(JSON.stringify(config, null, 2));
                     result.style.display = 'block';
                     result.className = 'result';
                     result.textContent = 'JSON formatted.';
                 }} catch(e) {{
                     result.style.display = 'block';
                     result.className = 'result error';
-                    result.innerHTML = formatJsonError(e.message, editor.value);
+                    result.innerHTML = formatJsonError(e.message, editorValue);
                 }}
             }}
 
@@ -987,15 +1630,12 @@ async def promote_ui(
             }}
 
             function searchInEditor(text) {{
-                const editor = document.getElementById('config-editor');
-                const pos = editor.value.indexOf(text);
-                if (pos >= 0) {{
-                    editor.focus();
-                    editor.setSelectionRange(pos, pos + text.length);
-                    // Calculate line number for scroll
-                    const lines = editor.value.substring(0, pos).split('\\n');
-                    const lineHeight = 16;
-                    editor.scrollTop = (lines.length - 3) * lineHeight;
+                if (!configEditor) return;
+                const cursor = configEditor.getSearchCursor(text);
+                if (cursor.findNext()) {{
+                    configEditor.setSelection(cursor.from(), cursor.to());
+                    configEditor.scrollIntoView({{ from: cursor.from(), to: cursor.to() }}, 100);
+                    configEditor.focus();
                 }}
             }}
 
@@ -1030,7 +1670,7 @@ async def promote_ui(
             function renderOllamaModels() {{
                 const ollamaDiv = document.getElementById('ollama-models');
                 const availableRam = parseInt(document.getElementById('available-ram').value) || 64;
-                const editor = document.getElementById('config-editor');
+                const editorValue = getEditorValue();
 
                 if (!window.ollamaModelsRaw || window.ollamaModelsRaw.length === 0) {{
                     ollamaDiv.innerHTML = '<p style="color: #888; font-size: 0.85rem;">No Ollama models detected.</p>';
@@ -1040,7 +1680,7 @@ async def promote_ui(
                 // Get already configured model IDs
                 let configuredIds = new Set();
                 try {{
-                    const config = JSON.parse(editor.value);
+                    const config = JSON.parse(editorValue);
                     const models = config?.models?.providers?.ollama?.models || [];
                     models.forEach(m => configuredIds.add(m.id));
                 }} catch(e) {{
@@ -1089,43 +1729,11 @@ async def promote_ui(
             // Re-render when RAM changes
             document.getElementById('available-ram').addEventListener('change', renderOllamaModels);
 
-            // Update cursor position display
-            document.getElementById('config-editor').addEventListener('keyup', updateCursorPos);
-            document.getElementById('config-editor').addEventListener('click', updateCursorPos);
-            document.getElementById('config-editor').addEventListener('input', function() {{
-                updateCursorPos();
-                validateJsonLive();
-            }});
-
-            function updateCursorPos() {{
-                const editor = document.getElementById('config-editor');
-                const pos = editor.selectionStart;
-                const text = editor.value.substring(0, pos);
-                const lines = text.split('\\n');
-                const line = lines.length;
-                const col = lines[lines.length - 1].length + 1;
-                document.getElementById('cursor-pos').textContent = `Line ${{line}}, Col ${{col}}`;
-            }}
-
-            function validateJsonLive() {{
-                const editor = document.getElementById('config-editor');
-                const status = document.getElementById('json-status');
-                if (!editor.value.trim()) {{
-                    status.textContent = '';
-                    return;
-                }}
-                try {{
-                    JSON.parse(editor.value);
-                    status.innerHTML = '<span style="color: #4CAF50;">Valid JSON</span>';
-                }} catch(e) {{
-                    const {{ line }} = parseJsonError(e.message, editor.value);
-                    status.innerHTML = `<span style="color: #ef9a9a;">Error at line ${{line}}</span>`;
-                }}
-            }}
+            // Note: Cursor position and live JSON validation are handled by CodeMirror events (see initialization above)
 
             function addOllamaModel(modelId) {{
-                const editor = document.getElementById('config-editor');
                 const result = document.getElementById('config-result');
+                const editorValue = getEditorValue();
 
                 if (!window.ollamaModels || !window.ollamaModels[modelId]) {{
                     result.style.display = 'block';
@@ -1136,7 +1744,7 @@ async def promote_ui(
 
                 let config;
                 try {{
-                    config = JSON.parse(editor.value);
+                    config = JSON.parse(editorValue);
                 }} catch(e) {{
                     result.style.display = 'block';
                     result.className = 'result error';
@@ -1169,7 +1777,7 @@ async def promote_ui(
 
                 // Add the model
                 config.models.providers.ollama.models.push(window.ollamaModels[modelId]);
-                editor.value = JSON.stringify(config, null, 2);
+                setEditorValue(JSON.stringify(config, null, 2));
 
                 result.style.display = 'block';
                 result.className = 'result';
@@ -1418,11 +2026,13 @@ async def root_dashboard(
 @app.post("/controller")
 async def promote_manual(
     request: Request,
+    token: Optional[str] = Query(None),
     session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
 ):
     """Handle manual promotion of specific SHA from UI."""
     # Check authentication
-    if CONTROLLER_API_TOKEN and not (session and verify_session(session)):
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     form = await request.form()
@@ -1450,13 +2060,16 @@ async def promote_manual(
     """)
 
 
+@app.post("/promote-main")
 @app.post("/controller/promote-main")
 async def promote_main_endpoint(
+    token: Optional[str] = Query(None),
     session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
 ):
     """Pull latest main and restart gateway."""
     # Check authentication
-    if CONTROLLER_API_TOKEN and not (session and verify_session(session)):
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     audit_log("promote_main_requested", {})
@@ -1525,6 +2138,155 @@ async def get_audit(limit: int = 50):
 
 
 # ============================================================
+# Branches
+# ============================================================
+
+@app.get("/branches")
+@app.get("/controller/branches")
+async def list_branches(
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """List all remote branches."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Fetch latest first
+    git_fetch_origin()
+    branches = git_list_remote_branches()
+    return {"branches": branches}
+
+
+@app.get("/branches/{branch:path}/diff")
+@app.get("/controller/branches/{branch:path}/diff")
+async def get_branch_diff(
+    branch: str,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Get diff between a branch and main."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    diff = git_get_branch_diff(branch)
+    return {"branch": branch, **diff}
+
+
+@app.post("/branches/{branch:path}/merge")
+@app.post("/controller/branches/{branch:path}/merge")
+async def merge_branch(
+    branch: str,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Merge a branch into main via GitHub API."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    audit_log("branch_merge_requested", {"branch": branch})
+
+    # Use gh CLI to create and merge PR
+    try:
+        # Create PR
+        pr_result = subprocess.run(
+            ["gh", "pr", "create", "--repo", GITHUB_REPO, "--base", "main",
+             "--head", branch, "--title", f"Merge {branch}", "--body", "Merged via ClawFactory controller"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        if pr_result.returncode != 0 and "already exists" not in pr_result.stderr:
+            # Try to find existing PR
+            list_result = subprocess.run(
+                ["gh", "pr", "list", "--repo", GITHUB_REPO, "--head", branch, "--json", "number"],
+                capture_output=True,
+                text=True,
+            )
+            if list_result.returncode != 0:
+                return {"error": f"Failed to create PR: {pr_result.stderr}"}
+
+        # Merge the PR
+        merge_result = subprocess.run(
+            ["gh", "pr", "merge", "--repo", GITHUB_REPO, "--head", branch, "--squash", "--delete-branch"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        if merge_result.returncode != 0:
+            return {"error": f"Failed to merge: {merge_result.stderr}"}
+
+        audit_log("branch_merged", {"branch": branch})
+        return {"status": "merged", "branch": branch}
+
+    except Exception as e:
+        audit_log("branch_merge_error", {"branch": branch, "error": str(e)})
+        return {"error": str(e)}
+
+
+@app.post("/branches/merge-all")
+@app.post("/controller/branches/merge-all")
+async def merge_all_branches(
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Merge all proposal branches into main."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Fetch and get proposal branches
+    git_fetch_origin()
+    branches = git_list_remote_branches()
+    proposal_branches = [b for b in branches if b["is_proposal"]]
+
+    if not proposal_branches:
+        return {"status": "no_branches", "merged": [], "errors": []}
+
+    audit_log("merge_all_requested", {"branches": [b["name"] for b in proposal_branches]})
+
+    merged = []
+    errors = []
+
+    for branch in proposal_branches:
+        branch_name = branch["name"]
+        try:
+            # Create PR
+            pr_result = subprocess.run(
+                ["gh", "pr", "create", "--repo", GITHUB_REPO, "--base", "main",
+                 "--head", branch_name, "--title", f"Merge {branch_name}",
+                 "--body", "Merged via ClawFactory controller"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            # Merge the PR (even if PR creation said "already exists")
+            merge_result = subprocess.run(
+                ["gh", "pr", "merge", "--repo", GITHUB_REPO, "--head", branch_name,
+                 "--squash", "--delete-branch"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            if merge_result.returncode == 0:
+                merged.append(branch_name)
+                audit_log("branch_merged", {"branch": branch_name})
+            else:
+                errors.append({"branch": branch_name, "error": merge_result.stderr})
+
+        except Exception as e:
+            errors.append({"branch": branch_name, "error": str(e)})
+
+    return {"status": "completed", "merged": merged, "errors": errors}
+
+
+# ============================================================
 # Memory Backup
 # ============================================================
 
@@ -1579,7 +2341,31 @@ def commit_and_push_memory() -> bool:
             audit_log("memory_commit_error", {"stderr": result.stderr})
             return False
 
-        # Push
+        # Push (with GitHub token if available)
+        github_token = os.environ.get("GITHUB_TOKEN", "")
+        remote_url = None
+
+        if github_token:
+            # Get and modify remote URL with token
+            url_result = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=APPROVED_DIR,
+                capture_output=True,
+                text=True,
+            )
+            remote_url = url_result.stdout.strip()
+
+            if remote_url.startswith("https://github.com/"):
+                auth_url = remote_url.replace(
+                    "https://github.com/",
+                    f"https://x-access-token:{github_token}@github.com/"
+                )
+                subprocess.run(
+                    ["git", "remote", "set-url", "origin", auth_url],
+                    cwd=APPROVED_DIR,
+                    capture_output=True,
+                )
+
         result = subprocess.run(
             ["git", "push", "origin", "main"],
             cwd=APPROVED_DIR,
@@ -1587,6 +2373,15 @@ def commit_and_push_memory() -> bool:
             text=True,
             timeout=60,
         )
+
+        # Restore original remote URL
+        if github_token and remote_url:
+            subprocess.run(
+                ["git", "remote", "set-url", "origin", remote_url],
+                cwd=APPROVED_DIR,
+                capture_output=True,
+            )
+
         if result.returncode != 0:
             audit_log("memory_push_error", {"stderr": result.stderr})
             return False
