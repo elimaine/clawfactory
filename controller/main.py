@@ -879,10 +879,20 @@ async def promote_ui(
                     <div id="promote-result" class="result"></div>
 
                     <h3 style="margin-top: 1.5rem; font-size: 0.9rem; color: #888;">Promote Specific SHA</h3>
-                    <form action="/controller" method="POST">
-                        <input type="text" name="sha" placeholder="Enter full SHA" style="width: 300px;"><br>
-                        <button type="submit" class="secondary" style="margin-top: 0.5rem;">Promote SHA</button>
-                    </form>
+                    <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
+                        <input type="text" id="promote-sha-input" placeholder="Enter full SHA" style="width: 300px;">
+                        <button onclick="promoteSha()" class="secondary">Promote SHA</button>
+                    </div>
+                </div>
+
+                <h2>Branches</h2>
+                <div class="card">
+                    <button onclick="fetchBranches()">Refresh Branches</button>
+                    <div id="branches-list" style="margin-top: 0.5rem; max-height: 300px; overflow-y: auto;"></div>
+                    <div id="branch-diff-view" style="display: none; margin-top: 1rem; border-top: 1px solid #333; padding-top: 1rem;">
+                        <h3 style="color: #2196F3; margin: 0 0 0.5rem 0;">Branch: <span id="branch-diff-name"></span></h3>
+                        <div id="branch-diff-content"></div>
+                    </div>
                 </div>
 
                 <h2>Memory</h2>
@@ -890,16 +900,6 @@ async def promote_ui(
                     <button onclick="backupMemory()" class="secondary">Backup Memory to GitHub</button>
                     <button onclick="fetchMemoryStatus()" class="secondary">Check Status</button>
                     <div id="memory-result" class="result"></div>
-                </div>
-
-                <h2>Branches</h2>
-                <div class="card">
-                    <button onclick="fetchBranches()">Refresh Branches</button>
-                    <div id="branches-list" style="margin-top: 0.5rem;"></div>
-                    <div id="branch-diff-view" style="display: none; margin-top: 1rem; border-top: 1px solid #333; padding-top: 1rem;">
-                        <h3 style="color: #2196F3; margin: 0 0 0.5rem 0;">Branch: <span id="branch-diff-name"></span></h3>
-                        <div id="branch-diff-content"></div>
-                    </div>
                 </div>
 
                 <h2>Recent Commits</h2>
@@ -1228,7 +1228,7 @@ async def promote_ui(
 
                 const diffContent = document.getElementById('branch-diff-content');
                 if (diffContent) {{
-                    diffContent.innerHTML = '<p style="color: #888;">Merging...</p>';
+                    diffContent.innerHTML = '<p style="color: #888;">Checking for conflicts and merging...</p>';
                 }}
 
                 try {{
@@ -1236,8 +1236,29 @@ async def promote_ui(
                     const data = await resp.json();
 
                     if (data.error) {{
+                        let errorHtml = `<p style="color: #ef9a9a; font-weight: bold;">❌ ${{data.error}}</p>`;
+
+                        if (data.has_conflicts) {{
+                            errorHtml += `
+                                <div style="background: #3d2020; border: 1px solid #ef9a9a; border-radius: 4px; padding: 0.75rem; margin-top: 0.5rem;">
+                                    <p style="color: #ef9a9a; margin: 0 0 0.5rem 0;"><strong>⚠️ Merge Conflicts Detected</strong></p>
+                                    <p style="color: #ccc; margin: 0; font-size: 0.85rem;">
+                                        This branch has conflicts with main that cannot be automatically resolved.<br><br>
+                                        <strong>To resolve:</strong><br>
+                                        1. <code>git checkout ${{branch}}</code><br>
+                                        2. <code>git merge main</code><br>
+                                        3. Resolve conflicts in your editor<br>
+                                        4. <code>git add . && git commit</code><br>
+                                        5. <code>git push</code>
+                                    </p>
+                                </div>`;
+                            if (data.conflict_files && data.conflict_files.length > 0) {{
+                                errorHtml += `<pre style="margin-top: 0.5rem; font-size: 0.75rem; color: #ef9a9a; background: #252525; padding: 0.5rem; border-radius: 3px;">${{data.conflict_files.join('\\n')}}</pre>`;
+                            }}
+                        }}
+
                         if (diffContent) {{
-                            diffContent.innerHTML = `<p style="color: #ef9a9a;">Error: ${{data.error}}</p>`;
+                            diffContent.innerHTML = errorHtml;
                         }} else {{
                             alert('Error: ' + data.error);
                         }}
@@ -1314,7 +1335,7 @@ async def promote_ui(
                 const result = document.getElementById('promote-result');
                 result.style.display = 'block';
                 result.className = 'result';
-                result.textContent = 'Merging all proposal branches...';
+                result.textContent = 'Checking for conflicts and merging proposal branches...';
 
                 try {{
                     // First merge all proposal branches
@@ -1331,19 +1352,32 @@ async def promote_ui(
                     if (mergeData.merged && mergeData.merged.length > 0) {{
                         statusText += `✅ Merged: ${{mergeData.merged.join(', ')}}\\n`;
                     }}
-                    if (mergeData.errors && mergeData.errors.length > 0) {{
-                        statusText += `⚠️ Errors: ${{mergeData.errors.map(e => e.branch).join(', ')}}\\n`;
+                    if (mergeData.skipped_conflicts && mergeData.skipped_conflicts.length > 0) {{
+                        statusText += `⚠️ Skipped (conflicts): ${{mergeData.skipped_conflicts.join(', ')}}\\n`;
+                    }}
+                    const otherErrors = mergeData.errors ? mergeData.errors.filter(e => !e.has_conflicts) : [];
+                    if (otherErrors.length > 0) {{
+                        statusText += `❌ Other errors: ${{otherErrors.map(e => e.branch).join(', ')}}\\n`;
                     }}
                     if (mergeData.status === 'no_branches') {{
                         statusText = 'No proposal branches to merge. ';
                     }}
 
-                    result.textContent = statusText + 'Now deploying main...';
+                    // If there are only conflicts and no successful merges, warn but allow deploy
+                    if (mergeData.skipped_conflicts && mergeData.skipped_conflicts.length > 0 && (!mergeData.merged || mergeData.merged.length === 0)) {{
+                        statusText += '\\n⚠️ All branches have conflicts. Deploying main as-is...\\n';
+                    }} else {{
+                        result.textContent = statusText + 'Now deploying main...';
+                    }}
 
                     // Then deploy main
                     const deployResp = await fetch(basePath + '/controller/promote-main', {{ method: 'POST' }});
                     if (deployResp.ok) {{
-                        result.innerHTML = statusText.replace(/\\n/g, '<br>') + '<br><span style="color: #4CAF50;">✅ Deployed! Restarting gateway...</span>';
+                        let finalHtml = statusText.replace(/\\n/g, '<br>') + '<br><span style="color: #4CAF50;">✅ Deployed! Restarting gateway...</span>';
+                        if (mergeData.skipped_conflicts && mergeData.skipped_conflicts.length > 0) {{
+                            finalHtml += '<br><br><span style="color: #ff9800;">Note: Resolve conflicts locally for: ' + mergeData.skipped_conflicts.join(', ') + '</span>';
+                        }}
+                        result.innerHTML = finalHtml;
                         setTimeout(() => window.location.reload(), 3000);
                     }} else {{
                         const text = await deployResp.text();
@@ -1365,6 +1399,41 @@ async def promote_ui(
                     const resp = await fetch(basePath + '/controller/promote-main', {{ method: 'POST' }});
                     if (resp.ok) {{
                         result.innerHTML = '<span style="color: #4CAF50;">✅ Deployed! Restarting gateway...</span>';
+                        setTimeout(() => window.location.reload(), 3000);
+                    }} else {{
+                        const text = await resp.text();
+                        result.className = 'result error';
+                        result.textContent = 'Failed: ' + (text || resp.statusText);
+                    }}
+                }} catch(e) {{
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
+                }}
+            }}
+
+            async function promoteSha() {{
+                const sha = document.getElementById('promote-sha-input').value.trim();
+                if (!sha || sha.length < 7) {{
+                    alert('Please enter a valid SHA (at least 7 characters)');
+                    return;
+                }}
+                if (!confirm(`Promote SHA "${{sha}}" to approved?`)) return;
+
+                const result = document.getElementById('promote-result');
+                result.style.display = 'block';
+                result.className = 'result';
+                result.textContent = `Promoting SHA ${{sha}}...`;
+
+                try {{
+                    const formData = new FormData();
+                    formData.append('sha', sha);
+                    const resp = await fetch(basePath + '/controller', {{
+                        method: 'POST',
+                        body: formData
+                    }});
+                    if (resp.ok) {{
+                        result.innerHTML = `<span style="color: #4CAF50;">✅ Promoted SHA ${{sha}}! Restarting gateway...</span>`;
+                        document.getElementById('promote-sha-input').value = '';
                         setTimeout(() => window.location.reload(), 3000);
                     }} else {{
                         const text = await resp.text();
@@ -2190,6 +2259,35 @@ async def merge_branch(
 
     # Use gh CLI to create and merge PR
     try:
+        # First check if branch has conflicts with main
+        git_fetch_origin()
+        conflict_check = subprocess.run(
+            ["git", "merge-tree", "--write-tree", "origin/main", f"origin/{branch}"],
+            capture_output=True,
+            text=True,
+            cwd=APPROVED_DIR,
+            timeout=30,
+        )
+
+        # merge-tree returns non-zero if there are conflicts
+        if conflict_check.returncode != 0:
+            # Parse conflict info from stderr
+            conflict_files = []
+            for line in conflict_check.stdout.split("\n"):
+                if line.strip() and "CONFLICT" in line:
+                    conflict_files.append(line.strip())
+
+            error_msg = "Branch has merge conflicts with main. "
+            if conflict_files:
+                error_msg += f"Conflicts in: {'; '.join(conflict_files[:5])}"
+                if len(conflict_files) > 5:
+                    error_msg += f" (+{len(conflict_files) - 5} more)"
+            else:
+                error_msg += "Please resolve conflicts locally and push."
+
+            audit_log("branch_merge_conflict", {"branch": branch, "conflicts": conflict_files})
+            return {"error": error_msg, "has_conflicts": True, "conflict_files": conflict_files}
+
         # Create PR
         pr_result = subprocess.run(
             ["gh", "pr", "create", "--repo", GITHUB_REPO, "--base", "main",
@@ -2218,6 +2316,9 @@ async def merge_branch(
         )
 
         if merge_result.returncode != 0:
+            stderr = merge_result.stderr.lower()
+            if "conflict" in stderr or "cannot be merged" in stderr:
+                return {"error": "Merge failed due to conflicts. Please resolve conflicts locally and push.", "has_conflicts": True}
             return {"error": f"Failed to merge: {merge_result.stderr}"}
 
         audit_log("branch_merged", {"branch": branch})
@@ -2251,10 +2352,25 @@ async def merge_all_branches(
 
     merged = []
     errors = []
+    skipped_conflicts = []
 
     for branch in proposal_branches:
         branch_name = branch["name"]
         try:
+            # Check for conflicts first
+            conflict_check = subprocess.run(
+                ["git", "merge-tree", "--write-tree", "origin/main", f"origin/{branch_name}"],
+                capture_output=True,
+                text=True,
+                cwd=APPROVED_DIR,
+                timeout=30,
+            )
+
+            if conflict_check.returncode != 0:
+                skipped_conflicts.append(branch_name)
+                errors.append({"branch": branch_name, "error": "Has merge conflicts", "has_conflicts": True})
+                continue
+
             # Create PR
             pr_result = subprocess.run(
                 ["gh", "pr", "create", "--repo", GITHUB_REPO, "--base", "main",
@@ -2278,12 +2394,17 @@ async def merge_all_branches(
                 merged.append(branch_name)
                 audit_log("branch_merged", {"branch": branch_name})
             else:
-                errors.append({"branch": branch_name, "error": merge_result.stderr})
+                stderr = merge_result.stderr.lower()
+                if "conflict" in stderr or "cannot be merged" in stderr:
+                    skipped_conflicts.append(branch_name)
+                    errors.append({"branch": branch_name, "error": "Has merge conflicts", "has_conflicts": True})
+                else:
+                    errors.append({"branch": branch_name, "error": merge_result.stderr})
 
         except Exception as e:
             errors.append({"branch": branch_name, "error": str(e)})
 
-    return {"status": "completed", "merged": merged, "errors": errors}
+    return {"status": "completed", "merged": merged, "errors": errors, "skipped_conflicts": skipped_conflicts}
 
 
 # ============================================================
