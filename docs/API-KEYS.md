@@ -2,6 +2,13 @@
 
 This guide walks you through obtaining each API key needed for a fresh ClawFactory install.
 
+## Minimal Recommended Setup
+
+1. **Channel token** (Discord, Telegram, or Slack)
+2. **Kimi K2** or **Anthropic** (primary model)
+3. **Ollama** (local embeddings, free) or **OpenAI** (remote embeddings)
+
+
 ## Channel Tokens (At least one required)
 
 ### Discord Bot Token
