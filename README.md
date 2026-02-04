@@ -14,8 +14,8 @@ cd clawfactory
 ```
 
 Access:
-- **Gateway UI**: http://localhost:18789
-- **Controller**: http://localhost:8080/controller?token=YOUR_TOKEN
+- **Gateway UI**: http://localhost:18789?token=YOUR_GATEWAY_TOKEN
+- **Controller**: http://localhost:8080/controller?token=YOUR_CONTROLLER_TOKEN
 
 The install script generates authentication tokens. Run `./clawfactory.sh info` to see them.
 
