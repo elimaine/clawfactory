@@ -1,0 +1,269 @@
+# API Key Acquisition Guide
+
+This guide walks you through obtaining each API key needed for a fresh ClawFactory install.
+
+## Channel Tokens (At least one required)
+
+### Discord Bot Token
+
+1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
+2. Click **New Application** → name it (e.g., "MyBot")
+3. Go to **Bot** in the left sidebar
+4. Click **Reset Token** → **Yes, do it!**
+5. Copy the token (you won't see it again)
+6. Under **Privileged Gateway Intents**, enable:
+   - **Message Content Intent** (required for reading messages)
+   - **Server Members Intent** (optional, for member lists)
+7. Go to **OAuth2** → **URL Generator**
+   - Scopes: `bot`, `applications.commands`
+   - Bot Permissions: `Send Messages`, `Read Message History`, `Add Reactions`
+8. Copy the generated URL and open it to invite the bot to your server
+
+**Token format**: `MTIzNDU2Nzg5...` (long base64 string)
+
+---
+
+### Telegram Bot Token
+
+1. Open Telegram and message [@BotFather](https://t.me/BotFather)
+2. Send `/newbot`
+3. Follow prompts to name your bot
+4. Copy the token BotFather gives you
+
+**Token format**: `123456789:ABCdefGHI...`
+
+**Note**: Use `/setprivacy` with BotFather to enable group messages if needed.
+
+---
+
+### Slack Bot Token
+
+1. Go to [Slack API Apps](https://api.slack.com/apps)
+2. Click **Create New App** → **From scratch**
+3. Name it and select workspace
+4. Go to **OAuth & Permissions**
+5. Add Bot Token Scopes:
+   - `chat:write`
+   - `channels:history`
+   - `groups:history`
+   - `im:history`
+   - `app_mentions:read`
+6. Click **Install to Workspace**
+7. Copy the **Bot User OAuth Token**
+
+**Token format**: `xoxb-...`
+
+---
+
+## AI Provider Keys (Choose at least one)
+
+### Anthropic (Claude) - Recommended
+
+Best for: Primary model, high-quality reasoning
+
+1. Go to [Anthropic Console](https://console.anthropic.com/)
+2. Sign up or log in
+3. Go to **Settings** → **API Keys**
+4. Click **Create Key**
+5. Name it (e.g., "ClawFactory")
+6. Copy the key
+
+**Key format**: `sk-ant-api03-...`
+
+**Pricing**: ~$3/M input tokens, ~$15/M output tokens (Claude Sonnet)
+
+---
+
+### Kimi K2 (Moonshot AI)
+
+Best for: High-performance alternative, 256k context window
+
+1. Go to [Moonshot Platform](https://platform.moonshot.cn/)
+2. Sign up (may require Chinese phone verification)
+3. Go to **Console** → **API Keys**
+4. Click **Create new API key**
+5. Copy the key
+
+**Key format**: `sk-...` (standard format)
+
+**Pricing**: Competitive with Anthropic, check current rates
+
+---
+
+### OpenAI (GPT-4)
+
+Best for: GPT models, widely compatible
+
+1. Go to [OpenAI Platform](https://platform.openai.com/)
+2. Sign up or log in
+3. Go to **API Keys** (left sidebar)
+4. Click **Create new secret key**
+5. Name it and copy the key
+
+**Key format**: `sk-proj-...` or `sk-...`
+
+**Pricing**: ~$2.50/M input, ~$10/M output (GPT-4o)
+
+---
+
+### Google Gemini
+
+Best for: Gemini models + memory embeddings (recommended for embeddings)
+
+1. Go to [Google AI Studio](https://aistudio.google.com/)
+2. Sign in with Google account
+3. Click **Get API key** (top right)
+4. Click **Create API key**
+5. Select a Google Cloud project (or create one)
+6. Copy the key
+
+**Key format**: `AIza...` (39 characters)
+
+**Pricing**: Free tier available, then ~$0.075/M input (Flash)
+
+**Note**: Gemini keys also work for embedding models used in memory search.
+
+---
+
+### OpenRouter
+
+Best for: Access to multiple providers through one API
+
+1. Go to [OpenRouter](https://openrouter.ai/)
+2. Sign up or log in
+3. Go to **Keys** (left sidebar)
+4. Click **Create Key**
+5. Set spending limit (recommended)
+6. Copy the key
+
+**Key format**: `sk-or-v1-...`
+
+**Pricing**: Pass-through pricing + small markup
+
+---
+
+### Ollama (Local Models)
+
+Best for: Running models locally, no API costs, privacy
+
+1. Install Ollama:
+   ```bash
+   # macOS
+   brew install ollama
+
+   # Linux
+   curl -fsSL https://ollama.ai/install.sh | sh
+   ```
+
+2. Start Ollama:
+   ```bash
+   ollama serve
+   ```
+
+3. Pull models:
+   ```bash
+   ollama pull llama3.2        # General purpose
+   ollama pull nomic-embed-text # For embeddings
+   ollama pull qwen2.5:32b      # Larger model
+   ```
+
+**No API key needed** - uses `ollama-local` as placeholder
+
+**Note**: For Docker, Ollama connects via `host.docker.internal:11434`
+
+---
+
+## Optional Keys
+
+### GitHub Personal Access Token
+
+Only needed for automatic webhook configuration during install.
+
+1. Go to [GitHub Tokens (Classic)](https://github.com/settings/tokens/new)
+2. Note: Must be **Classic** token, not fine-grained
+3. Set description: "ClawFactory"
+4. Select scopes:
+   - `repo` (full control of private repos)
+   - `admin:repo_hook` (manage webhooks)
+   - `admin:org` (only if using an organization)
+5. Click **Generate token**
+6. Copy the token
+
+**Token format**: `ghp_...` (classic) or `github_pat_...` (fine-grained, won't work)
+
+**Note**: If you skip this, you can manually configure webhooks later.
+
+---
+
+## Environment Variables Summary
+
+After obtaining keys, they go in `secrets/<instance>/gateway.env`:
+
+```bash
+# Channels (at least one)
+DISCORD_BOT_TOKEN=your_discord_token
+TELEGRAM_BOT_TOKEN=your_telegram_token
+SLACK_BOT_TOKEN=xoxb-your-slack-token
+
+# AI Providers (at least one)
+ANTHROPIC_API_KEY=sk-ant-api03-...
+KIMI_API_KEY=sk-...
+OPENAI_API_KEY=sk-proj-...
+GEMINI_API_KEY=AIza...
+OPENROUTER_API_KEY=sk-or-v1-...
+
+# Ollama (local)
+OLLAMA_API_KEY=ollama-local
+OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
+
+# Generated by installer
+OPENCLAW_GATEWAY_TOKEN=<auto-generated>
+```
+
+---
+
+## Recommended Setup
+
+For most users, we recommend:
+
+1. **Channel token** (Discord, Telegram, or Slack)
+2. **Anthropic API Key** (primary model)
+3. **Gemini API Key** (for embeddings/memory search)
+4. **Ollama** (local fallback, optional)
+
+This gives you high-quality responses with Claude, efficient embeddings with Gemini, and a local fallback option.
+
+---
+
+## Troubleshooting
+
+### "Invalid API key" errors
+- Check for extra whitespace when copying
+- Ensure the key hasn't been revoked
+- Verify you're using the correct key type (e.g., classic GitHub token)
+
+### Ollama connection issues
+- Ensure `ollama serve` is running
+- Check if port 11434 is accessible
+- For Docker: verify `host.docker.internal` resolves
+
+### Rate limits
+- Start with lower usage models during testing
+- Consider OpenRouter for automatic fallbacks
+- Add multiple providers for redundancy
+
+---
+
+## Cost Estimation
+
+Rough monthly costs for moderate usage (~100k messages):
+
+| Provider | Estimated Cost |
+|----------|----------------|
+| Anthropic (Claude Sonnet) | $10-30/month |
+| OpenAI (GPT-4o) | $10-25/month |
+| Gemini (Flash) | $1-5/month |
+| Ollama | $0 (hardware costs only) |
+| OpenRouter | Varies by model |
+
+Actual costs depend heavily on message length, thinking mode, and usage patterns.
