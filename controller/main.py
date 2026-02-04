@@ -2251,16 +2251,17 @@ async def merge_branch(
     session: Optional[str] = Cookie(None, alias="clawfactory_session"),
     authorization: Optional[str] = Header(None),
 ):
-    """Merge a branch into main via GitHub API."""
+    """Merge a branch into main using git directly."""
     if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     audit_log("branch_merge_requested", {"branch": branch})
 
-    # Use gh CLI to create and merge PR
     try:
-        # First check if branch has conflicts with main
+        # Fetch latest
         git_fetch_origin()
+
+        # Check for conflicts using merge-tree
         conflict_check = subprocess.run(
             ["git", "merge-tree", "--write-tree", "origin/main", f"origin/{branch}"],
             capture_output=True,
@@ -2271,7 +2272,6 @@ async def merge_branch(
 
         # merge-tree returns non-zero if there are conflicts
         if conflict_check.returncode != 0:
-            # Parse conflict info from stderr
             conflict_files = []
             for line in conflict_check.stdout.split("\n"):
                 if line.strip() and "CONFLICT" in line:
@@ -2288,38 +2288,72 @@ async def merge_branch(
             audit_log("branch_merge_conflict", {"branch": branch, "conflicts": conflict_files})
             return {"error": error_msg, "has_conflicts": True, "conflict_files": conflict_files}
 
-        # Create PR
-        pr_result = subprocess.run(
-            ["gh", "pr", "create", "--repo", GITHUB_REPO, "--base", "main",
-             "--head", branch, "--title", f"Merge {branch}", "--body", "Merged via ClawFactory controller"],
+        # Checkout main
+        checkout_result = subprocess.run(
+            ["git", "checkout", "main"],
             capture_output=True,
             text=True,
+            cwd=APPROVED_DIR,
             timeout=30,
         )
+        if checkout_result.returncode != 0:
+            return {"error": f"Failed to checkout main: {checkout_result.stderr}"}
 
-        if pr_result.returncode != 0 and "already exists" not in pr_result.stderr:
-            # Try to find existing PR
-            list_result = subprocess.run(
-                ["gh", "pr", "list", "--repo", GITHUB_REPO, "--head", branch, "--json", "number"],
-                capture_output=True,
-                text=True,
-            )
-            if list_result.returncode != 0:
-                return {"error": f"Failed to create PR: {pr_result.stderr}"}
+        # Pull latest main
+        pull_result = subprocess.run(
+            ["git", "pull", "origin", "main"],
+            capture_output=True,
+            text=True,
+            cwd=APPROVED_DIR,
+            timeout=60,
+        )
+        if pull_result.returncode != 0:
+            return {"error": f"Failed to pull main: {pull_result.stderr}"}
 
-        # Merge the PR
+        # Merge the branch (squash for cleaner history)
         merge_result = subprocess.run(
-            ["gh", "pr", "merge", "--repo", GITHUB_REPO, "--head", branch, "--squash", "--delete-branch"],
+            ["git", "merge", "--squash", f"origin/{branch}"],
             capture_output=True,
             text=True,
+            cwd=APPROVED_DIR,
+            timeout=60,
+        )
+        if merge_result.returncode != 0:
+            # Reset on failure
+            subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=APPROVED_DIR, capture_output=True)
+            return {"error": f"Merge failed: {merge_result.stderr}"}
+
+        # Commit the squashed merge
+        commit_result = subprocess.run(
+            ["git", "commit", "-m", f"Merge {branch} (squashed via controller)"],
+            capture_output=True,
+            text=True,
+            cwd=APPROVED_DIR,
             timeout=30,
         )
+        if commit_result.returncode != 0:
+            subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=APPROVED_DIR, capture_output=True)
+            return {"error": f"Commit failed: {commit_result.stderr}"}
 
-        if merge_result.returncode != 0:
-            stderr = merge_result.stderr.lower()
-            if "conflict" in stderr or "cannot be merged" in stderr:
-                return {"error": "Merge failed due to conflicts. Please resolve conflicts locally and push.", "has_conflicts": True}
-            return {"error": f"Failed to merge: {merge_result.stderr}"}
+        # Push to origin
+        push_result = subprocess.run(
+            ["git", "push", "origin", "main"],
+            capture_output=True,
+            text=True,
+            cwd=APPROVED_DIR,
+            timeout=60,
+        )
+        if push_result.returncode != 0:
+            return {"error": f"Push failed: {push_result.stderr}"}
+
+        # Delete the remote branch
+        subprocess.run(
+            ["git", "push", "origin", "--delete", branch],
+            capture_output=True,
+            text=True,
+            cwd=APPROVED_DIR,
+            timeout=30,
+        )
 
         audit_log("branch_merged", {"branch": branch})
         return {"status": "merged", "branch": branch}
@@ -2336,7 +2370,7 @@ async def merge_all_branches(
     session: Optional[str] = Cookie(None, alias="clawfactory_session"),
     authorization: Optional[str] = Header(None),
 ):
-    """Merge all proposal branches into main."""
+    """Merge all proposal branches into main using git directly."""
     if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -2371,35 +2405,79 @@ async def merge_all_branches(
                 errors.append({"branch": branch_name, "error": "Has merge conflicts", "has_conflicts": True})
                 continue
 
-            # Create PR
-            pr_result = subprocess.run(
-                ["gh", "pr", "create", "--repo", GITHUB_REPO, "--base", "main",
-                 "--head", branch_name, "--title", f"Merge {branch_name}",
-                 "--body", "Merged via ClawFactory controller"],
+            # Checkout main
+            checkout_result = subprocess.run(
+                ["git", "checkout", "main"],
                 capture_output=True,
                 text=True,
+                cwd=APPROVED_DIR,
                 timeout=30,
             )
+            if checkout_result.returncode != 0:
+                errors.append({"branch": branch_name, "error": f"Checkout failed: {checkout_result.stderr}"})
+                continue
 
-            # Merge the PR (even if PR creation said "already exists")
+            # Pull latest main
+            pull_result = subprocess.run(
+                ["git", "pull", "origin", "main"],
+                capture_output=True,
+                text=True,
+                cwd=APPROVED_DIR,
+                timeout=60,
+            )
+            if pull_result.returncode != 0:
+                errors.append({"branch": branch_name, "error": f"Pull failed: {pull_result.stderr}"})
+                continue
+
+            # Merge the branch (squash)
             merge_result = subprocess.run(
-                ["gh", "pr", "merge", "--repo", GITHUB_REPO, "--head", branch_name,
-                 "--squash", "--delete-branch"],
+                ["git", "merge", "--squash", f"origin/{branch_name}"],
                 capture_output=True,
                 text=True,
+                cwd=APPROVED_DIR,
+                timeout=60,
+            )
+            if merge_result.returncode != 0:
+                subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=APPROVED_DIR, capture_output=True)
+                errors.append({"branch": branch_name, "error": f"Merge failed: {merge_result.stderr}"})
+                continue
+
+            # Commit
+            commit_result = subprocess.run(
+                ["git", "commit", "-m", f"Merge {branch_name} (squashed via controller)"],
+                capture_output=True,
+                text=True,
+                cwd=APPROVED_DIR,
+                timeout=30,
+            )
+            if commit_result.returncode != 0:
+                subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=APPROVED_DIR, capture_output=True)
+                errors.append({"branch": branch_name, "error": f"Commit failed: {commit_result.stderr}"})
+                continue
+
+            # Push
+            push_result = subprocess.run(
+                ["git", "push", "origin", "main"],
+                capture_output=True,
+                text=True,
+                cwd=APPROVED_DIR,
+                timeout=60,
+            )
+            if push_result.returncode != 0:
+                errors.append({"branch": branch_name, "error": f"Push failed: {push_result.stderr}"})
+                continue
+
+            # Delete remote branch
+            subprocess.run(
+                ["git", "push", "origin", "--delete", branch_name],
+                capture_output=True,
+                text=True,
+                cwd=APPROVED_DIR,
                 timeout=30,
             )
 
-            if merge_result.returncode == 0:
-                merged.append(branch_name)
-                audit_log("branch_merged", {"branch": branch_name})
-            else:
-                stderr = merge_result.stderr.lower()
-                if "conflict" in stderr or "cannot be merged" in stderr:
-                    skipped_conflicts.append(branch_name)
-                    errors.append({"branch": branch_name, "error": "Has merge conflicts", "has_conflicts": True})
-                else:
-                    errors.append({"branch": branch_name, "error": merge_result.stderr})
+            merged.append(branch_name)
+            audit_log("branch_merged", {"branch": branch_name})
 
         except Exception as e:
             errors.append({"branch": branch_name, "error": str(e)})
