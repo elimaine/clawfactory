@@ -346,6 +346,103 @@ EOF
 }
 
 # ============================================================
+# Create Initial State Config (openclaw.json)
+# ============================================================
+create_state_config() {
+    local config_file="${BOT_REPOS_DIR}/${INSTANCE_NAME}/state/openclaw.json"
+
+    # Skip if config already exists
+    if [[ -f "$config_file" ]]; then
+        success "State config already exists"
+        return
+    fi
+
+    info "Creating initial state config..."
+
+    # Build memory search config based on selected provider
+    local memory_search_json=""
+    if [[ "${MEMORY_SEARCH_ENABLED:-false}" == "true" ]]; then
+        case "${MEMORY_SEARCH_PROVIDER:-}" in
+            ollama)
+                memory_search_json='"memorySearch": {
+        "enabled": true,
+        "provider": "openai",
+        "remote": {
+          "baseUrl": "http://host.docker.internal:11434/v1",
+          "apiKey": "ollama-local"
+        },
+        "model": "nomic-embed-text"
+      }'
+                ;;
+            gemini)
+                memory_search_json='"memorySearch": {
+        "enabled": true,
+        "provider": "gemini",
+        "model": "text-embedding-004"
+      }'
+                ;;
+            openai)
+                memory_search_json='"memorySearch": {
+        "enabled": true,
+        "provider": "openai",
+        "model": "text-embedding-3-small"
+      }'
+                ;;
+        esac
+    fi
+
+    # Build primary model config
+    local model_config=""
+    if [[ -n "${PRIMARY_MODEL:-}" ]]; then
+        model_config='"model": {
+        "primary": "'"${PRIMARY_MODEL}"'"
+      }'
+    fi
+
+    # Create the config file
+    cat > "$config_file" <<EOF
+{
+  "meta": {
+    "lastTouchedVersion": "2026.1.0",
+    "lastTouchedAt": "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  },
+  "agents": {
+    "defaults": {
+      ${model_config}${model_config:+,}
+      ${memory_search_json}${memory_search_json:+,}
+      "workspace": "/home/node/.openclaw/workspace",
+      "maxConcurrent": 4,
+      "sandbox": {
+        "mode": "off"
+      }
+    }
+  },
+  "gateway": {
+    "port": 18789,
+    "mode": "local",
+    "bind": "loopback"
+  }
+}
+EOF
+
+    # Clean up any double commas or trailing commas (simple cleanup)
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c "
+import json
+with open('$config_file', 'r') as f:
+    try:
+        data = json.load(f)
+        with open('$config_file', 'w') as f:
+            json.dump(data, f, indent=2)
+    except:
+        pass
+" 2>/dev/null || true
+    fi
+
+    success "Created initial state config with memory search"
+}
+
+# ============================================================
 # AI Provider Selection Menu
 # ============================================================
 configure_ai_providers() {
@@ -488,6 +585,123 @@ configure_ai_providers() {
     fi
 
     success "AI providers configured"
+
+    # Configure vector memory after AI providers
+    configure_vector_memory
+}
+
+# ============================================================
+# Configure Vector Memory (Embeddings)
+# ============================================================
+configure_vector_memory() {
+    echo ""
+    echo "=== Vector Memory Search ==="
+    echo ""
+    echo "Vector memory enables semantic search over conversation history."
+    echo "This requires an embedding model to convert text to vectors."
+    echo ""
+
+    # Build list of available embedding providers based on configured keys
+    local available_providers=()
+    local provider_descriptions=()
+
+    if [[ -n "${OLLAMA_ENABLED:-}" ]]; then
+        available_providers+=("ollama")
+        provider_descriptions+=("1) Ollama (Local)        - nomic-embed-text, free, runs locally")
+    fi
+    if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+        available_providers+=("openai")
+        provider_descriptions+=("2) OpenAI                - text-embedding-3-small, high quality")
+    fi
+
+    if [[ ${#available_providers[@]} -eq 0 ]]; then
+        echo "No embedding providers available."
+        echo "Vector memory requires Ollama, Gemini, or OpenAI."
+        echo ""
+        read -p "Skip vector memory setup? [Y/n]: " skip_memory
+        if [[ ! "$skip_memory" =~ ^[Nn]$ ]]; then
+            MEMORY_SEARCH_ENABLED="false"
+            warn "Vector memory disabled (no embedding provider)"
+            return
+        fi
+        echo ""
+        echo "Configure an embedding provider:"
+        echo "  - Ollama: Install from https://ollama.ai, then run 'ollama pull nomic-embed-text'"
+        echo "  - Gemini: Get API key from https://aistudio.google.com/app/apikey"
+        echo "  - OpenAI: Get API key from https://platform.openai.com/api-keys"
+        echo ""
+        MEMORY_SEARCH_ENABLED="false"
+        return
+    fi
+
+    echo "Available embedding providers (based on your configured keys):"
+    echo ""
+    for desc in "${provider_descriptions[@]}"; do
+        echo "  $desc"
+    done
+    echo ""
+    echo "  0) Disable              - Skip vector memory"
+    echo ""
+
+    # Default to first available provider
+    local default_provider="${available_providers[0]}"
+    local default_num="1"
+    [[ "$default_provider" == "gemini" ]] && default_num="2"
+    [[ "$default_provider" == "openai" ]] && default_num="3"
+
+    read -p "Select embedding provider [$default_num]: " embed_selection
+    embed_selection="${embed_selection:-$default_num}"
+
+    case "$embed_selection" in
+        0)
+            MEMORY_SEARCH_ENABLED="false"
+            MEMORY_SEARCH_PROVIDER=""
+            MEMORY_SEARCH_MODEL=""
+            warn "Vector memory disabled"
+            ;;
+        1)
+            if [[ " ${available_providers[*]} " =~ " ollama " ]]; then
+                MEMORY_SEARCH_ENABLED="true"
+                MEMORY_SEARCH_PROVIDER="ollama"
+                MEMORY_SEARCH_MODEL="nomic-embed-text"
+                MEMORY_SEARCH_BASE_URL="http://host.docker.internal:11434/v1"
+                MEMORY_SEARCH_API_KEY="ollama-local"
+                success "Vector memory: Ollama (nomic-embed-text)"
+                echo ""
+                info "Make sure to pull the embedding model:"
+                echo "  ollama pull nomic-embed-text"
+            else
+                warn "Ollama not configured, skipping"
+                MEMORY_SEARCH_ENABLED="false"
+            fi
+            ;;
+        2)
+            if [[ " ${available_providers[*]} " =~ " gemini " ]]; then
+                MEMORY_SEARCH_ENABLED="true"
+                MEMORY_SEARCH_PROVIDER="gemini"
+                MEMORY_SEARCH_MODEL="text-embedding-004"
+                success "Vector memory: Gemini (text-embedding-004)"
+            else
+                warn "Gemini not configured, skipping"
+                MEMORY_SEARCH_ENABLED="false"
+            fi
+            ;;
+        3)
+            if [[ " ${available_providers[*]} " =~ " openai " ]]; then
+                MEMORY_SEARCH_ENABLED="true"
+                MEMORY_SEARCH_PROVIDER="openai"
+                MEMORY_SEARCH_MODEL="text-embedding-3-small"
+                success "Vector memory: OpenAI (text-embedding-3-small)"
+            else
+                warn "OpenAI not configured, skipping"
+                MEMORY_SEARCH_ENABLED="false"
+            fi
+            ;;
+        *)
+            warn "Invalid selection, disabling vector memory"
+            MEMORY_SEARCH_ENABLED="false"
+            ;;
+    esac
 }
 
 # ============================================================
@@ -1139,6 +1353,7 @@ main() {
     preflight
     configure_secrets
     init_bot_repo
+    create_state_config
     create_killswitch
     create_helper
     create_gitignore
