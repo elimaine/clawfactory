@@ -10,8 +10,8 @@
 # Architecture:
 #   approved/     - Git clone (bot pushes branches, PRs merged on GitHub)
 #   state/        - Runtime state (encrypted snapshots)
-#     memory/     - Embeddings database
-#     installed/  - npm packages (rebuilt from {instance}_save/package.json)
+#     workspace/memory/  - Bot memory files (backed up in snapshots)
+#     installed/        - npm packages (rebuilt from {instance}_save/package.json)
 
 services:
   # ============================================================
@@ -72,15 +72,16 @@ services:
         cp -r /workspace/approved/workspace/skills /home/node/.openclaw/workspace/ 2>/dev/null || true
         cp -r /workspace/approved/workspace/policies.yml /home/node/.openclaw/workspace/ 2>/dev/null || true
 
-        # Memory markdown persists in approved repo (git tracked)
-        # Symlink to OpenClaw workspace so bot can read/write
-        mkdir -p /workspace/approved/workspace/memory
-        rm -f /home/node/.openclaw/workspace/memory 2>/dev/null || true
-        ln -sfn /workspace/approved/workspace/memory /home/node/.openclaw/workspace/memory
+        # Memory stays in state/ (encrypted snapshots, not git)
+        mkdir -p /home/node/.openclaw/workspace/memory
 
-        # MEMORY.md also in approved repo
-        if [ -f "/workspace/approved/workspace/MEMORY.md" ]; then
-          ln -sf /workspace/approved/workspace/MEMORY.md /home/node/.openclaw/workspace/MEMORY.md
+        # Migrate existing memory from approved if state is empty (one-time)
+        if [ -d "/workspace/approved/workspace/memory" ] && [ -z "$(ls -A /home/node/.openclaw/workspace/memory 2>/dev/null)" ]; then
+          echo "[startup] Migrating memory from approved to state..."
+          cp -r /workspace/approved/workspace/memory/* /home/node/.openclaw/workspace/memory/ 2>/dev/null || true
+        fi
+        if [ -f "/workspace/approved/workspace/MEMORY.md" ] && [ ! -f "/home/node/.openclaw/workspace/MEMORY.md" ]; then
+          cp /workspace/approved/workspace/MEMORY.md /home/node/.openclaw/workspace/MEMORY.md
         fi
 
         # Install packages from {instance}_save/package.json if changed
