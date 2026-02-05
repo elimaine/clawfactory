@@ -113,7 +113,7 @@ load_env_value() {
 
     # Determine which file to check based on key
     case "$key" in
-        DISCORD_BOT_TOKEN|ANTHROPIC_API_KEY|MOONSHOT_API_KEY|OPENAI_API_KEY|GEMINI_API_KEY|OLLAMA_API_KEY|OPENROUTER_API_KEY|BRAVE_API_KEY|ELEVENLABS_API_KEY|OPENCLAW_GATEWAY_TOKEN)
+        DISCORD_BOT_TOKEN|TELEGRAM_BOT_TOKEN|SLACK_BOT_TOKEN|SLACK_APP_TOKEN|ANTHROPIC_API_KEY|MOONSHOT_API_KEY|OPENAI_API_KEY|GEMINI_API_KEY|OLLAMA_API_KEY|OPENROUTER_API_KEY|BRAVE_API_KEY|ELEVENLABS_API_KEY|OPENCLAW_GATEWAY_TOKEN)
             file="${SECRETS_DIR}/${instance}/gateway.env"
             ;;
         GITHUB_WEBHOOK_SECRET|ALLOWED_MERGE_ACTORS|CONTROLLER_API_TOKEN|GITHUB_TOKEN)
@@ -215,7 +215,7 @@ configure_sandbox() {
 }
 
 # ============================================================
-# Initialize Bot Repository (GitHub Fork)
+# Initialize Bot Repository (GitHub Fork or Local)
 # ============================================================
 init_bot_repo() {
     info "Initializing bot repository..."
@@ -223,44 +223,70 @@ init_bot_repo() {
     mkdir -p "${BOT_REPOS_DIR}/${INSTANCE_NAME}"
     mkdir -p "${BOT_REPOS_DIR}/${INSTANCE_NAME}/state"
 
-    # Determine repo owner (org or username)
-    local repo_owner="${GITHUB_REPO_OWNER:-${GITHUB_ORG:-${GITHUB_USERNAME}}}"
-    if [[ -z "$repo_owner" ]]; then
-        # Try to get from gh auth
-        repo_owner=$(gh api user --jq '.login' 2>/dev/null || echo "")
-    fi
-
-    if [[ -z "$repo_owner" ]]; then
-        warn "GitHub not configured yet, skipping repo initialization"
-        return 0
-    fi
-
-    local bot_repo_name="${INSTANCE_NAME}-bot"
-    local fork_repo="${repo_owner}/${bot_repo_name}"
-    local fork_url="https://github.com/${fork_repo}.git"
-
-    # Check if fork exists, if not create it
-    if ! gh repo view "${fork_repo}" &>/dev/null; then
-        info "Forking openclaw/openclaw as ${bot_repo_name} under ${repo_owner}..."
-        if [[ -n "$GITHUB_ORG" && "$GITHUB_ORG" == "$repo_owner" ]]; then
-            # Fork to organization
-            gh repo fork openclaw/openclaw --clone=false --fork-name "${bot_repo_name}" --org "${GITHUB_ORG}"
-        else
-            # Fork to personal account
-            gh repo fork openclaw/openclaw --clone=false --fork-name "${bot_repo_name}"
+    # Check if approved/ already exists with OpenClaw source code
+    if [[ -f "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/Dockerfile" ]] || \
+       [[ -f "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/package.json" ]]; then
+        success "Using existing bot_repos/${INSTANCE_NAME}/approved (OpenClaw source found)"
+        # Initialize as git repo if not already
+        if [[ ! -d "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/.git" ]]; then
+            info "Initializing git repo..."
+            cd "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved"
+            git init
+            git add -A
+            git commit -m "Initial commit from existing source" 2>/dev/null || true
+            cd "${SCRIPT_DIR}"
         fi
-        success "Created fork: ${fork_repo}"
     else
-        success "Fork exists: ${fork_repo}"
-    fi
+        # No existing source - try GitHub or manual setup
+        # Determine repo owner (org or username)
+        local repo_owner="${GITHUB_REPO_OWNER:-${GITHUB_ORG:-${GITHUB_USERNAME}}}"
+        if [[ -z "$repo_owner" ]]; then
+            # Try to get from gh auth
+            repo_owner=$(gh api user --jq '.login' 2>/dev/null || echo "")
+        fi
 
-    # Clone approved if not exists (single clone - bot pushes branches here)
-    if [[ ! -d "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/.git" ]]; then
-        info "Cloning fork to approved..."
-        git clone "${fork_url}" "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved"
-        success "Cloned to bot_repos/${INSTANCE_NAME}/approved"
-    else
-        success "approved already exists"
+        if [[ -z "$repo_owner" ]]; then
+            warn "No existing source in bot_repos/${INSTANCE_NAME}/approved/"
+            echo ""
+            echo "To set up OpenClaw source, either:"
+            echo "  1. Clone OpenClaw manually:"
+            echo "     git clone https://github.com/openclaw/openclaw.git bot_repos/${INSTANCE_NAME}/approved"
+            echo ""
+            echo "  2. Copy from an existing bot:"
+            echo "     cp -r bot_repos/existing_bot/approved bot_repos/${INSTANCE_NAME}/approved"
+            echo ""
+            echo "  3. Configure GitHub (run install.sh again with GitHub enabled)"
+            echo ""
+            return 0
+        fi
+
+        local bot_repo_name="${INSTANCE_NAME}-bot"
+        local fork_repo="${repo_owner}/${bot_repo_name}"
+        local fork_url="https://github.com/${fork_repo}.git"
+
+        # Check if fork exists, if not create it
+        if ! gh repo view "${fork_repo}" &>/dev/null; then
+            info "Forking openclaw/openclaw as ${bot_repo_name} under ${repo_owner}..."
+            if [[ -n "$GITHUB_ORG" && "$GITHUB_ORG" == "$repo_owner" ]]; then
+                # Fork to organization
+                gh repo fork openclaw/openclaw --clone=false --fork-name "${bot_repo_name}" --org "${GITHUB_ORG}"
+            else
+                # Fork to personal account
+                gh repo fork openclaw/openclaw --clone=false --fork-name "${bot_repo_name}"
+            fi
+            success "Created fork: ${fork_repo}"
+        else
+            success "Fork exists: ${fork_repo}"
+        fi
+
+        # Clone approved if not exists (single clone - bot pushes branches here)
+        if [[ ! -d "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/.git" ]]; then
+            info "Cloning fork to approved..."
+            git clone "${fork_url}" "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved"
+            success "Cloned to bot_repos/${INSTANCE_NAME}/approved"
+        else
+            success "approved already exists"
+        fi
     fi
 
     # Create state directory
@@ -442,13 +468,6 @@ create_state_config() {
         "model": "nomic-embed-text"
       }'
                 ;;
-            gemini)
-                memory_search_json='"memorySearch": {
-        "enabled": true,
-        "provider": "gemini",
-        "model": "text-embedding-004"
-      }'
-                ;;
             openai)
                 memory_search_json='"memorySearch": {
         "enabled": true,
@@ -543,20 +562,20 @@ configure_ai_providers() {
     echo "Select which AI providers to configure:"
     echo ""
     echo "  1) Anthropic (Claude)      - Recommended primary model"
-    echo "  2) Kimi-K2 (Moonshot)      - High-performance alternative"
+    echo "  2) Kimi K2.5 (Moonshot)    - High-performance alternative"
     echo "  3) OpenAI (GPT-4)          - GPT models"
-    echo "  4) Google (Gemini)         - Gemini models + embeddings"
+    echo "  4) Google (Gemini)         - Gemini models"
     echo "  5) Ollama (Local)          - Run models locally"
     echo "  6) OpenRouter              - Multi-provider gateway"
     echo "  7) Brave Search            - Web search API"
     echo "  8) ElevenLabs              - Text-to-speech API"
     echo ""
-    echo "Enter numbers separated by spaces (e.g., '1 4 7' for Anthropic + Gemini + Brave)"
-    echo "Press Enter for default: Anthropic + Gemini embeddings"
+    echo "Enter numbers separated by spaces (e.g., '1 5 7' for Anthropic + Ollama + Brave)"
+    echo "Press Enter for default: Anthropic only"
     echo ""
 
-    read -p "Providers [1 4]: " provider_selection
-    provider_selection="${provider_selection:-1 4}"
+    read -p "Providers [1]: " provider_selection
+    provider_selection="${provider_selection:-1}"
 
     # Initialize all provider keys as empty
     ANTHROPIC_API_KEY=""
@@ -593,9 +612,9 @@ configure_ai_providers() {
                 ;;
             2)
                 echo ""
-                echo "--- Kimi-K2 (Moonshot AI) ---"
+                echo "--- Kimi K2.5 (Moonshot AI) ---"
                 echo "Get your API key at: https://platform.moonshot.cn/console/api-keys"
-                echo "Model: kimi-k2-0905-preview (256k context)"
+                echo "Model: kimi-k2.5 (256k context)"
                 if [[ -n "$saved_kimi" ]]; then
                     MOONSHOT_API_KEY="$saved_kimi"
                     success "Kimi API key (saved)"
@@ -618,7 +637,7 @@ configure_ai_providers() {
                 echo ""
                 echo "--- Google (Gemini) ---"
                 echo "Get your API key at: https://aistudio.google.com/app/apikey"
-                echo "Used for: Gemini models + memory embeddings"
+                echo "Used for: Gemini models"
                 if [[ -n "$saved_gemini" ]]; then
                     GEMINI_API_KEY="$saved_gemini"
                     success "Gemini API key (saved)"
@@ -686,8 +705,8 @@ configure_ai_providers() {
         PRIMARY_MODEL="anthropic/claude-sonnet-4-20250514"
         info "Primary model: Claude Sonnet 4 (Anthropic)"
     elif [[ -n "$MOONSHOT_API_KEY" ]]; then
-        PRIMARY_MODEL="moonshot/kimi-k2-0905-preview"
-        info "Primary model: Kimi K2 (Moonshot)"
+        PRIMARY_MODEL="moonshot/kimi-k2.5"
+        info "Primary model: Kimi K2.5 (Moonshot)"
     elif [[ -n "$OPENAI_API_KEY" ]]; then
         PRIMARY_MODEL="openai/gpt-4o"
         info "Primary model: GPT-4o (OpenAI)"
@@ -722,105 +741,68 @@ configure_vector_memory() {
     echo "This requires an embedding model to convert text to vectors."
     echo ""
 
-    # Build list of available embedding providers based on configured keys
-    local available_providers=()
-    local provider_descriptions=()
-
-    if [[ -n "${OLLAMA_ENABLED:-}" ]]; then
-        available_providers+=("ollama")
-        provider_descriptions+=("1) Ollama (Local)        - nomic-embed-text, free, runs locally")
-    fi
-    if [[ -n "${OPENAI_API_KEY:-}" ]]; then
-        available_providers+=("openai")
-        provider_descriptions+=("2) OpenAI                - text-embedding-3-small, high quality")
-    fi
-
-    if [[ ${#available_providers[@]} -eq 0 ]]; then
-        echo "No embedding providers available."
-        echo "Vector memory requires Ollama, Gemini, or OpenAI."
-        echo ""
-        read -p "Skip vector memory setup? [Y/n]: " skip_memory
-        if [[ ! "$skip_memory" =~ ^[Nn]$ ]]; then
-            MEMORY_SEARCH_ENABLED="false"
-            warn "Vector memory disabled (no embedding provider)"
-            return
-        fi
-        echo ""
-        echo "Configure an embedding provider:"
-        echo "  - Ollama: Install from https://ollama.ai, then run 'ollama pull nomic-embed-text'"
-        echo "  - Gemini: Get API key from https://aistudio.google.com/app/apikey"
-        echo "  - OpenAI: Get API key from https://platform.openai.com/api-keys"
-        echo ""
+    read -p "Enable vector memory search? [Y/n]: " enable_memory
+    if [[ "$enable_memory" =~ ^[Nn]$ ]]; then
         MEMORY_SEARCH_ENABLED="false"
+        warn "Vector memory disabled"
         return
     fi
 
-    echo "Available embedding providers (based on your configured keys):"
     echo ""
-    for desc in "${provider_descriptions[@]}"; do
-        echo "  $desc"
-    done
+    echo "Select embedding provider:"
     echo ""
-    echo "  0) Disable              - Skip vector memory"
+    echo "  1) OpenClaw (Local)    - Built-in embeddings, no external service needed"
+    echo "  2) Ollama (Local)      - nomic-embed-text, free, runs locally"
+    echo "  3) OpenAI              - text-embedding-3-small, high quality"
     echo ""
 
-    # Default to first available provider
-    local default_provider="${available_providers[0]}"
-    local default_num="1"
-    [[ "$default_provider" == "gemini" ]] && default_num="2"
-    [[ "$default_provider" == "openai" ]] && default_num="3"
-
-    read -p "Select embedding provider [$default_num]: " embed_selection
-    embed_selection="${embed_selection:-$default_num}"
+    read -p "Select provider [1]: " embed_selection
+    embed_selection="${embed_selection:-1}"
 
     case "$embed_selection" in
-        0)
-            MEMORY_SEARCH_ENABLED="false"
-            MEMORY_SEARCH_PROVIDER=""
-            MEMORY_SEARCH_MODEL=""
-            warn "Vector memory disabled"
-            ;;
         1)
-            if [[ " ${available_providers[*]} " =~ " ollama " ]]; then
-                MEMORY_SEARCH_ENABLED="true"
-                MEMORY_SEARCH_PROVIDER="ollama"
-                MEMORY_SEARCH_MODEL="nomic-embed-text"
-                MEMORY_SEARCH_BASE_URL="http://host.docker.internal:11434/v1"
-                MEMORY_SEARCH_API_KEY="ollama-local"
-                success "Vector memory: Ollama (nomic-embed-text)"
-                echo ""
-                info "Make sure to pull the embedding model:"
-                echo "  ollama pull nomic-embed-text"
-            else
-                warn "Ollama not configured, skipping"
-                MEMORY_SEARCH_ENABLED="false"
-            fi
+            MEMORY_SEARCH_ENABLED="true"
+            MEMORY_SEARCH_PROVIDER="openclaw"
+            MEMORY_SEARCH_MODEL="local"
+            success "Vector memory: OpenClaw (local embeddings)"
             ;;
         2)
-            if [[ " ${available_providers[*]} " =~ " gemini " ]]; then
-                MEMORY_SEARCH_ENABLED="true"
-                MEMORY_SEARCH_PROVIDER="gemini"
-                MEMORY_SEARCH_MODEL="text-embedding-004"
-                success "Vector memory: Gemini (text-embedding-004)"
-            else
-                warn "Gemini not configured, skipping"
-                MEMORY_SEARCH_ENABLED="false"
-            fi
+            MEMORY_SEARCH_ENABLED="true"
+            MEMORY_SEARCH_PROVIDER="ollama"
+            MEMORY_SEARCH_MODEL="nomic-embed-text"
+            MEMORY_SEARCH_BASE_URL="http://host.docker.internal:11434/v1"
+            MEMORY_SEARCH_API_KEY="ollama-local"
+            success "Vector memory: Ollama (nomic-embed-text)"
+            echo ""
+            info "Make sure to pull the embedding model:"
+            echo "  ollama pull nomic-embed-text"
             ;;
         3)
-            if [[ " ${available_providers[*]} " =~ " openai " ]]; then
-                MEMORY_SEARCH_ENABLED="true"
-                MEMORY_SEARCH_PROVIDER="openai"
-                MEMORY_SEARCH_MODEL="text-embedding-3-small"
-                success "Vector memory: OpenAI (text-embedding-3-small)"
-            else
-                warn "OpenAI not configured, skipping"
-                MEMORY_SEARCH_ENABLED="false"
+            # Prompt for OpenAI key if not already set
+            if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+                echo ""
+                echo "OpenAI API key required for embeddings."
+                echo "Get one at: https://platform.openai.com/api-keys"
+                echo ""
+                read -p "Enter OpenAI API key: " openai_key
+                if [[ -z "$openai_key" ]]; then
+                    warn "No API key provided, disabling vector memory"
+                    MEMORY_SEARCH_ENABLED="false"
+                    return
+                fi
+                OPENAI_API_KEY="$openai_key"
             fi
+            MEMORY_SEARCH_ENABLED="true"
+            MEMORY_SEARCH_PROVIDER="openai"
+            MEMORY_SEARCH_MODEL="text-embedding-3-small"
+            MEMORY_SEARCH_API_KEY="$OPENAI_API_KEY"
+            success "Vector memory: OpenAI (text-embedding-3-small)"
             ;;
         *)
-            warn "Invalid selection, disabling vector memory"
-            MEMORY_SEARCH_ENABLED="false"
+            warn "Invalid selection, using OpenClaw local embeddings"
+            MEMORY_SEARCH_ENABLED="true"
+            MEMORY_SEARCH_PROVIDER="openclaw"
+            MEMORY_SEARCH_MODEL="local"
             ;;
     esac
 }
@@ -844,14 +826,7 @@ configure_secrets() {
     echo "Used for container names and token storage."
     echo ""
 
-    # Try to derive default from directory name
-    local dir_name=$(basename "$SCRIPT_DIR")
-    local default_instance="${INSTANCE_NAME:-}"
-    if [[ -z "$default_instance" ]]; then
-        # Sanitize directory name as default
-        default_instance=$(echo "$dir_name" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | sed 's/^-//;s/-$//' | cut -c1-32)
-        [[ -z "$default_instance" ]] && default_instance="clawfactory"
-    fi
+    local default_instance="${INSTANCE_NAME:-bot1}"
 
     while true; do
         prompt INSTANCE_NAME "Instance name" "$default_instance"
@@ -866,6 +841,38 @@ configure_secrets() {
     save_config
     success "Instance name: $INSTANCE_NAME"
 
+    # Check for existing secrets for this instance
+    local INSTANCE_SECRETS_DIR="${SECRETS_DIR}/${INSTANCE_NAME}"
+    local USE_SAVED_SECRETS="false"
+
+    if [[ -f "${INSTANCE_SECRETS_DIR}/gateway.env" ]]; then
+        echo ""
+        echo "=== Existing Configuration Found ==="
+        echo "Found saved secrets for instance '${INSTANCE_NAME}'"
+        echo ""
+
+        # Show what's configured
+        local has_discord=$(grep -q "DISCORD_BOT_TOKEN=" "${INSTANCE_SECRETS_DIR}/gateway.env" 2>/dev/null && echo "yes" || echo "no")
+        local has_anthropic=$(grep -q "ANTHROPIC_API_KEY=" "${INSTANCE_SECRETS_DIR}/gateway.env" 2>/dev/null && echo "yes" || echo "no")
+        local has_moonshot=$(grep -q "MOONSHOT_API_KEY=" "${INSTANCE_SECRETS_DIR}/gateway.env" 2>/dev/null && echo "yes" || echo "no")
+        local has_openai=$(grep -q "OPENAI_API_KEY=" "${INSTANCE_SECRETS_DIR}/gateway.env" 2>/dev/null && echo "yes" || echo "no")
+
+        echo "Saved configuration:"
+        [[ "$has_discord" == "yes" ]] && echo "  - Discord bot token"
+        [[ "$has_anthropic" == "yes" ]] && echo "  - Anthropic API key"
+        [[ "$has_moonshot" == "yes" ]] && echo "  - Moonshot/Kimi API key"
+        [[ "$has_openai" == "yes" ]] && echo "  - OpenAI API key"
+        echo ""
+
+        read -p "Use saved configuration? [Y/n]: " use_saved
+        if [[ ! "$use_saved" =~ ^[Nn]$ ]]; then
+            USE_SAVED_SECRETS="true"
+            success "Using saved configuration"
+        else
+            info "Starting fresh configuration"
+        fi
+    fi
+
     # Load any existing values from env files as defaults
     local saved_discord_token=$(load_env_value "DISCORD_BOT_TOKEN")
     local saved_github_webhook=$(load_env_value "GITHUB_WEBHOOK_SECRET")
@@ -874,21 +881,139 @@ configure_secrets() {
     # GitHub username can be derived from actors
     local saved_github_username="${saved_github_actors%%,*}"
 
-    echo ""
-    echo "=== Mode Selection ==="
-    echo "online  - GitHub PRs for promotion, webhooks for updates"
-    echo "offline - Local approval UI only"
-    echo ""
-    prompt MODE "Mode (online/offline)" "online"
+    # If using saved secrets, skip configuration prompts
+    if [[ "$USE_SAVED_SECRETS" == "true" ]]; then
+        # Load all saved values
+        DISCORD_BOT_TOKEN=$(load_env_value "DISCORD_BOT_TOKEN")
+        TELEGRAM_BOT_TOKEN=$(load_env_value "TELEGRAM_BOT_TOKEN")
+        SLACK_BOT_TOKEN=$(load_env_value "SLACK_BOT_TOKEN")
+        SLACK_APP_TOKEN=$(load_env_value "SLACK_APP_TOKEN")
+        ANTHROPIC_API_KEY=$(load_env_value "ANTHROPIC_API_KEY")
+        MOONSHOT_API_KEY=$(load_env_value "MOONSHOT_API_KEY")
+        OPENAI_API_KEY=$(load_env_value "OPENAI_API_KEY")
+        GEMINI_API_KEY=$(load_env_value "GEMINI_API_KEY")
+        OLLAMA_ENABLED=$(load_env_value "OLLAMA_API_KEY")
+        [[ -n "$OLLAMA_ENABLED" ]] && OLLAMA_ENABLED="true"
+        OPENROUTER_API_KEY=$(load_env_value "OPENROUTER_API_KEY")
+        BRAVE_API_KEY=$(load_env_value "BRAVE_API_KEY")
+        ELEVENLABS_API_KEY=$(load_env_value "ELEVENLABS_API_KEY")
+
+        # Set primary model based on what's configured
+        if [[ -n "$ANTHROPIC_API_KEY" ]]; then
+            PRIMARY_MODEL="anthropic/claude-sonnet-4-20250514"
+        elif [[ -n "$MOONSHOT_API_KEY" ]]; then
+            PRIMARY_MODEL="moonshot/kimi-k2.5"
+        elif [[ -n "$OPENAI_API_KEY" ]]; then
+            PRIMARY_MODEL="openai/gpt-4o"
+        elif [[ -n "$OLLAMA_ENABLED" ]]; then
+            PRIMARY_MODEL="ollama/llama3.2"
+        fi
+
+        # Default mode to offline
+        MODE="offline"
+
+        # Load memory settings - default to enabled with openclaw
+        MEMORY_SEARCH_ENABLED="true"
+        MEMORY_SEARCH_PROVIDER="openclaw"
+        MEMORY_SEARCH_MODEL="local"
+
+        # Set defaults for GitHub (offline mode when using saved)
+        GITHUB_USERNAME=""
+        GITHUB_WEBHOOK_SECRET=""
+        GITHUB_ALLOWED_ACTORS=""
+        GITHUB_BOT_REPO=""
+    fi
+
+    # If using saved secrets, skip configuration prompts
+    if [[ "$USE_SAVED_SECRETS" == "true" ]]; then
+        # Jump directly to token generation (after the else block below)
+        :
+    else
 
     echo ""
-    echo "=== Discord Configuration ==="
-    if [[ -n "$saved_discord_token" ]]; then
-        DISCORD_BOT_TOKEN="$saved_discord_token"
-        success "Discord bot token (saved)"
+    echo "=== GitHub Integration ==="
+    echo "Configure GitHub for PR-based promotion workflow?"
+    echo ""
+    echo "  no  - Use Controller UI only (recommended)"
+    echo "  yes - Configure GitHub webhooks and PR workflow"
+    echo ""
+    warn "Note: GitHub integration is not fully implemented yet."
+    echo ""
+    read -p "Configure GitHub? [y/N]: " configure_github
+    if [[ "$configure_github" =~ ^[Yy]$ ]]; then
+        MODE="online"
     else
-        prompt DISCORD_BOT_TOKEN "Discord bot token" "" true
+        MODE="offline"
     fi
+
+    echo ""
+    echo "=== Channel Configuration ==="
+    echo "Select which chat channels to configure:"
+    echo ""
+    echo "  1) Discord    - Discord bot"
+    echo "  2) Telegram   - Telegram bot"
+    echo "  3) Slack      - Slack app"
+    echo ""
+    echo "Enter numbers separated by spaces (e.g., '1 2' for Discord + Telegram)"
+    echo ""
+
+    read -p "Channels [1]: " channel_selection
+    channel_selection="${channel_selection:-1}"
+
+    # Initialize channel tokens
+    DISCORD_BOT_TOKEN=""
+    TELEGRAM_BOT_TOKEN=""
+    SLACK_BOT_TOKEN=""
+    SLACK_APP_TOKEN=""
+
+    # Load saved values
+    local saved_discord_token=$(load_env_value "DISCORD_BOT_TOKEN")
+    local saved_telegram_token=$(load_env_value "TELEGRAM_BOT_TOKEN")
+    local saved_slack_bot_token=$(load_env_value "SLACK_BOT_TOKEN")
+    local saved_slack_app_token=$(load_env_value "SLACK_APP_TOKEN")
+
+    for channel in $channel_selection; do
+        case "$channel" in
+            1)
+                echo ""
+                echo "--- Discord ---"
+                echo "Create a bot at: https://discord.com/developers/applications"
+                if [[ -n "$saved_discord_token" ]]; then
+                    DISCORD_BOT_TOKEN="$saved_discord_token"
+                    success "Discord bot token (saved)"
+                else
+                    prompt DISCORD_BOT_TOKEN "Discord bot token" "" true
+                fi
+                ;;
+            2)
+                echo ""
+                echo "--- Telegram ---"
+                echo "Create a bot via @BotFather on Telegram"
+                if [[ -n "$saved_telegram_token" ]]; then
+                    TELEGRAM_BOT_TOKEN="$saved_telegram_token"
+                    success "Telegram bot token (saved)"
+                else
+                    prompt TELEGRAM_BOT_TOKEN "Telegram bot token" "" true
+                fi
+                ;;
+            3)
+                echo ""
+                echo "--- Slack ---"
+                echo "Create an app at: https://api.slack.com/apps"
+                if [[ -n "$saved_slack_bot_token" ]]; then
+                    SLACK_BOT_TOKEN="$saved_slack_bot_token"
+                    SLACK_APP_TOKEN="$saved_slack_app_token"
+                    success "Slack tokens (saved)"
+                else
+                    prompt SLACK_BOT_TOKEN "Slack bot token (xoxb-...)" "" true
+                    prompt SLACK_APP_TOKEN "Slack app token (xapp-...)" "" true
+                fi
+                ;;
+            *)
+                warn "Unknown channel: $channel (skipping)"
+                ;;
+        esac
+    done
 
     if [[ "$MODE" == "online" ]]; then
         echo ""
@@ -995,6 +1120,8 @@ configure_secrets() {
         configure_ai_providers
     fi
 
+    fi  # End of USE_SAVED_SECRETS else block
+
     # Generate or load API tokens (instance-specific)
     info "Configuring API tokens for instance '${INSTANCE_NAME}'..."
 
@@ -1028,28 +1155,26 @@ configure_secrets() {
     fi
 
     # Save tokens to tokens.env (append/update instance-specific tokens)
-    # First, load all existing tokens
-    declare -A all_tokens
-    if [[ -f "$TOKEN_FILE" ]]; then
-        while IFS='=' read -r key value; do
-            [[ -z "$key" || "$key" =~ ^# ]] && continue
-            all_tokens["$key"]="$value"
-        done < "$TOKEN_FILE"
-    fi
+    # Filter out old tokens for this instance, then append new ones
+    local temp_file="${TOKEN_FILE}.tmp"
 
-    # Update with current instance tokens
-    all_tokens["${INSTANCE_NAME}_gateway_token"]="$GATEWAY_TOKEN"
-    all_tokens["${INSTANCE_NAME}_controller_token"]="$CONTROLLER_TOKEN"
-
-    # Write all tokens back
-    cat > "$TOKEN_FILE" <<EOF
+    # Start with header
+    cat > "$temp_file" <<EOF
 # ClawFactory API Tokens
 # Generated tokens for each instance (do not edit manually)
 # Format: {instance}_gateway_token, {instance}_controller_token
 EOF
-    for key in "${!all_tokens[@]}"; do
-        echo "${key}=${all_tokens[$key]}" >> "$TOKEN_FILE"
-    done
+
+    # Copy existing tokens for OTHER instances (not this one)
+    if [[ -f "$TOKEN_FILE" ]]; then
+        grep -v "^#" "$TOKEN_FILE" | grep -v "^${INSTANCE_NAME}_" | grep -v "^$" >> "$temp_file" 2>/dev/null || true
+    fi
+
+    # Add current instance tokens
+    echo "${INSTANCE_NAME}_gateway_token=${GATEWAY_TOKEN}" >> "$temp_file"
+    echo "${INSTANCE_NAME}_controller_token=${CONTROLLER_TOKEN}" >> "$temp_file"
+
+    mv "$temp_file" "$TOKEN_FILE"
     chmod 600 "$TOKEN_FILE"
 
     # Generate env files for containers in instance-specific folder
@@ -1057,13 +1182,21 @@ EOF
     mkdir -p "${INSTANCE_SECRETS_DIR}"
     chmod 700 "${INSTANCE_SECRETS_DIR}"
 
-    # Build gateway.env with configured providers
+    # Build gateway.env with configured channels and providers
     cat > "${INSTANCE_SECRETS_DIR}/gateway.env" <<EOF
 # Gateway environment for instance: ${INSTANCE_NAME}
-DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
 
-# AI Providers (only non-empty keys are used)
+# Chat Channels (only non-empty tokens are used)
 EOF
+
+    # Add channel tokens if configured
+    [[ -n "${DISCORD_BOT_TOKEN:-}" ]] && echo "DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}" >> "${INSTANCE_SECRETS_DIR}/gateway.env"
+    [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]] && echo "TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}" >> "${INSTANCE_SECRETS_DIR}/gateway.env"
+    [[ -n "${SLACK_BOT_TOKEN:-}" ]] && echo "SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}" >> "${INSTANCE_SECRETS_DIR}/gateway.env"
+    [[ -n "${SLACK_APP_TOKEN:-}" ]] && echo "SLACK_APP_TOKEN=${SLACK_APP_TOKEN}" >> "${INSTANCE_SECRETS_DIR}/gateway.env"
+
+    echo "" >> "${INSTANCE_SECRETS_DIR}/gateway.env"
+    echo "# AI Providers (only non-empty keys are used)" >> "${INSTANCE_SECRETS_DIR}/gateway.env"
 
     # Add each provider key if configured
     [[ -n "${ANTHROPIC_API_KEY:-}" ]] && echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> "${INSTANCE_SECRETS_DIR}/gateway.env"

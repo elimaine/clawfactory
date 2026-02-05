@@ -169,6 +169,7 @@ services:
       # Audit log
       - ./audit:/srv/audit:rw
       # Docker socket for restarting gateway
+      # Linux: /var/run/docker.sock, Windows: //var/run/docker.sock (Docker Desktop handles this)
       - /var/run/docker.sock:/var/run/docker.sock:ro
     # No ports exposed - access via proxy
     networks:
