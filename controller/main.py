@@ -1514,9 +1514,9 @@ async def promote_ui(
                 try {{
                     const resp = await fetch(basePath + '/gateway/restart', {{ method: 'POST' }});
                     const data = await resp.json();
-                    if (data.error) {{
+                    if (!resp.ok || data.error || data.detail) {{
                         result.className = 'result error';
-                        result.textContent = data.error;
+                        result.textContent = data.error || data.detail || 'Unknown error';
                     }} else {{
                         result.textContent = 'Gateway restarting... Status: ' + (data.status || 'ok');
                     }}
@@ -1535,9 +1535,9 @@ async def promote_ui(
                 try {{
                     const resp = await fetch(basePath + '/pull-upstream', {{ method: 'POST' }});
                     const data = await resp.json();
-                    if (data.error) {{
+                    if (!resp.ok || data.error || data.detail) {{
                         result.className = 'result error';
-                        result.innerHTML = 'Pull failed: ' + data.error;
+                        result.innerHTML = 'Pull failed: ' + (data.error || data.detail || 'Unknown error');
                     }} else {{
                         result.innerHTML = '<span style="color: #4CAF50;">✅ ' + (data.message || 'Pulled successfully') + '</span>';
                         if (data.changes) {{
@@ -1560,9 +1560,9 @@ async def promote_ui(
                 try {{
                     const resp = await fetch(basePath + '/gateway/rebuild', {{ method: 'POST' }});
                     const data = await resp.json();
-                    if (data.error) {{
+                    if (!resp.ok || data.error || data.detail) {{
                         result.className = 'result error';
-                        result.textContent = 'Rebuild failed: ' + data.error;
+                        result.textContent = 'Rebuild failed: ' + (data.error || data.detail || 'Unknown error');
                     }} else {{
                         result.innerHTML = '<span style="color: #4CAF50;">✅ ' + (data.message || 'Rebuild complete') + '</span>';
                     }}
@@ -1579,8 +1579,8 @@ async def promote_ui(
                 try {{
                     const resp = await fetch(basePath + '/local-changes');
                     const data = await resp.json();
-                    if (data.error) {{
-                        container.innerHTML = '<span style="color: #ef9a9a;">Error: ' + data.error + '</span>';
+                    if (!resp.ok || data.error || data.detail) {{
+                        container.innerHTML = '<span style="color: #ef9a9a;">Error: ' + (data.error || data.detail || 'Unknown error') + '</span>';
                     }} else if (!data.changes || data.changes.trim() === '') {{
                         container.innerHTML = '<span style="color: #4CAF50;">No uncommitted changes</span>';
                     }} else {{
@@ -1715,9 +1715,9 @@ async def promote_ui(
                 try {{
                     const resp = await fetch(basePath + '/snapshot', {{ method: 'POST' }});
                     const data = await resp.json();
-                    if (data.error) {{
+                    if (!resp.ok || data.error || data.detail) {{
                         result.className = 'result error';
-                        result.textContent = data.error;
+                        result.textContent = data.error || data.detail || 'Unknown error';
                     }} else {{
                         result.textContent = 'Created: ' + data.name + ' (' + formatSize(data.size) + ')';
                         fetchSnapshots();
@@ -1873,9 +1873,9 @@ async def promote_ui(
                 try {{
                     const resp = await fetch(basePath + '/gateway/config');
                     const data = await resp.json();
-                    if (data.error) {{
+                    if (!resp.ok || data.error || data.detail) {{
                         result.className = 'result error';
-                        result.textContent = data.error;
+                        result.textContent = data.error || data.detail || 'Unknown error';
                         return;
                     }}
                     setEditorValue(JSON.stringify(data.config, null, 2));
@@ -1928,9 +1928,9 @@ async def promote_ui(
                         body: JSON.stringify({{ config }})
                     }});
                     const data = await resp.json();
-                    if (data.error) {{
+                    if (!resp.ok || data.error || data.detail) {{
                         result.className = 'result error';
-                        result.textContent = data.error;
+                        result.textContent = data.error || data.detail || 'Unknown error';
                     }} else {{
                         result.textContent = 'Config saved. Gateway restarting...';
                         // Check for backup after save
@@ -1972,9 +1972,9 @@ async def promote_ui(
                 try {{
                     const resp = await fetch(basePath + '/gateway/config/revert', {{ method: 'POST' }});
                     const data = await resp.json();
-                    if (data.error) {{
+                    if (!resp.ok || data.error || data.detail) {{
                         result.className = 'result error';
-                        result.textContent = data.error;
+                        result.textContent = data.error || data.detail || 'Unknown error';
                     }} else {{
                         result.innerHTML = '<span style="color: #4CAF50;">Config reverted. Gateway restarting...</span>';
                         // Reload config into editor
@@ -2320,8 +2320,8 @@ async def promote_ui(
                 try {{
                     const resp = await fetch(basePath + '/gateway/devices');
                     const data = await resp.json();
-                    if (data.error) {{
-                        list.innerHTML = `<p class="error" style="color: #ef9a9a;">${{data.error}}</p>`;
+                    if (!resp.ok || data.error || data.detail) {{
+                        list.innerHTML = `<p class="error" style="color: #ef9a9a;">${{data.error || data.detail || 'Unknown error'}}</p>`;
                         return;
                     }}
                     let html = '';
@@ -2481,9 +2481,9 @@ async def promote_ui(
                         body: JSON.stringify({{ channel, code }})
                     }});
                     const data = await resp.json();
-                    if (data.error) {{
+                    if (!resp.ok || data.error || data.detail) {{
                         result.className = 'result error';
-                        result.textContent = data.error;
+                        result.textContent = data.error || data.detail || 'Unknown error';
                     }} else {{
                         result.textContent = data.status || 'Approved!';
                         document.getElementById('pairing-code').value = '';
@@ -2503,9 +2503,9 @@ async def promote_ui(
                 try {{
                     const resp = await fetch(basePath + '/gateway/security-audit?deep=' + deep);
                     const data = await resp.json();
-                    if (data.error) {{
+                    if (!resp.ok || data.error || data.detail) {{
                         result.className = 'result error';
-                        result.textContent = data.error;
+                        result.textContent = data.error || data.detail || 'Unknown error';
                         return;
                     }}
                     // Format the security audit nicely
