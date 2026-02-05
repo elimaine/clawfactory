@@ -1,5 +1,7 @@
 # ClawFactory
-> **Status**: Work in progress (but looking promising).
+> **Status**: Work in progress (found a deeper architectural issue as of 4/2/26, basically we cant run docker in docker for subagents. this works single threaded, but cron jobs wont work until i take the gateway out of its own isolation.. which was half the security model..).
+
+
 
 Local-capable openclaw sandboxed agent manager. support for easily starting multiple local bots (with orchestration for remote bots possibly coming), current security features are snapshots, an external sandboxed controller gui so you dont need to use the control cli, git control of personality backups, a restore system, killswitch.. and more!
 
