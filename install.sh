@@ -135,14 +135,24 @@ preflight() {
     info "Checking dependencies..."
     require docker
     require git
-    require gh
 
     if ! docker info >/dev/null 2>&1; then
         die "Docker is not running. Please start Docker and try again."
     fi
 
-    if ! gh auth status &>/dev/null; then
-        die "GitHub CLI not authenticated. Run: gh auth login"
+    # GitHub CLI is optional - only needed for online mode
+    GH_AVAILABLE=false
+    if command -v gh >/dev/null 2>&1; then
+        if gh auth status &>/dev/null; then
+            GH_AVAILABLE=true
+            success "GitHub CLI authenticated"
+        else
+            info "GitHub CLI installed but not authenticated"
+            info "  Run 'gh auth login' to enable GitHub integration"
+        fi
+    else
+        info "GitHub CLI not installed (GitHub integration unavailable)"
+        info "  Install from: https://cli.github.com/"
     fi
 
     # Check for Sysbox (optional, for sandbox support)
@@ -156,7 +166,7 @@ preflight() {
         info "  https://github.com/nestybox/sysbox#installation"
     fi
 
-    success "All dependencies satisfied"
+    success "Core dependencies satisfied"
 }
 
 # ============================================================
@@ -240,7 +250,7 @@ init_bot_repo() {
         # No existing source - try GitHub or manual setup
         # Determine repo owner (org or username)
         local repo_owner="${GITHUB_REPO_OWNER:-${GITHUB_ORG:-${GITHUB_USERNAME}}}"
-        if [[ -z "$repo_owner" ]]; then
+        if [[ -z "$repo_owner" ]] && [[ "$GH_AVAILABLE" == "true" ]]; then
             # Try to get from gh auth
             repo_owner=$(gh api user --jq '.login' 2>/dev/null || echo "")
         fi
@@ -248,15 +258,20 @@ init_bot_repo() {
         if [[ -z "$repo_owner" ]]; then
             warn "No existing source in bot_repos/${INSTANCE_NAME}/approved/"
             echo ""
-            echo "To set up OpenClaw source, either:"
-            echo "  1. Clone OpenClaw manually:"
-            echo "     git clone https://github.com/openclaw/openclaw.git bot_repos/${INSTANCE_NAME}/approved"
+            echo "To set up OpenClaw source, clone OpenClaw manually:"
             echo ""
-            echo "  2. Copy from an existing bot:"
-            echo "     cp -r bot_repos/existing_bot/approved bot_repos/${INSTANCE_NAME}/approved"
+            echo "  git clone https://github.com/openclaw/openclaw.git bot_repos/${INSTANCE_NAME}/approved"
             echo ""
-            echo "  3. Configure GitHub (run install.sh again with GitHub enabled)"
+            echo "Or copy from an existing bot:"
             echo ""
+            echo "  cp -r bot_repos/existing_bot/approved bot_repos/${INSTANCE_NAME}/approved"
+            echo ""
+            if [[ "$GH_AVAILABLE" != "true" ]]; then
+                echo "To enable GitHub forking, install and authenticate GitHub CLI:"
+                echo "  1. Install: https://cli.github.com/"
+                echo "  2. Authenticate: gh auth login"
+                echo ""
+            fi
             return 0
         fi
 
@@ -613,7 +628,7 @@ configure_ai_providers() {
             2)
                 echo ""
                 echo "--- Kimi K2.5 (Moonshot AI) ---"
-                echo "Get your API key at: https://platform.moonshot.cn/console/api-keys"
+                echo "Get your API key at: https://platform.moonshot.ai/console/api-keys"
                 echo "Model: kimi-k2.5 (256k context)"
                 if [[ -n "$saved_kimi" ]]; then
                     MOONSHOT_API_KEY="$saved_kimi"
@@ -930,19 +945,26 @@ configure_secrets() {
         :
     else
 
-    echo ""
-    echo "=== GitHub Integration ==="
-    echo "Configure GitHub for PR-based promotion workflow?"
-    echo ""
-    echo "  no  - Use Controller UI only (recommended)"
-    echo "  yes - Configure GitHub webhooks and PR workflow"
-    echo ""
-    warn "Note: GitHub integration is not fully implemented yet."
-    echo ""
-    read -p "Configure GitHub? [y/N]: " configure_github
-    if [[ "$configure_github" =~ ^[Yy]$ ]]; then
-        MODE="online"
+    # GitHub Integration - only offer if GitHub CLI is available and authenticated
+    if [[ "$GH_AVAILABLE" == "true" ]]; then
+        echo ""
+        echo "=== GitHub Integration ==="
+        echo "Configure GitHub for PR-based promotion workflow?"
+        echo ""
+        echo "  no  - Use Controller UI only (recommended)"
+        echo "  yes - Configure GitHub webhooks and PR workflow"
+        echo ""
+        warn "Note: GitHub integration is not fully implemented yet."
+        echo ""
+        read -p "Configure GitHub? [y/N]: " configure_github
+        if [[ "$configure_github" =~ ^[Yy]$ ]]; then
+            MODE="online"
+        else
+            MODE="offline"
+        fi
     else
+        echo ""
+        info "Running in local mode (GitHub CLI not available)"
         MODE="offline"
     fi
 
@@ -1475,12 +1497,29 @@ export COMPOSE_PROJECT_NAME="clawfactory-${INSTANCE_NAME}"
 COMPOSE_CMD="docker compose -f ${SCRIPT_DIR}/docker-compose.yml"
 CONTAINER_PREFIX="clawfactory-${INSTANCE_NAME}"
 
+# Load tokens for URLs
+TOKEN_FILE="${SCRIPT_DIR}/secrets/tokens.env"
+GATEWAY_TOKEN=""
+CONTROLLER_TOKEN=""
+if [[ -f "$TOKEN_FILE" ]]; then
+    source "$TOKEN_FILE"
+    gw_var="${INSTANCE_NAME}_gateway_token"
+    ctrl_var="${INSTANCE_NAME}_controller_token"
+    GATEWAY_TOKEN="${!gw_var:-}"
+    CONTROLLER_TOKEN="${!ctrl_var:-}"
+fi
+
 case "${1:-help}" in
     start)
         ${COMPOSE_CMD} up -d
         echo "✓ ClawFactory [${INSTANCE_NAME}] started"
-        echo "  Gateway:    http://localhost:18789"
-        echo "  Controller: http://localhost:8080/controller"
+        if [[ -n "$GATEWAY_TOKEN" ]]; then
+            echo "  Gateway:    http://localhost:18789/?token=${GATEWAY_TOKEN}"
+            echo "  Controller: http://localhost:8080/controller?token=${CONTROLLER_TOKEN}"
+        else
+            echo "  Gateway:    http://localhost:18789"
+            echo "  Controller: http://localhost:8080/controller"
+        fi
         ;;
     stop)
         ${COMPOSE_CMD} down
@@ -1503,7 +1542,11 @@ case "${1:-help}" in
         ;;
     controller)
         echo "Controller UI for [${INSTANCE_NAME}]:"
-        echo "http://127.0.0.1:8080/controller"
+        if [[ -n "$CONTROLLER_TOKEN" ]]; then
+            echo "http://127.0.0.1:8080/controller?token=${CONTROLLER_TOKEN}"
+        else
+            echo "http://127.0.0.1:8080/controller"
+        fi
         ;;
     audit)
         curl -s http://127.0.0.1:8080/audit | jq '.entries[-10:]'
@@ -1562,8 +1605,15 @@ case "${1:-help}" in
         echo "  ./clawfactory.sh list               # List all instances"
         echo ""
         echo "Local access:"
-        echo "  Gateway:    http://localhost:18789"
-        echo "  Controller: http://localhost:8080/controller"
+        if [[ -n "$GATEWAY_TOKEN" ]]; then
+            echo "  Gateway:    http://localhost:18789/?token=\${GATEWAY_TOKEN}"
+            echo "  Controller: http://localhost:8080/controller?token=\${CONTROLLER_TOKEN}"
+            echo ""
+            echo "Run './clawfactory.sh info' to see your tokens"
+        else
+            echo "  Gateway:    http://localhost:18789"
+            echo "  Controller: http://localhost:8080/controller"
+        fi
         ;;
 esac
 EOF

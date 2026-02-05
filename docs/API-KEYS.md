@@ -130,19 +130,19 @@ Best for: Primary model, high-quality reasoning
 
 ---
 
-### Kimi K2 (Moonshot AI) Recommended (2nd best, more then 8x cheaper than claude!)
+### Kimi K2.5 (Moonshot AI) - Recommended (high quality, 8x cheaper than Claude!)
 
-Best for: High-performance alternative, 256k context window
+Best for: High-performance alternative, 256k context window, agentic tasks
 
-1. Go to [Moonshot Platform](https://platform.moonshot.cn/)
-2. Sign up (may require Chinese phone verification)
+1. Go to [Moonshot Platform](https://platform.moonshot.ai/)
+2. Sign up and verify your account
 3. Go to **Console** → **API Keys**
 4. Click **Create new API key**
 5. Copy the key
 
 **Key format**: `sk-...` (standard format)
 
-**Pricing**: Competitive with Anthropic, check current rates
+**Pricing**: ~$0.60/M input, ~$2.50/M output - significantly cheaper than Anthropic
 
 ---
 

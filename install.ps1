@@ -235,10 +235,6 @@ function Test-Preflight {
         Exit-WithError "Git is not installed. Please install Git for Windows."
     }
 
-    if (-not (Test-Command "gh")) {
-        Exit-WithError "GitHub CLI is not installed. Install from: https://cli.github.com/"
-    }
-
     # Check Docker is running
     try {
         $null = docker info 2>$null
@@ -249,17 +245,27 @@ function Test-Preflight {
         Exit-WithError "Docker is not running. Please start Docker Desktop and try again."
     }
 
-    # Check GitHub auth
-    $null = gh auth status 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        Exit-WithError "GitHub CLI not authenticated. Run: gh auth login"
+    # GitHub CLI is optional - only needed for online mode
+    $script:GH_AVAILABLE = $false
+    if (Test-Command "gh") {
+        $null = gh auth status 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            $script:GH_AVAILABLE = $true
+            Write-Success "GitHub CLI authenticated"
+        } else {
+            Write-Info "GitHub CLI installed but not authenticated"
+            Write-Info "  Run 'gh auth login' to enable GitHub integration"
+        }
+    } else {
+        Write-Info "GitHub CLI not installed (GitHub integration unavailable)"
+        Write-Info "  Install from: https://cli.github.com/"
     }
 
     # Sandbox not available on Windows (Sysbox is Linux-only)
     $script:SYSBOX_AVAILABLE = $false
     Write-Info "Sandbox mode is not available on Windows (Sysbox requires Linux)"
 
-    Write-Success "All dependencies satisfied"
+    Write-Success "Core dependencies satisfied"
 }
 
 # ============================================================
@@ -381,21 +387,27 @@ function Configure-Secrets {
         }
     }
 
-    # GitHub Integration
-    Write-Host ""
-    Write-Host "=== GitHub Integration ===" -ForegroundColor Cyan
-    Write-Host "Configure GitHub for PR-based promotion workflow?"
-    Write-Host ""
-    Write-Host "  no  - Use Controller UI only (recommended)"
-    Write-Host "  yes - Configure GitHub webhooks and PR workflow"
-    Write-Host ""
-    Write-Warn "Note: GitHub integration is not fully implemented yet."
-    Write-Host ""
+    # GitHub Integration - only offer if GitHub CLI is available and authenticated
+    if ($script:GH_AVAILABLE) {
+        Write-Host ""
+        Write-Host "=== GitHub Integration ===" -ForegroundColor Cyan
+        Write-Host "Configure GitHub for PR-based promotion workflow?"
+        Write-Host ""
+        Write-Host "  no  - Use Controller UI only (recommended)"
+        Write-Host "  yes - Configure GitHub webhooks and PR workflow"
+        Write-Host ""
+        Write-Warn "Note: GitHub integration is not fully implemented yet."
+        Write-Host ""
 
-    $configureGithub = Read-Prompt "Configure GitHub? [y/N]" "N"
-    if ($configureGithub -match "^[Yy]") {
-        $script:MODE = "online"
+        $configureGithub = Read-Prompt "Configure GitHub? [y/N]" "N"
+        if ($configureGithub -match "^[Yy]") {
+            $script:MODE = "online"
+        } else {
+            $script:MODE = "offline"
+        }
     } else {
+        Write-Host ""
+        Write-Info "Running in local mode (GitHub CLI not available)"
         $script:MODE = "offline"
     }
 
@@ -506,7 +518,7 @@ function Configure-AIProviders {
             "2" {
                 Write-Host ""
                 Write-Host "--- Kimi K2.5 (Moonshot AI) ---" -ForegroundColor Yellow
-                Write-Host "Get your API key at: https://platform.moonshot.cn/console/api-keys"
+                Write-Host "Get your API key at: https://platform.moonshot.ai/console/api-keys"
                 Write-Host "Model: kimi-k2.5 (256k context)"
                 $saved = Load-EnvValue "MOONSHOT_API_KEY"
                 if ($saved) {
@@ -732,7 +744,7 @@ function Initialize-BotRepo {
         $repoOwner = $script:GITHUB_REPO_OWNER
         if (-not $repoOwner) { $repoOwner = $script:GITHUB_ORG }
         if (-not $repoOwner) { $repoOwner = $script:GITHUB_USERNAME }
-        if (-not $repoOwner) {
+        if ((-not $repoOwner) -and $script:GH_AVAILABLE) {
             try {
                 $repoOwner = gh api user --jq '.login' 2>$null
             } catch { }
@@ -741,15 +753,20 @@ function Initialize-BotRepo {
         if (-not $repoOwner) {
             Write-Warn "No existing source in bot_repos\$script:INSTANCE_NAME\approved\"
             Write-Host ""
-            Write-Host "To set up OpenClaw source, either:"
-            Write-Host "  1. Clone OpenClaw manually:"
-            Write-Host "     git clone https://github.com/openclaw/openclaw.git bot_repos\$script:INSTANCE_NAME\approved"
+            Write-Host "To set up OpenClaw source, clone OpenClaw manually:"
             Write-Host ""
-            Write-Host "  2. Copy from an existing bot:"
-            Write-Host "     Copy-Item -Recurse bot_repos\existing_bot\approved bot_repos\$script:INSTANCE_NAME\approved"
+            Write-Host "  git clone https://github.com/openclaw/openclaw.git bot_repos\$script:INSTANCE_NAME\approved"
             Write-Host ""
-            Write-Host "  3. Configure GitHub (run install.ps1 again with GitHub enabled)"
+            Write-Host "Or copy from an existing bot:"
             Write-Host ""
+            Write-Host "  Copy-Item -Recurse bot_repos\existing_bot\approved bot_repos\$script:INSTANCE_NAME\approved"
+            Write-Host ""
+            if (-not $script:GH_AVAILABLE) {
+                Write-Host "To enable GitHub forking, install and authenticate GitHub CLI:"
+                Write-Host "  1. Install: https://cli.github.com/"
+                Write-Host "  2. Authenticate: gh auth login"
+                Write-Host ""
+            }
             return
         }
 

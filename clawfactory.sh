@@ -32,12 +32,29 @@ export COMPOSE_PROJECT_NAME="clawfactory-${INSTANCE_NAME}"
 COMPOSE_CMD="docker compose -f ${SCRIPT_DIR}/docker-compose.yml"
 CONTAINER_PREFIX="clawfactory-${INSTANCE_NAME}"
 
+# Load tokens for URLs
+TOKEN_FILE="${SCRIPT_DIR}/secrets/tokens.env"
+GATEWAY_TOKEN=""
+CONTROLLER_TOKEN=""
+if [[ -f "$TOKEN_FILE" ]]; then
+    source "$TOKEN_FILE"
+    gw_var="${INSTANCE_NAME}_gateway_token"
+    ctrl_var="${INSTANCE_NAME}_controller_token"
+    GATEWAY_TOKEN="${!gw_var:-}"
+    CONTROLLER_TOKEN="${!ctrl_var:-}"
+fi
+
 case "${1:-help}" in
     start)
         ${COMPOSE_CMD} up -d
         echo "✓ ClawFactory [${INSTANCE_NAME}] started"
-        echo "  Gateway:    http://localhost:18789"
-        echo "  Controller: http://localhost:8080/controller"
+        if [[ -n "$GATEWAY_TOKEN" ]]; then
+            echo "  Gateway:    http://localhost:18789/?token=${GATEWAY_TOKEN}"
+            echo "  Controller: http://localhost:8080/controller?token=${CONTROLLER_TOKEN}"
+        else
+            echo "  Gateway:    http://localhost:18789"
+            echo "  Controller: http://localhost:8080/controller"
+        fi
         ;;
     stop)
         ${COMPOSE_CMD} down
@@ -46,6 +63,19 @@ case "${1:-help}" in
     restart)
         ${COMPOSE_CMD} up -d --force-recreate
         echo "✓ ClawFactory [${INSTANCE_NAME}] restarted"
+        ;;
+    rebuild)
+        echo "Rebuilding ClawFactory [${INSTANCE_NAME}]..."
+        ${COMPOSE_CMD} build --no-cache
+        ${COMPOSE_CMD} up -d --force-recreate
+        echo "✓ ClawFactory [${INSTANCE_NAME}] rebuilt and restarted"
+        if [[ -n "$GATEWAY_TOKEN" ]]; then
+            echo "  Gateway:    http://localhost:18789/?token=${GATEWAY_TOKEN}"
+            echo "  Controller: http://localhost:8080/controller?token=${CONTROLLER_TOKEN}"
+        else
+            echo "  Gateway:    http://localhost:18789"
+            echo "  Controller: http://localhost:8080/controller"
+        fi
         ;;
     status)
         ${COMPOSE_CMD} ps -a
@@ -60,7 +90,11 @@ case "${1:-help}" in
         ;;
     controller)
         echo "Controller UI for [${INSTANCE_NAME}]:"
-        echo "http://127.0.0.1:8080/controller"
+        if [[ -n "$CONTROLLER_TOKEN" ]]; then
+            echo "http://127.0.0.1:8080/controller?token=${CONTROLLER_TOKEN}"
+        else
+            echo "http://127.0.0.1:8080/controller"
+        fi
         ;;
     audit)
         curl -s http://127.0.0.1:8080/audit | jq '.entries[-10:]'
@@ -104,6 +138,7 @@ case "${1:-help}" in
         echo "  start           Start containers"
         echo "  stop            Stop all containers"
         echo "  restart         Restart all containers"
+        echo "  rebuild         Rebuild images and restart"
         echo "  status          Show container status"
         echo "  logs [service]  Follow logs (gateway/proxy/controller)"
         echo "  shell [service] Open shell in container"
@@ -119,7 +154,14 @@ case "${1:-help}" in
         echo "  ./clawfactory.sh list               # List all instances"
         echo ""
         echo "Local access:"
-        echo "  Gateway:    http://localhost:18789"
-        echo "  Controller: http://localhost:8080/controller"
+        if [[ -n "$GATEWAY_TOKEN" ]]; then
+            echo "  Gateway:    http://localhost:18789/?token=\${GATEWAY_TOKEN}"
+            echo "  Controller: http://localhost:8080/controller?token=\${CONTROLLER_TOKEN}"
+            echo ""
+            echo "Run './clawfactory.sh info' to see your tokens"
+        else
+            echo "  Gateway:    http://localhost:18789"
+            echo "  Controller: http://localhost:8080/controller"
+        fi
         ;;
 esac

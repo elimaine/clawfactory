@@ -39,6 +39,9 @@ CONTROLLER_API_TOKEN = os.environ.get("CONTROLLER_API_TOKEN", "")
 SNAPSHOTS_DIR = Path(os.environ.get("SNAPSHOTS_DIR", "/srv/snapshots"))
 AGE_KEY = Path(os.environ.get("AGE_KEY", "/srv/secrets/snapshot.key"))
 
+# Detect offline mode (no GitHub configured)
+OFFLINE_MODE = not GITHUB_REPO or GITHUB_REPO.strip() == "" or "/" not in GITHUB_REPO
+
 app = FastAPI(title="ClawFactory Controller", version="1.0.0")
 
 # Session storage (persisted to file)
@@ -890,15 +893,15 @@ async def promote_ui(
             <div>
                 <h2>Promotion</h2>
                 <div class="card">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                    {"" if OFFLINE_MODE else f'''<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
                         <div>
                             <span style="color: #888;">Local:</span> <span class="sha">{current_sha[:8]}</span>
                             <span style="margin: 0 0.5rem; color: #444;">→</span>
                             <span style="color: #888;">Remote:</span> <span class="sha">{remote_sha[:8]}</span>
                         </div>
-                    </div>
-                    {"<div style='background: #ff9800; color: #000; padding: 0.75rem; border-radius: 4px; margin-bottom: 1rem; font-weight: bold;'>🔄 New version available on GitHub!</div>" if needs_update else ""}
-                    {f'''<details style="margin-bottom: 1rem; background: #1a1a1a; border: 1px solid #ff9800; border-radius: 4px; padding: 0.5rem;">
+                    </div>'''}
+                    {"" if OFFLINE_MODE else ("<div style='background: #ff9800; color: #000; padding: 0.75rem; border-radius: 4px; margin-bottom: 1rem; font-weight: bold;'>🔄 New version available on GitHub!</div>" if needs_update else "")}
+                    {"" if OFFLINE_MODE else (f'''<details style="margin-bottom: 1rem; background: #1a1a1a; border: 1px solid #ff9800; border-radius: 4px; padding: 0.5rem;">
                         <summary style="cursor: pointer; color: #ff9800; font-weight: bold;">📋 View {len(pending_changes["commits"])} pending commit(s) and {len(pending_changes["files"])} file(s)</summary>
                         <div style="margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid #333;">
                             <div style="margin-bottom: 0.75rem;">
@@ -918,8 +921,26 @@ async def promote_ui(
                                 <pre style="margin: 0.5rem 0; font-size: 0.75rem; color: #888; background: #252525; padding: 0.5rem; border-radius: 3px; overflow-x: auto;">{pending_changes["diff_stat"] or "No changes"}</pre>
                             </div>
                         </div>
-                    </details>''' if needs_update else ""}
-                    <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                    </details>''' if needs_update else "")}
+                    {f'''<div style="margin-bottom: 1rem;">
+                        <div style="background: #1a3a1a; border: 1px solid #4CAF50; border-radius: 4px; padding: 0.75rem; margin-bottom: 1rem;">
+                            <strong style="color: #4CAF50;">🔌 Local Mode</strong>
+                            <span style="color: #888; margin-left: 0.5rem;">GitHub not configured</span>
+                        </div>
+                        <div style="margin-bottom: 0.5rem;">
+                            <span style="color: #888;">Current commit:</span> <span class="sha">{current_sha[:8]}</span>
+                        </div>
+                    </div>
+                    <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem;">
+                        <button onclick="pullUpstream()">Pull Latest OpenClaw</button>
+                        <button onclick="rebuildGateway()" class="secondary">Rebuild Gateway</button>
+                        <button onclick="restartGateway()" class="secondary">Restart Gateway</button>
+                    </div>
+                    <div id="promote-result" class="result"></div>
+
+                    <h3 style="margin-top: 1.5rem; font-size: 0.9rem; color: #888;">Local Changes</h3>
+                    <button onclick="viewLocalChanges()" class="secondary small">View Uncommitted Changes</button>
+                    <div id="local-changes" style="margin-top: 0.5rem;"></div>''' if OFFLINE_MODE else f'''<div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
                         <button onclick="mergeAllAndDeploy()" {"style='background: #ff9800; border-color: #ff9800; animation: pulse 2s infinite;'" if needs_update else ""}>Merge All & Deploy</button>
                         <button onclick="promoteMain()" class="secondary">Deploy Main Only</button>
                     </div>
@@ -929,10 +950,10 @@ async def promote_ui(
                     <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
                         <input type="text" id="promote-sha-input" placeholder="Enter full SHA" style="width: 300px;">
                         <button onclick="promoteSha()" class="secondary">Promote SHA</button>
-                    </div>
+                    </div>'''}
                 </div>
 
-                <h2>Branches</h2>
+                {"" if OFFLINE_MODE else '''<h2>Branches</h2>
                 <div class="card">
                     <button onclick="fetchBranches()">Refresh Branches</button>
                     <div id="branches-list" style="margin-top: 0.5rem; max-height: 300px; overflow-y: auto;"></div>
@@ -940,7 +961,7 @@ async def promote_ui(
                         <h3 style="color: #2196F3; margin: 0 0 0.5rem 0;">Branch: <span id="branch-diff-name"></span></h3>
                         <div id="branch-diff-content"></div>
                     </div>
-                </div>
+                </div>'''}
 
                 <h2>Recent Commits</h2>
                 <pre>{commits}</pre>
@@ -1132,10 +1153,11 @@ async def promote_ui(
 
         <hr style="margin: 2rem 0; border-color: #333;">
         <p>
-            <a href="https://github.com/{GITHUB_REPO}">GitHub Repo</a> |
+            {"" if OFFLINE_MODE else f'<a href="https://github.com/{GITHUB_REPO}">GitHub Repo</a> |'}
             <a href="/health">Health API</a> |
             <a href="/status">Status API</a> |
             <a href="/audit">Audit API</a>
+            {"| <span style='color: #4CAF50;'>Local Mode</span>" if OFFLINE_MODE else ""}
         </p>
 
         <script>
@@ -1485,7 +1507,7 @@ async def promote_ui(
             // Gateway restart
             async function restartGateway() {{
                 if (!confirm('Restart the gateway? This will briefly interrupt the bot.')) return;
-                const result = document.getElementById('status-result');
+                const result = document.getElementById('status-result') || document.getElementById('promote-result');
                 result.style.display = 'block';
                 result.className = 'result';
                 result.textContent = 'Restarting gateway...';
@@ -1501,6 +1523,71 @@ async def promote_ui(
                 }} catch(e) {{
                     result.className = 'result error';
                     result.textContent = 'Error: ' + e.message;
+                }}
+            }}
+
+            // Offline mode: Pull latest OpenClaw from upstream
+            async function pullUpstream() {{
+                const result = document.getElementById('promote-result');
+                result.style.display = 'block';
+                result.className = 'result';
+                result.textContent = 'Pulling latest OpenClaw from upstream...';
+                try {{
+                    const resp = await fetch(basePath + '/pull-upstream', {{ method: 'POST' }});
+                    const data = await resp.json();
+                    if (data.error) {{
+                        result.className = 'result error';
+                        result.innerHTML = 'Pull failed: ' + data.error;
+                    }} else {{
+                        result.innerHTML = '<span style="color: #4CAF50;">✅ ' + (data.message || 'Pulled successfully') + '</span>';
+                        if (data.changes) {{
+                            result.innerHTML += '<br><pre style="margin-top: 0.5rem; font-size: 0.8rem;">' + data.changes + '</pre>';
+                        }}
+                    }}
+                }} catch(e) {{
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
+                }}
+            }}
+
+            // Offline mode: Rebuild gateway Docker image
+            async function rebuildGateway() {{
+                if (!confirm('Rebuild the gateway image? This will rebuild from local source and restart.')) return;
+                const result = document.getElementById('promote-result');
+                result.style.display = 'block';
+                result.className = 'result';
+                result.textContent = 'Rebuilding gateway image... This may take a while.';
+                try {{
+                    const resp = await fetch(basePath + '/gateway/rebuild', {{ method: 'POST' }});
+                    const data = await resp.json();
+                    if (data.error) {{
+                        result.className = 'result error';
+                        result.textContent = 'Rebuild failed: ' + data.error;
+                    }} else {{
+                        result.innerHTML = '<span style="color: #4CAF50;">✅ ' + (data.message || 'Rebuild complete') + '</span>';
+                    }}
+                }} catch(e) {{
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
+                }}
+            }}
+
+            // Offline mode: View local uncommitted changes
+            async function viewLocalChanges() {{
+                const container = document.getElementById('local-changes');
+                container.innerHTML = '<span style="color: #888;">Loading...</span>';
+                try {{
+                    const resp = await fetch(basePath + '/local-changes');
+                    const data = await resp.json();
+                    if (data.error) {{
+                        container.innerHTML = '<span style="color: #ef9a9a;">Error: ' + data.error + '</span>';
+                    }} else if (!data.changes || data.changes.trim() === '') {{
+                        container.innerHTML = '<span style="color: #4CAF50;">No uncommitted changes</span>';
+                    }} else {{
+                        container.innerHTML = '<pre style="max-height: 300px; overflow: auto; font-size: 0.8rem;">' + data.changes + '</pre>';
+                    }}
+                }} catch(e) {{
+                    container.innerHTML = '<span style="color: #ef9a9a;">Error: ' + e.message + '</span>';
                 }}
             }}
 
@@ -3828,6 +3915,165 @@ async def gateway_restart_endpoint(
         raise HTTPException(status_code=500, detail="Failed to restart gateway")
 
     return {"status": "restarting", "container": GATEWAY_CONTAINER}
+
+
+@app.post("/pull-upstream")
+@app.post("/controller/pull-upstream")
+async def pull_upstream_endpoint(
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Pull latest OpenClaw from upstream (offline mode)."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    audit_log("pull_upstream_requested", {"source": "api"})
+
+    try:
+        # Check if upstream remote exists, add if not
+        result = subprocess.run(
+            ["git", "remote", "get-url", "upstream"],
+            cwd=APPROVED_DIR,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            # Add upstream remote
+            subprocess.run(
+                ["git", "remote", "add", "upstream", "https://github.com/openclaw/openclaw.git"],
+                cwd=APPROVED_DIR,
+                capture_output=True,
+                text=True
+            )
+
+        # Fetch upstream
+        fetch_result = subprocess.run(
+            ["git", "fetch", "upstream"],
+            cwd=APPROVED_DIR,
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+        if fetch_result.returncode != 0:
+            return {"error": f"Fetch failed: {fetch_result.stderr}"}
+
+        # Merge upstream/main
+        merge_result = subprocess.run(
+            ["git", "merge", "upstream/main", "--no-edit", "-m", "Merge upstream OpenClaw"],
+            cwd=APPROVED_DIR,
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        if merge_result.returncode != 0:
+            return {"error": f"Merge failed: {merge_result.stderr}"}
+
+        return {
+            "message": "Pulled and merged upstream/main successfully",
+            "changes": merge_result.stdout or "Already up to date"
+        }
+    except subprocess.TimeoutExpired:
+        return {"error": "Operation timed out"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/gateway/rebuild")
+@app.post("/controller/gateway/rebuild")
+async def gateway_rebuild_endpoint(
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Rebuild and restart the gateway container (offline mode)."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    audit_log("gateway_rebuild_requested", {"source": "api"})
+
+    try:
+        client = docker.from_env()
+
+        # Stop the gateway container
+        try:
+            container = client.containers.get(GATEWAY_CONTAINER)
+            container.stop(timeout=30)
+        except docker.errors.NotFound:
+            pass
+
+        # Rebuild the image using docker compose
+        # Note: This assumes docker compose is available and the compose file is accessible
+        rebuild_result = subprocess.run(
+            ["docker", "compose", "build", "--no-cache", "gateway"],
+            cwd=str(APPROVED_DIR.parent.parent.parent),  # Go up to clawfactory root
+            capture_output=True,
+            text=True,
+            timeout=600  # 10 minute timeout for build
+        )
+
+        if rebuild_result.returncode != 0:
+            return {"error": f"Build failed: {rebuild_result.stderr}"}
+
+        # Start the gateway container
+        start_result = subprocess.run(
+            ["docker", "compose", "up", "-d", "gateway"],
+            cwd=str(APPROVED_DIR.parent.parent.parent),
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+
+        if start_result.returncode != 0:
+            return {"error": f"Start failed: {start_result.stderr}"}
+
+        return {"message": "Gateway rebuilt and restarted successfully"}
+    except subprocess.TimeoutExpired:
+        return {"error": "Operation timed out"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/local-changes")
+@app.get("/controller/local-changes")
+async def local_changes_endpoint(
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Get uncommitted changes in approved directory (offline mode)."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    try:
+        # Get git status and diff
+        status_result = subprocess.run(
+            ["git", "status", "--short"],
+            cwd=APPROVED_DIR,
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+
+        diff_result = subprocess.run(
+            ["git", "diff", "--stat"],
+            cwd=APPROVED_DIR,
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+
+        changes = ""
+        if status_result.stdout:
+            changes += "=== Status ===\n" + status_result.stdout + "\n"
+        if diff_result.stdout:
+            changes += "=== Changes ===\n" + diff_result.stdout
+
+        return {"changes": changes.strip()}
+    except subprocess.TimeoutExpired:
+        return {"error": "Operation timed out"}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.get("/gateway/logs")
