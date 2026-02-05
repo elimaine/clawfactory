@@ -301,11 +301,21 @@ def git_fetch_origin() -> bool:
             )
             remote_url = url_result.stdout.strip()
 
+            # Handle HTTPS URLs
             if remote_url.startswith("https://github.com/"):
                 auth_url = remote_url.replace(
                     "https://github.com/",
                     f"https://x-access-token:{github_token}@github.com/"
                 )
+                subprocess.run(
+                    ["git", "remote", "set-url", "origin", auth_url],
+                    cwd=APPROVED_DIR,
+                    capture_output=True,
+                )
+            # Handle SSH URLs (git@github.com:owner/repo.git)
+            elif remote_url.startswith("git@github.com:"):
+                repo_path = remote_url.replace("git@github.com:", "")
+                auth_url = f"https://x-access-token:{github_token}@github.com/{repo_path}"
                 subprocess.run(
                     ["git", "remote", "set-url", "origin", auth_url],
                     cwd=APPROVED_DIR,
@@ -373,11 +383,21 @@ def promote_sha(sha: str) -> bool:
             )
             remote_url = url_result.stdout.strip()
 
+            # Handle HTTPS URLs
             if remote_url.startswith("https://github.com/"):
                 auth_url = remote_url.replace(
                     "https://github.com/",
                     f"https://x-access-token:{github_token}@github.com/"
                 )
+                subprocess.run(
+                    ["git", "remote", "set-url", "origin", auth_url],
+                    cwd=APPROVED_DIR,
+                    capture_output=True,
+                )
+            # Handle SSH URLs (git@github.com:owner/repo.git)
+            elif remote_url.startswith("git@github.com:"):
+                repo_path = remote_url.replace("git@github.com:", "")
+                auth_url = f"https://x-access-token:{github_token}@github.com/{repo_path}"
                 subprocess.run(
                     ["git", "remote", "set-url", "origin", auth_url],
                     cwd=APPROVED_DIR,
@@ -526,11 +546,21 @@ def promote_main() -> bool:
             )
             remote_url = url_result.stdout.strip()
 
+            # Handle HTTPS URLs
             if remote_url.startswith("https://github.com/"):
                 auth_url = remote_url.replace(
                     "https://github.com/",
                     f"https://x-access-token:{github_token}@github.com/"
                 )
+                subprocess.run(
+                    ["git", "remote", "set-url", "origin", auth_url],
+                    cwd=APPROVED_DIR,
+                    capture_output=True,
+                )
+            # Handle SSH URLs (git@github.com:owner/repo.git)
+            elif remote_url.startswith("git@github.com:"):
+                repo_path = remote_url.replace("git@github.com:", "")
+                auth_url = f"https://x-access-token:{github_token}@github.com/{repo_path}"
                 subprocess.run(
                     ["git", "remote", "set-url", "origin", auth_url],
                     cwd=APPROVED_DIR,
@@ -912,13 +942,6 @@ async def promote_ui(
                     </div>
                 </div>
 
-                <h2>Memory</h2>
-                <div class="card">
-                    <button onclick="backupMemory()" class="secondary">Backup Memory to GitHub</button>
-                    <button onclick="fetchMemoryStatus()" class="secondary">Check Status</button>
-                    <div id="memory-result" class="result"></div>
-                </div>
-
                 <h2>Recent Commits</h2>
                 <pre>{commits}</pre>
             </div>
@@ -938,6 +961,14 @@ async def promote_ui(
                     <button onclick="fetchSnapshots()" class="secondary">Refresh List</button>
                     <div id="snapshot-result" class="result"></div>
                     <div id="snapshot-list" style="margin-top: 0.5rem;"></div>
+                    <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #333;">
+                        <label style="color: #888;">Restore from snapshot:</label>
+                        <select id="snapshot-select" style="margin: 0.5rem 0; padding: 0.3rem; background: #222; color: #eee; border: 1px solid #444;">
+                            <option value="latest">latest</option>
+                        </select>
+                        <button onclick="restoreSnapshot()" class="danger">Restore</button>
+                        <div id="restore-result" class="result" style="margin-top: 0.5rem;"></div>
+                    </div>
                 </div>
 
                 <h2>Audit Log</h2>
@@ -946,7 +977,19 @@ async def promote_ui(
                     <button onclick="fetchAudit(100)" class="secondary">Last 100</button>
                     <pre id="audit-log">Click Refresh to load audit log...</pre>
                 </div>
+
             </div>
+        </div>
+
+        <h2>Gateway Logs</h2>
+        <div class="card">
+            <button onclick="fetchGatewayLogs()">Refresh</button>
+            <button onclick="fetchGatewayLogs(200)" class="secondary">Last 200</button>
+            <button onclick="fetchGatewayLogs(500)" class="secondary">Last 500</button>
+            <label style="margin-left: 1rem; color: #888;">
+                <input type="checkbox" id="logs-auto-refresh" onchange="toggleLogsAutoRefresh()"> Auto-refresh
+            </label>
+            <pre id="gateway-logs" style="max-height: 500px; overflow-y: auto; font-size: 0.8rem;">Click Refresh to load gateway logs...</pre>
         </div>
 
         <h2>Gateway Config</h2>
@@ -1191,6 +1234,41 @@ async def promote_ui(
                 }}
             }}
 
+            // Gateway logs
+            let logsAutoRefreshInterval = null;
+
+            async function fetchGatewayLogs(lines = 100) {{
+                const log = document.getElementById('gateway-logs');
+                try {{
+                    const resp = await fetch(basePath + '/gateway/logs?lines=' + lines);
+                    const data = await resp.json();
+                    if (data.error) {{
+                        log.textContent = 'Error: ' + data.error;
+                    }} else if (data.logs) {{
+                        log.textContent = data.logs;
+                        // Auto-scroll to bottom
+                        log.scrollTop = log.scrollHeight;
+                    }} else {{
+                        log.textContent = 'No logs available.';
+                    }}
+                }} catch(e) {{
+                    log.textContent = 'Error: ' + e.message;
+                }}
+            }}
+
+            function toggleLogsAutoRefresh() {{
+                const checkbox = document.getElementById('logs-auto-refresh');
+                if (checkbox.checked) {{
+                    fetchGatewayLogs();
+                    logsAutoRefreshInterval = setInterval(() => fetchGatewayLogs(), 3000);
+                }} else {{
+                    if (logsAutoRefreshInterval) {{
+                        clearInterval(logsAutoRefreshInterval);
+                        logsAutoRefreshInterval = null;
+                    }}
+                }}
+            }}
+
             // Branch management
             async function fetchBranches() {{
                 const list = document.getElementById('branches-list');
@@ -1404,35 +1482,6 @@ async def promote_ui(
                 }}
             }}
 
-            async function backupMemory() {{
-                const result = document.getElementById('memory-result');
-                result.style.display = 'block';
-                result.className = 'result';
-                result.textContent = 'Backing up...';
-                try {{
-                    const resp = await fetch(basePath + '/memory/backup', {{ method: 'POST' }});
-                    const data = await resp.json();
-                    result.textContent = JSON.stringify(data, null, 2);
-                }} catch(e) {{
-                    result.className = 'result error';
-                    result.textContent = 'Error: ' + e.message;
-                }}
-            }}
-
-            async function fetchMemoryStatus() {{
-                const result = document.getElementById('memory-result');
-                result.style.display = 'block';
-                result.className = 'result';
-                try {{
-                    const resp = await fetch(basePath + '/memory/status');
-                    const data = await resp.json();
-                    result.textContent = JSON.stringify(data, null, 2);
-                }} catch(e) {{
-                    result.className = 'result error';
-                    result.textContent = 'Error: ' + e.message;
-                }}
-            }}
-
             // Gateway restart
             async function restartGateway() {{
                 if (!confirm('Restart the gateway? This will briefly interrupt the bot.')) return;
@@ -1594,26 +1643,67 @@ async def promote_ui(
 
             async function fetchSnapshots() {{
                 const list = document.getElementById('snapshot-list');
+                const select = document.getElementById('snapshot-select');
                 list.innerHTML = '<p style="color: #888;">Loading...</p>';
                 try {{
                     const resp = await fetch(basePath + '/snapshot');
                     const data = await resp.json();
                     if (!data.snapshots || data.snapshots.length === 0) {{
                         list.innerHTML = '<p style="color: #888; font-size: 0.85rem;">No snapshots yet.</p>';
+                        select.innerHTML = '<option value="latest">latest</option>';
                         return;
                     }}
                     let html = '<div style="max-height: 200px; overflow-y: auto;">';
+                    let selectHtml = '<option value="latest">latest</option>';
                     data.snapshots.forEach(s => {{
                         const latest = s.latest ? ' <span style="color: #4CAF50;">(latest)</span>' : '';
                         html += `<div style="padding: 0.3rem 0; border-bottom: 1px solid #333; font-size: 0.85rem;">
                             <code>${{s.name}}</code>${{latest}}<br>
                             <small style="color: #888;">${{formatSize(s.size)}} · ${{s.created}}</small>
                         </div>`;
+                        selectHtml += `<option value="${{s.name}}">${{s.name}}</option>`;
                     }});
                     html += '</div>';
                     list.innerHTML = html;
+                    select.innerHTML = selectHtml;
                 }} catch(e) {{
                     list.innerHTML = `<p class="error" style="color: #ef9a9a;">Error: ${{e.message}}</p>`;
+                }}
+            }}
+
+            async function restoreSnapshot() {{
+                const select = document.getElementById('snapshot-select');
+                const snapshot = select.value;
+                const result = document.getElementById('restore-result');
+
+                if (!confirm(`Restore from "${{snapshot}}"? This will:\\n- Stop the gateway\\n- Replace current state with snapshot\\n- Restart the gateway\\n\\nCurrent state will be backed up.`)) {{
+                    return;
+                }}
+
+                result.style.display = 'block';
+                result.className = 'result';
+                result.textContent = 'Restoring... (this may take a minute)';
+
+                try {{
+                    const resp = await fetch(basePath + '/snapshot/restore', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ snapshot: snapshot }})
+                    }});
+                    const data = await resp.json();
+                    if (data.error || data.detail) {{
+                        result.className = 'result error';
+                        result.textContent = 'Error: ' + (data.error || data.detail);
+                    }} else {{
+                        result.className = 'result';
+                        result.textContent = 'Restored from ' + data.snapshot + '. Backup at: ' + data.backup;
+                        if (data.warning) {{
+                            result.textContent += '\\nWarning: ' + data.warning;
+                        }}
+                    }}
+                }} catch(e) {{
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
                 }}
             }}
 
@@ -2379,24 +2469,9 @@ async def promote_ui(
                 fetchHealth();
             }}, POLL_INTERVAL_FAST);
 
-            // Branches/promotions - poll for new proposals
-            setInterval(() => {{
-                fetchBranches();
-            }}, POLL_INTERVAL_SLOW);
-
-            // Snapshots - poll for new backups
-            setInterval(() => {{
-                fetchSnapshots();
-            }}, POLL_INTERVAL_SLOW);
-
             // Proposed config - check for AI proposals
             setInterval(() => {{
                 checkProposedConfig();
-            }}, POLL_INTERVAL_SLOW);
-
-            // Recent audit log
-            setInterval(() => {{
-                fetchAudit();
             }}, POLL_INTERVAL_SLOW);
 
             console.log('Auto-polling enabled: status every 10s, data every 30s');
@@ -2597,6 +2672,7 @@ def git_setup_auth():
     )
     remote_url = url_result.stdout.strip()
 
+    # Handle HTTPS URLs
     if remote_url.startswith("https://github.com/"):
         auth_url = remote_url.replace(
             "https://github.com/",
@@ -2608,6 +2684,19 @@ def git_setup_auth():
             capture_output=True,
         )
         return remote_url
+
+    # Handle SSH URLs (git@github.com:owner/repo.git)
+    if remote_url.startswith("git@github.com:"):
+        # Convert git@github.com:owner/repo.git to https://x-access-token:{token}@github.com/owner/repo.git
+        repo_path = remote_url.replace("git@github.com:", "")
+        auth_url = f"https://x-access-token:{github_token}@github.com/{repo_path}"
+        subprocess.run(
+            ["git", "remote", "set-url", "origin", auth_url],
+            cwd=APPROVED_DIR,
+            capture_output=True,
+        )
+        return remote_url
+
     return None
 
 
@@ -3095,169 +3184,6 @@ async def deny_branch(
 
 
 # ============================================================
-# Memory Backup
-# ============================================================
-
-def backup_memory() -> dict:
-    """
-    List memory files in approved repo ready for commit.
-
-    Memory persists directly in approved/workspace/memory/ via volume mount.
-    """
-    memory_dir = APPROVED_DIR / "workspace" / "memory"
-    long_term = APPROVED_DIR / "workspace" / "MEMORY.md"
-
-    files = []
-
-    if memory_dir.exists():
-        files.extend([f"memory/{f.name}" for f in memory_dir.glob("*.md")])
-
-    if long_term.exists():
-        files.append("MEMORY.md")
-
-    return {"files": files}
-
-
-def commit_and_push_memory() -> bool:
-    """Commit memory changes and push to GitHub."""
-    try:
-        # Add memory files
-        subprocess.run(
-            ["git", "add", "workspace/memory/", "workspace/MEMORY.md"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-        )
-
-        # Check if there are changes to commit
-        result = subprocess.run(
-            ["git", "diff", "--cached", "--quiet"],
-            cwd=APPROVED_DIR,
-        )
-        if result.returncode == 0:
-            # No changes
-            return True
-
-        # Commit
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-        result = subprocess.run(
-            ["git", "commit", "-m", f"Backup agent memory - {timestamp}"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            audit_log("memory_commit_error", {"stderr": result.stderr})
-            return False
-
-        # Push (with GitHub token if available)
-        github_token = os.environ.get("GITHUB_TOKEN", "")
-        remote_url = None
-
-        if github_token:
-            # Get and modify remote URL with token
-            url_result = subprocess.run(
-                ["git", "remote", "get-url", "origin"],
-                cwd=APPROVED_DIR,
-                capture_output=True,
-                text=True,
-            )
-            remote_url = url_result.stdout.strip()
-
-            if remote_url.startswith("https://github.com/"):
-                auth_url = remote_url.replace(
-                    "https://github.com/",
-                    f"https://x-access-token:{github_token}@github.com/"
-                )
-                subprocess.run(
-                    ["git", "remote", "set-url", "origin", auth_url],
-                    cwd=APPROVED_DIR,
-                    capture_output=True,
-                )
-
-        result = subprocess.run(
-            ["git", "push", "origin", "main"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-
-        # Restore original remote URL
-        if github_token and remote_url:
-            subprocess.run(
-                ["git", "remote", "set-url", "origin", remote_url],
-                cwd=APPROVED_DIR,
-                capture_output=True,
-            )
-
-        if result.returncode != 0:
-            audit_log("memory_push_error", {"stderr": result.stderr})
-            return False
-
-        return True
-    except Exception as e:
-        audit_log("memory_backup_error", {"error": str(e)})
-        return False
-
-
-@app.post("/memory/backup")
-@app.post("/controller/memory/backup")
-async def memory_backup(
-    token: Optional[str] = Query(None),
-    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
-    authorization: Optional[str] = Header(None),
-):
-    """Backup agent memory to GitHub."""
-    # Check authentication
-    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    audit_log("memory_backup_requested", {})
-
-    result = backup_memory()
-    if not result["files"]:
-        return {"status": "no_changes", "files": []}
-
-    if not commit_and_push_memory():
-        raise HTTPException(status_code=500, detail="Failed to push memory backup")
-
-    audit_log("memory_backup_success", {"files": result["files"]})
-    return {"status": "backed_up", "files": result["files"]}
-
-
-@app.get("/memory/status")
-@app.get("/controller/memory/status")
-async def memory_status(
-    token: Optional[str] = Query(None),
-    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
-    authorization: Optional[str] = Header(None),
-):
-    """Get memory backup status."""
-    # Check authentication
-    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    # Memory markdown in approved repo
-    memory_dir = APPROVED_DIR / "workspace" / "memory"
-    long_term = APPROVED_DIR / "workspace" / "MEMORY.md"
-
-    files = []
-    if memory_dir.exists():
-        files.extend([f.name for f in memory_dir.glob("*.md")])
-    if long_term.exists():
-        files.append("MEMORY.md")
-
-    # Embeddings database in state
-    embeddings_db = OPENCLAW_HOME / "memory" / "main.sqlite"
-
-    return {
-        "memory_files": files,
-        "embeddings_db": str(embeddings_db) if embeddings_db.exists() else None,
-        "embeddings_size": embeddings_db.stat().st_size if embeddings_db.exists() else 0,
-    }
-
-
-# ============================================================
 # Encrypted Snapshots
 # ============================================================
 
@@ -3391,6 +3317,114 @@ async def snapshot_list(
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     return {"snapshots": list_snapshots()}
+
+
+def restore_snapshot(snapshot_name: str) -> dict:
+    """Restore state from an encrypted snapshot."""
+    import tempfile
+
+    if not AGE_KEY.exists():
+        return {"error": "No decryption key found"}
+
+    # Resolve snapshot path
+    if snapshot_name == "latest":
+        snapshot_path = SNAPSHOTS_DIR / "latest.tar.age"
+        if snapshot_path.is_symlink():
+            snapshot_path = snapshot_path.resolve()
+    else:
+        snapshot_path = SNAPSHOTS_DIR / snapshot_name
+        if not snapshot_path.exists():
+            # Try with .tar.age extension
+            snapshot_path = SNAPSHOTS_DIR / f"{snapshot_name}.tar.age"
+
+    if not snapshot_path.exists():
+        return {"error": f"Snapshot not found: {snapshot_name}"}
+
+    # Backup current state
+    backup_dir = Path(f"{OPENCLAW_HOME}.backup-{int(datetime.now().timestamp())}")
+    if OPENCLAW_HOME.exists():
+        import shutil
+        shutil.move(str(OPENCLAW_HOME), str(backup_dir))
+
+    OPENCLAW_HOME.mkdir(parents=True, exist_ok=True)
+
+    # Decrypt and extract
+    try:
+        result = subprocess.run(
+            f"age -d -i {AGE_KEY} {snapshot_path} | tar -C {OPENCLAW_HOME} -xf -",
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            # Restore backup on failure
+            if backup_dir.exists():
+                import shutil
+                shutil.rmtree(str(OPENCLAW_HOME), ignore_errors=True)
+                shutil.move(str(backup_dir), str(OPENCLAW_HOME))
+            return {"error": f"Restore failed: {result.stderr}"}
+
+        audit_log("snapshot_restored", {"snapshot": snapshot_name, "backup": str(backup_dir)})
+        return {
+            "status": "restored",
+            "snapshot": snapshot_name,
+            "backup": str(backup_dir),
+        }
+    except Exception as e:
+        # Restore backup on failure
+        if backup_dir.exists():
+            import shutil
+            shutil.rmtree(str(OPENCLAW_HOME), ignore_errors=True)
+            shutil.move(str(backup_dir), str(OPENCLAW_HOME))
+        return {"error": str(e)}
+
+
+class SnapshotRestoreRequest(BaseModel):
+    snapshot: str = "latest"
+
+
+@app.post("/snapshot/restore")
+@app.post("/controller/snapshot/restore")
+async def snapshot_restore_endpoint(
+    request: SnapshotRestoreRequest,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Restore from a snapshot. Stops gateway, restores, restarts."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    audit_log("snapshot_restore_requested", {"snapshot": request.snapshot})
+
+    # Stop gateway first
+    try:
+        client = docker.from_env()
+        container = client.containers.get(GATEWAY_CONTAINER)
+        container.stop(timeout=30)
+    except Exception as e:
+        audit_log("snapshot_restore_error", {"error": f"Failed to stop gateway: {e}"})
+        raise HTTPException(status_code=500, detail=f"Failed to stop gateway: {e}")
+
+    # Restore
+    result = restore_snapshot(request.snapshot)
+    if "error" in result:
+        # Try to restart gateway even on failure
+        try:
+            container.start()
+        except Exception:
+            pass
+        audit_log("snapshot_restore_error", result)
+        raise HTTPException(status_code=500, detail=result["error"])
+
+    # Restart gateway
+    try:
+        container.start()
+    except Exception as e:
+        result["warning"] = f"Gateway failed to restart: {e}"
+
+    return result
 
 
 # ============================================================
@@ -3796,6 +3830,29 @@ async def gateway_restart_endpoint(
     return {"status": "restarting", "container": GATEWAY_CONTAINER}
 
 
+@app.get("/gateway/logs")
+@app.get("/controller/gateway/logs")
+async def gateway_logs_endpoint(
+    lines: int = Query(100, ge=1, le=2000),
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Get gateway container logs."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    try:
+        client = docker.from_env()
+        container = client.containers.get(GATEWAY_CONTAINER)
+        logs = container.logs(tail=lines, timestamps=False).decode("utf-8", errors="replace")
+        return {"logs": logs, "lines": lines, "container": GATEWAY_CONTAINER}
+    except docker.errors.NotFound:
+        return {"error": f"Container {GATEWAY_CONTAINER} not found"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get("/gateway/devices")
 @app.get("/controller/gateway/devices")
 async def gateway_devices(
@@ -4039,37 +4096,6 @@ async def internal_snapshot_list():
     return {"snapshots": list_snapshots()}
 
 
-@app.post("/internal/memory/backup")
-async def internal_memory_backup():
-    """Backup memory - internal endpoint (no auth)."""
-    audit_log("memory_backup_requested", {"source": "internal"})
-    result = backup_memory()
-    if not result["files"]:
-        return {"status": "no_changes", "files": []}
-    if not commit_and_push_memory():
-        raise HTTPException(status_code=500, detail="Failed to push memory backup")
-    audit_log("memory_backup_success", {"files": result["files"]})
-    return {"status": "backed_up", "files": result["files"]}
-
-
-@app.get("/internal/memory/status")
-async def internal_memory_status():
-    """Get memory status - internal endpoint (no auth)."""
-    memory_dir = APPROVED_DIR / "workspace" / "memory"
-    long_term = APPROVED_DIR / "workspace" / "MEMORY.md"
-    files = []
-    if memory_dir.exists():
-        files.extend([f.name for f in memory_dir.glob("*.md")])
-    if long_term.exists():
-        files.append("MEMORY.md")
-    embeddings_db = OPENCLAW_HOME / "memory" / "main.sqlite"
-    return {
-        "memory_files": files,
-        "embeddings_db": str(embeddings_db) if embeddings_db.exists() else None,
-        "embeddings_size": embeddings_db.stat().st_size if embeddings_db.exists() else 0,
-    }
-
-
 class GitPushRequest(BaseModel):
     branch: str
 
@@ -4137,12 +4163,22 @@ async def internal_git_push(request: GitPushRequest):
             )
             remote_url = remote_result.stdout.strip()
 
-            # Convert https://github.com/... to https://x-access-token:TOKEN@github.com/...
+            # Convert https://github.com/... or git@github.com:... to https://x-access-token:TOKEN@github.com/...
             if remote_url.startswith("https://github.com/"):
                 auth_url = remote_url.replace(
                     "https://github.com/",
                     f"https://x-access-token:{github_token}@github.com/"
                 )
+                # Temporarily set the authenticated URL
+                subprocess.run(
+                    ["git", "remote", "set-url", "origin", auth_url],
+                    cwd=APPROVED_DIR,
+                    capture_output=True,
+                )
+            # Handle SSH URLs (git@github.com:owner/repo.git)
+            elif remote_url.startswith("git@github.com:"):
+                repo_path = remote_url.replace("git@github.com:", "")
+                auth_url = f"https://x-access-token:{github_token}@github.com/{repo_path}"
                 # Temporarily set the authenticated URL
                 subprocess.run(
                     ["git", "remote", "set-url", "origin", auth_url],

@@ -66,6 +66,7 @@ save_config() {
 INSTANCE_NAME="${INSTANCE_NAME:-}"
 GITHUB_USERNAME="${GITHUB_USERNAME:-}"
 GITHUB_ORG="${GITHUB_ORG:-}"
+SANDBOX_ENABLED="${SANDBOX_ENABLED:-false}"
 EOF
 
     # Also save to .env for docker-compose
@@ -75,6 +76,7 @@ INSTANCE_NAME=${INSTANCE_NAME:-clawfactory}
 COMPOSE_PROJECT_NAME=clawfactory-${INSTANCE_NAME:-default}
 GITHUB_USERNAME=${GITHUB_USERNAME:-}
 GITHUB_ORG=${GITHUB_ORG:-}
+SANDBOX_ENABLED=${SANDBOX_ENABLED:-false}
 EOF
 }
 
@@ -111,7 +113,7 @@ load_env_value() {
 
     # Determine which file to check based on key
     case "$key" in
-        DISCORD_BOT_TOKEN|ANTHROPIC_API_KEY|KIMI_API_KEY|OPENAI_API_KEY|GEMINI_API_KEY|OLLAMA_API_KEY|OPENROUTER_API_KEY|OPENCLAW_GATEWAY_TOKEN)
+        DISCORD_BOT_TOKEN|ANTHROPIC_API_KEY|MOONSHOT_API_KEY|OPENAI_API_KEY|GEMINI_API_KEY|OLLAMA_API_KEY|OPENROUTER_API_KEY|BRAVE_API_KEY|ELEVENLABS_API_KEY|OPENCLAW_GATEWAY_TOKEN)
             file="${SECRETS_DIR}/${instance}/gateway.env"
             ;;
         GITHUB_WEBHOOK_SECRET|ALLOWED_MERGE_ACTORS|CONTROLLER_API_TOKEN|GITHUB_TOKEN)
@@ -143,7 +145,73 @@ preflight() {
         die "GitHub CLI not authenticated. Run: gh auth login"
     fi
 
+    # Check for Sysbox (optional, for sandbox support)
+    SYSBOX_AVAILABLE=false
+    if docker info 2>/dev/null | grep -qi sysbox; then
+        SYSBOX_AVAILABLE=true
+        success "Sysbox runtime detected (sandbox support available)"
+    else
+        info "Sysbox not detected (sandbox mode unavailable)"
+        info "  Install Sysbox for agent sandbox support:"
+        info "  https://github.com/nestybox/sysbox#installation"
+    fi
+
     success "All dependencies satisfied"
+}
+
+# ============================================================
+# Configure Sandbox Mode (requires Sysbox)
+# ============================================================
+configure_sandbox() {
+    echo ""
+    echo "=== Sandbox Mode ==="
+    echo ""
+
+    # Sysbox only works on Linux
+    if [[ "$(uname)" == "Darwin" ]]; then
+        echo "Sandbox mode is not available on macOS."
+        echo "Sysbox (required for sandboxing) only supports Linux."
+        echo ""
+        echo "Tools will run directly on the gateway container."
+        echo "For sandboxed execution, deploy on a Linux host."
+        echo ""
+        SANDBOX_ENABLED="false"
+        return
+    fi
+
+    if [[ "$SYSBOX_AVAILABLE" != "true" ]]; then
+        echo "Sysbox runtime is NOT installed."
+        echo "Sandbox mode allows the agent to run tools in isolated Docker containers."
+        echo ""
+        echo "To enable sandbox mode later:"
+        echo "  1. Install Sysbox: https://github.com/nestybox/sysbox#installation"
+        echo "  2. Run: ./clawfactory.sh sandbox enable"
+        echo "  3. Run: ./clawfactory.sh rebuild"
+        echo ""
+        SANDBOX_ENABLED="false"
+        return
+    fi
+
+    echo "Sysbox is installed! You can enable sandbox mode."
+    echo ""
+    echo "Sandbox mode enables:"
+    echo "  - Isolated Docker containers for tool execution"
+    echo "  - Secure execution of untrusted code"
+    echo "  - OpenClaw's native sandbox feature"
+    echo ""
+    echo "Without sandbox mode:"
+    echo "  - Tools run directly on the gateway container"
+    echo "  - Less isolation but simpler setup"
+    echo ""
+
+    read -p "Enable sandbox mode? [Y/n]: " enable_sandbox
+    if [[ "$enable_sandbox" =~ ^[Nn]$ ]]; then
+        SANDBOX_ENABLED="false"
+        info "Sandbox mode disabled"
+    else
+        SANDBOX_ENABLED="true"
+        success "Sandbox mode enabled"
+    fi
 }
 
 # ============================================================
@@ -399,6 +467,26 @@ create_state_config() {
       }'
     fi
 
+    # Build sandbox config based on SANDBOX_ENABLED
+    local sandbox_mode="off"
+    if [[ "${SANDBOX_ENABLED:-false}" == "true" ]]; then
+        sandbox_mode="non-main"  # Sandbox non-main sessions (default safe mode)
+    fi
+
+    # Build tools config for web search (Brave)
+    local tools_json=""
+    if [[ -n "${BRAVE_API_KEY:-}" ]]; then
+        tools_json='"tools": {
+    "web": {
+      "search": {
+        "provider": "brave",
+        "maxResults": 5,
+        "timeoutSeconds": 30
+      }
+    }
+  },'
+    fi
+
     # Create the config file
     cat > "$config_file" <<EOF
 {
@@ -406,6 +494,7 @@ create_state_config() {
     "lastTouchedVersion": "2026.1.0",
     "lastTouchedAt": "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
   },
+  ${tools_json}
   "agents": {
     "defaults": {
       ${model_config}${model_config:+,}
@@ -413,7 +502,9 @@ create_state_config() {
       "workspace": "/home/node/.openclaw/workspace",
       "maxConcurrent": 4,
       "sandbox": {
-        "mode": "off"
+        "mode": "${sandbox_mode}",
+        "scope": "session",
+        "workspaceAccess": "none"
       }
     }
   },
@@ -457,8 +548,10 @@ configure_ai_providers() {
     echo "  4) Google (Gemini)         - Gemini models + embeddings"
     echo "  5) Ollama (Local)          - Run models locally"
     echo "  6) OpenRouter              - Multi-provider gateway"
+    echo "  7) Brave Search            - Web search API"
+    echo "  8) ElevenLabs              - Text-to-speech API"
     echo ""
-    echo "Enter numbers separated by spaces (e.g., '1 4 5' for Anthropic + Gemini + Ollama)"
+    echo "Enter numbers separated by spaces (e.g., '1 4 7' for Anthropic + Gemini + Brave)"
     echo "Press Enter for default: Anthropic + Gemini embeddings"
     echo ""
 
@@ -467,19 +560,23 @@ configure_ai_providers() {
 
     # Initialize all provider keys as empty
     ANTHROPIC_API_KEY=""
-    KIMI_API_KEY=""
+    MOONSHOT_API_KEY=""
     OPENAI_API_KEY=""
     GEMINI_API_KEY=""
     OLLAMA_ENABLED=""
     OPENROUTER_API_KEY=""
+    BRAVE_API_KEY=""
+    ELEVENLABS_API_KEY=""
 
     # Load any existing values
     local saved_anthropic=$(load_env_value "ANTHROPIC_API_KEY")
-    local saved_kimi=$(load_env_value "KIMI_API_KEY")
+    local saved_kimi=$(load_env_value "MOONSHOT_API_KEY")
     local saved_openai=$(load_env_value "OPENAI_API_KEY")
     local saved_gemini=$(load_env_value "GEMINI_API_KEY")
     local saved_ollama=$(load_env_value "OLLAMA_API_KEY")
     local saved_openrouter=$(load_env_value "OPENROUTER_API_KEY")
+    local saved_brave=$(load_env_value "BRAVE_API_KEY")
+    local saved_elevenlabs=$(load_env_value "ELEVENLABS_API_KEY")
 
     for provider in $provider_selection; do
         case "$provider" in
@@ -500,10 +597,10 @@ configure_ai_providers() {
                 echo "Get your API key at: https://platform.moonshot.cn/console/api-keys"
                 echo "Model: kimi-k2-0905-preview (256k context)"
                 if [[ -n "$saved_kimi" ]]; then
-                    KIMI_API_KEY="$saved_kimi"
+                    MOONSHOT_API_KEY="$saved_kimi"
                     success "Kimi API key (saved)"
                 else
-                    prompt KIMI_API_KEY "Kimi/Moonshot API key" "" true
+                    prompt MOONSHOT_API_KEY "Kimi/Moonshot API key" "" true
                 fi
                 ;;
             3)
@@ -553,6 +650,30 @@ configure_ai_providers() {
                     prompt OPENROUTER_API_KEY "OpenRouter API key" "" true
                 fi
                 ;;
+            7)
+                echo ""
+                echo "--- Brave Search ---"
+                echo "Get your API key at: https://brave.com/search/api/"
+                echo "Used for: Web search tool (search the internet)"
+                if [[ -n "$saved_brave" ]]; then
+                    BRAVE_API_KEY="$saved_brave"
+                    success "Brave API key (saved)"
+                else
+                    prompt BRAVE_API_KEY "Brave Search API key" "" true
+                fi
+                ;;
+            8)
+                echo ""
+                echo "--- ElevenLabs ---"
+                echo "Get your API key at: https://elevenlabs.io/app/settings/api-keys"
+                echo "Used for: High-quality text-to-speech"
+                if [[ -n "$saved_elevenlabs" ]]; then
+                    ELEVENLABS_API_KEY="$saved_elevenlabs"
+                    success "ElevenLabs API key (saved)"
+                else
+                    prompt ELEVENLABS_API_KEY "ElevenLabs API key" "" true
+                fi
+                ;;
             *)
                 warn "Unknown provider: $provider (skipping)"
                 ;;
@@ -564,7 +685,7 @@ configure_ai_providers() {
     if [[ -n "$ANTHROPIC_API_KEY" ]]; then
         PRIMARY_MODEL="anthropic/claude-sonnet-4-20250514"
         info "Primary model: Claude Sonnet 4 (Anthropic)"
-    elif [[ -n "$KIMI_API_KEY" ]]; then
+    elif [[ -n "$MOONSHOT_API_KEY" ]]; then
         PRIMARY_MODEL="moonshot/kimi-k2-0905-preview"
         info "Primary model: Kimi K2 (Moonshot)"
     elif [[ -n "$OPENAI_API_KEY" ]]; then
@@ -946,10 +1067,12 @@ EOF
 
     # Add each provider key if configured
     [[ -n "${ANTHROPIC_API_KEY:-}" ]] && echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> "${INSTANCE_SECRETS_DIR}/gateway.env"
-    [[ -n "${KIMI_API_KEY:-}" ]] && echo "KIMI_API_KEY=${KIMI_API_KEY}" >> "${INSTANCE_SECRETS_DIR}/gateway.env"
+    [[ -n "${MOONSHOT_API_KEY:-}" ]] && echo "MOONSHOT_API_KEY=${MOONSHOT_API_KEY}" >> "${INSTANCE_SECRETS_DIR}/gateway.env"
     [[ -n "${OPENAI_API_KEY:-}" ]] && echo "OPENAI_API_KEY=${OPENAI_API_KEY}" >> "${INSTANCE_SECRETS_DIR}/gateway.env"
     [[ -n "${GEMINI_API_KEY:-}" ]] && echo "GEMINI_API_KEY=${GEMINI_API_KEY}" >> "${INSTANCE_SECRETS_DIR}/gateway.env"
     [[ -n "${OPENROUTER_API_KEY:-}" ]] && echo "OPENROUTER_API_KEY=${OPENROUTER_API_KEY}" >> "${INSTANCE_SECRETS_DIR}/gateway.env"
+    [[ -n "${BRAVE_API_KEY:-}" ]] && echo "BRAVE_API_KEY=${BRAVE_API_KEY}" >> "${INSTANCE_SECRETS_DIR}/gateway.env"
+    # Note: ELEVENLABS_API_KEY not written here - add manually if needed
 
     # Ollama configuration
     if [[ -n "${OLLAMA_ENABLED:-}" ]]; then
@@ -1352,16 +1475,25 @@ main() {
 
     preflight
     configure_secrets
+    configure_sandbox
     init_bot_repo
     create_state_config
     create_killswitch
     create_helper
     create_gitignore
 
+    # Save final config with sandbox setting
+    save_config
+
     echo ""
     success "Installation complete!"
     echo ""
     echo "Instance: ${INSTANCE_NAME}"
+    if [[ "${SANDBOX_ENABLED:-false}" == "true" ]]; then
+        echo "Sandbox: enabled (Sysbox)"
+    else
+        echo "Sandbox: disabled"
+    fi
     echo ""
     echo "Next steps:"
     echo "  1. Run: ./clawfactory.sh start"

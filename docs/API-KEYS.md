@@ -21,12 +21,61 @@ This guide walks you through obtaining each API key needed for a fresh ClawFacto
 6. Under **Privileged Gateway Intents**, enable:
    - **Message Content Intent** (required for reading messages)
    - **Server Members Intent** (optional, for member lists)
-7. Go to **OAuth2** → **URL Generator**
-   - Scopes: `bot`, `applications.commands`
-   - Bot Permissions: `Send Messages`, `Read Message History`, `Add Reactions`
-8. Copy the generated URL and open it to invite the bot to your server
 
 **Token format**: `MTIzNDU2Nzg5...` (long base64 string)
+
+#### Required OAuth2 Scopes
+
+| Scope | Required | Purpose |
+|-------|----------|---------|
+| `bot` | Yes | Main bot functionality |
+| `applications.commands` | Optional | Slash commands support |
+
+The other scopes (`guilds`, `rpc`, `presences`, etc.) are for user OAuth apps, not bots. For a standard bot, you only need `bot` and optionally `applications.commands`.
+
+#### Bot Permissions
+
+When generating the invite URL, select these permissions:
+
+| Permission | Bit Value | Purpose |
+|------------|-----------|---------|
+| View Channels | 1024 | See channels the bot can access |
+| Send Messages | 2048 | Reply to users |
+| Embed Links | 16384 | Rich message formatting |
+| Attach Files | 32768 | Send images/files |
+| Read Message History | 65536 | Context for conversations |
+| Add Reactions | 64 | React to messages |
+| Use External Emoji | 262144 | Custom emoji support |
+| Create Public Threads | 34359738368 | Thread conversations |
+| Send Messages in Threads | 274877906944 | Reply in threads |
+| Manage Threads | 17179869184 | Archive/manage threads |
+
+#### Generating the Invite URL
+
+1. Go to **OAuth2** → **URL Generator** in the Developer Portal
+2. Select scopes: `bot` + `applications.commands`
+3. Select the permissions listed above
+4. Copy the generated URL
+5. Open the URL to invite the bot to **your own server**
+
+#### Security: Bot Pairing and Server Control
+
+**Important**: Only add the bot to servers you control.
+
+OpenClaw uses a **pairing system** for security:
+- When the bot joins a server, it doesn't automatically respond to everyone
+- Users must be **paired** (authorized) before the bot will interact with them
+- Pairing is managed through the Controller UI or via DM pairing codes
+
+**Why this matters**:
+- If you add the bot to a server you don't control, the server owner/admins could potentially interact with your bot
+- The pairing system prevents unauthorized access, but it's still best practice to only deploy to servers you own
+- For public bots serving multiple communities, use the allowlist/denylist features in `openclaw.json`
+
+To pair a user:
+1. Go to Controller UI → **Devices** section
+2. Approve pending pairing requests, or
+3. Have the user DM the bot with the pairing code shown in the Controller
 
 ---
 

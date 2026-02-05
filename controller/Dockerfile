@@ -7,6 +7,9 @@ RUN apt-get update && apt-get install -y \
     docker.io \
     && rm -rf /var/lib/apt/lists/*
 
+# Allow git to work with mounted volumes owned by different users
+RUN git config --global --add safe.directory '*'
+
 # Install age for encrypted snapshots (detect architecture)
 RUN ARCH=$(dpkg --print-architecture) && \
     if [ "$ARCH" = "arm64" ]; then AGE_ARCH="linux-arm64"; else AGE_ARCH="linux-amd64"; fi && \

@@ -1,0 +1,56 @@
+# ClawFactory Docker Compose - Sandbox Override
+#
+# This override file enables OpenClaw sandboxing via Sysbox.
+# Use with: docker compose -f docker-compose.yml -f docker-compose.sandbox.yml up -d
+#
+# Prerequisites:
+#   1. Install Sysbox: https://github.com/nestybox/sysbox
+#   2. Verify: docker info | grep -i sysbox
+#   3. Build base image: ./clawfactory.sh rebuild (builds from approved/ first)
+#
+# What this enables:
+#   - OpenClaw can create Docker containers inside the gateway for tool sandboxing
+#   - Isolated execution environment for untrusted code
+#   - No privileged mode required (Sysbox handles isolation)
+
+services:
+  # Override gateway to use Sysbox runtime with Docker-in-Docker
+  gateway:
+    # Build the sandbox-enabled gateway image on top of the base
+    # The base image (clawfactory-gateway:${INSTANCE_NAME}) is built by docker-compose.yml
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+      args:
+        OPENCLAW_IMAGE: clawfactory-gateway:${INSTANCE_NAME:-local}
+    image: clawfactory-gateway-sandbox:${INSTANCE_NAME:-local}
+
+    # Use Sysbox runtime for secure nested containers
+    runtime: sysbox-runc
+
+    # Remove the inline command - use the sandbox-entrypoint.sh instead
+    entrypoint: []
+    command: []
+
+    # Run as root initially (entrypoint drops to node after starting dockerd)
+    user: "0:0"
+
+    # Additional volumes for Docker-in-Docker
+    volumes:
+      # OpenClaw home directory
+      - ./bot_repos/${INSTANCE_NAME:-default}/state:/home/node/.openclaw
+      # Git repo clone
+      - ./bot_repos/${INSTANCE_NAME:-default}/approved:/workspace/approved:rw
+      # Docker data directory (persisted for sandbox images)
+      - gateway-docker-data:/var/lib/docker
+      # Temp filesystem
+      - type: tmpfs
+        target: /tmp
+
+    # Sysbox containers need these sysctls for Docker networking
+    sysctls:
+      - net.ipv4.ip_forward=1
+
+volumes:
+  # Persist Docker data so sandbox images don't need rebuilding
+  gateway-docker-data:
