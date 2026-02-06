@@ -112,6 +112,52 @@ case "${1:-help}" in
             echo "Controller token: ${!ctrl_var:-<not set>}"
         fi
         ;;
+    remote)
+        REPO_DIR="${SCRIPT_DIR}/bot_repos/${INSTANCE_NAME}/approved"
+        if [[ ! -d "$REPO_DIR" ]]; then
+            echo "Error: Instance directory not found: $REPO_DIR"
+            exit 1
+        fi
+
+        # Load GitHub config from .env (save instance name first)
+        SAVED_INSTANCE="${INSTANCE_NAME}"
+        if [[ -f "${SCRIPT_DIR}/.env" ]]; then
+            source "${SCRIPT_DIR}/.env"
+        fi
+        INSTANCE_NAME="${SAVED_INSTANCE}"
+        GITHUB_OWNER="${GITHUB_ORG:-${GITHUB_USERNAME:-}}"
+
+        current_remote=$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null || echo "")
+        echo "Instance: ${INSTANCE_NAME}"
+        echo "Current remote: ${current_remote:-<not set>}"
+
+        if [[ "${2:-}" == "fix" || "${2:-}" == "set" ]]; then
+            if [[ -z "$GITHUB_OWNER" ]]; then
+                echo ""
+                echo "Error: No GITHUB_ORG or GITHUB_USERNAME in .env"
+                echo "Set one in ${SCRIPT_DIR}/.env first"
+                exit 1
+            fi
+            expected_remote="https://github.com/${GITHUB_OWNER}/${INSTANCE_NAME}-bot.git"
+            echo "Setting remote to: $expected_remote"
+            git -C "$REPO_DIR" remote set-url origin "$expected_remote" 2>/dev/null || \
+                git -C "$REPO_DIR" remote add origin "$expected_remote"
+            echo "✓ Remote updated"
+        else
+            if [[ -n "$GITHUB_OWNER" ]]; then
+                expected_remote="https://github.com/${GITHUB_OWNER}/${INSTANCE_NAME}-bot.git"
+                echo "Expected remote: $expected_remote"
+                # Strip credentials from current remote for comparison
+                current_clean=$(echo "$current_remote" | sed 's|https://[^@]*@|https://|')
+                if [[ "$current_clean" != "$expected_remote" && "$current_clean" != "${expected_remote%.git}" ]]; then
+                    echo ""
+                    echo "⚠ Remote mismatch! Run './clawfactory.sh -i ${INSTANCE_NAME} remote fix' to correct"
+                else
+                    echo "✓ Remote is correct"
+                fi
+            fi
+        fi
+        ;;
     list)
         echo "Configured instances:"
         if [[ -f "${SCRIPT_DIR}/secrets/tokens.env" ]]; then
@@ -145,6 +191,7 @@ case "${1:-help}" in
         echo "  controller      Show controller URL"
         echo "  audit           Show recent audit log"
         echo "  info            Show instance info and tokens"
+        echo "  remote [fix]    Show/fix git remote URL"
         echo "  list            List all instances and running containers"
         echo ""
         echo "Examples:"
