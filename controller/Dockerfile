@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Allow git to work with mounted volumes owned by different users
+# User name/email set at runtime from environment variables
 RUN git config --global --add safe.directory '*'
 
 # Install age for encrypted snapshots (detect architecture)

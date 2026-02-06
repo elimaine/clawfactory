@@ -961,6 +961,12 @@ function Write-EnvFiles {
         $script:GITHUB_WEBHOOK_SECRET = Get-RandomHex 32
     }
 
+    # Get git user config from host (for merge commits in controller)
+    $gitUserName = try { git config --global user.name 2>$null } catch { "ClawFactory" }
+    $gitUserEmail = try { git config --global user.email 2>$null } catch { "bot@clawfactory.local" }
+    if (-not $gitUserName) { $gitUserName = "ClawFactory" }
+    if (-not $gitUserEmail) { $gitUserEmail = "bot@clawfactory.local" }
+
     $controllerEnvContent = @"
 # Controller environment for instance: $script:INSTANCE_NAME
 GITHUB_WEBHOOK_SECRET=$script:GITHUB_WEBHOOK_SECRET
@@ -971,6 +977,13 @@ CONTROLLER_API_TOKEN=$controllerToken
 
 # Gateway token (for controller to call gateway API)
 OPENCLAW_GATEWAY_TOKEN=$gatewayToken
+
+# Instance name
+INSTANCE_NAME=$script:INSTANCE_NAME
+
+# Git user config (for merge commits)
+GIT_USER_NAME=$gitUserName
+GIT_USER_EMAIL=$gitUserEmail
 "@
 
     if ($script:GITHUB_TOKEN) {
@@ -978,6 +991,20 @@ OPENCLAW_GATEWAY_TOKEN=$gatewayToken
     }
 
     Set-Content -Path (Join-Path $instanceSecretsDir "controller.env") -Value $controllerEnvContent
+
+    # Generate snapshot encryption key if age is available
+    $snapshotKeyPath = Join-Path $instanceSecretsDir "snapshot.key"
+    $snapshotPubPath = Join-Path $instanceSecretsDir "snapshot.pub"
+    if (-not (Test-Path $snapshotKeyPath)) {
+        $ageKeygenPath = Get-Command age-keygen -ErrorAction SilentlyContinue
+        if ($ageKeygenPath) {
+            Write-Info "Generating snapshot encryption key..."
+            & age-keygen -o $snapshotKeyPath 2>$snapshotPubPath
+            Write-Success "Snapshot encryption key generated"
+        } else {
+            Write-Info "age not installed on host - key will be auto-generated in container on first snapshot"
+        }
+    }
 
     Write-Success "Environment files created"
 }

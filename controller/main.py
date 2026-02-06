@@ -38,6 +38,8 @@ GITHUB_REPO = os.environ.get("GITHUB_REPO", "")
 CONTROLLER_API_TOKEN = os.environ.get("CONTROLLER_API_TOKEN", "")
 SNAPSHOTS_DIR = Path(os.environ.get("SNAPSHOTS_DIR", "/srv/snapshots"))
 AGE_KEY = Path(os.environ.get("AGE_KEY", "/srv/secrets/snapshot.key"))
+GIT_USER_NAME = os.environ.get("GIT_USER_NAME", "ClawFactory Controller")
+GIT_USER_EMAIL = os.environ.get("GIT_USER_EMAIL", "controller@clawfactory.local")
 
 # Detect offline mode (no GitHub configured)
 OFFLINE_MODE = not GITHUB_REPO or GITHUB_REPO.strip() == "" or "/" not in GITHUB_REPO
@@ -1631,7 +1633,7 @@ async def promote_ui(
                     }}
 
                     // Then deploy main
-                    const deployResp = await fetch(basePath + '/controller/promote-main', {{ method: 'POST' }});
+                    const deployResp = await fetch(basePath + '/promote-main', {{ method: 'POST' }});
                     if (deployResp.ok) {{
                         let finalHtml = statusText.replace(/\\n/g, '<br>') + '<br><span style="color: #4CAF50;">✅ Deployed! Restarting gateway...</span>';
                         if (mergeData.skipped_conflicts && mergeData.skipped_conflicts.length > 0) {{
@@ -1656,7 +1658,7 @@ async def promote_ui(
                 result.className = 'result';
                 result.textContent = 'Deploying main branch...';
                 try {{
-                    const resp = await fetch(basePath + '/controller/promote-main', {{ method: 'POST' }});
+                    const resp = await fetch(basePath + '/promote-main', {{ method: 'POST' }});
                     if (resp.ok) {{
                         result.innerHTML = '<span style="color: #4CAF50;">✅ Deployed! Restarting gateway...</span>';
                         setTimeout(() => window.location.reload(), 3000);
@@ -2745,8 +2747,23 @@ async def get_branch_diff(
     return {"branch": branch, **diff}
 
 
+def git_ensure_config():
+    """Ensure git user config is set for merge commits."""
+    subprocess.run(
+        ["git", "config", "user.name", GIT_USER_NAME],
+        cwd=APPROVED_DIR,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", GIT_USER_EMAIL],
+        cwd=APPROVED_DIR,
+        capture_output=True,
+    )
+
+
 def git_setup_auth():
     """Set up git remote URL with auth token. Returns original URL to restore later."""
+    git_ensure_config()  # Ensure git user config is set
     github_token = os.environ.get("GITHUB_TOKEN", "")
     if not github_token:
         return None
@@ -3274,10 +3291,41 @@ async def deny_branch(
 # Encrypted Snapshots
 # ============================================================
 
+def ensure_snapshot_key() -> bool:
+    """Ensure snapshot encryption key exists, generate if missing."""
+    if AGE_KEY.exists():
+        return True
+
+    # Try to generate the key
+    try:
+        AGE_KEY.parent.mkdir(parents=True, exist_ok=True)
+        pub_path = AGE_KEY.with_suffix(".pub")
+
+        # Generate key using age-keygen
+        with open(pub_path, "w") as pub_file:
+            result = subprocess.run(
+                ["age-keygen", "-o", str(AGE_KEY)],
+                capture_output=True,
+                text=True,
+                stderr=pub_file
+            )
+
+        if result.returncode == 0 and AGE_KEY.exists():
+            # Set permissions
+            AGE_KEY.chmod(0o600)
+            pub_path.chmod(0o644)
+            audit_log("snapshot_key_generated", {"path": str(AGE_KEY)})
+            return True
+    except Exception as e:
+        audit_log("snapshot_key_generation_failed", {"error": str(e)})
+
+    return False
+
+
 def create_snapshot() -> dict:
     """Create an encrypted snapshot of bot state."""
-    if not AGE_KEY.exists():
-        return {"error": "No encryption key found. Run: ./clawfactory.sh snapshot keygen"}
+    if not ensure_snapshot_key():
+        return {"error": "No encryption key found and failed to generate one"}
 
     # Get public key from private key file
     pubkey = None
@@ -3403,7 +3451,10 @@ async def snapshot_list(
     if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    return {"snapshots": list_snapshots()}
+    return {
+        "snapshots": list_snapshots(),
+        "encryption_ready": AGE_KEY.exists() or ensure_snapshot_key()
+    }
 
 
 def restore_snapshot(snapshot_name: str) -> dict:
@@ -3931,6 +3982,9 @@ async def pull_upstream_endpoint(
     audit_log("pull_upstream_requested", {"source": "api"})
 
     try:
+        # Ensure git user config is set for merge commits
+        git_ensure_config()
+
         # Check if upstream remote exists, add if not
         result = subprocess.run(
             ["git", "remote", "get-url", "upstream"],

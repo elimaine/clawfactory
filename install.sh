@@ -1246,6 +1246,11 @@ EOF
 OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}
 EOF
 
+    # Get git user config from host (for merge commits in controller)
+    local git_user_name git_user_email
+    git_user_name=$(git config --global user.name 2>/dev/null || echo "ClawFactory")
+    git_user_email=$(git config --global user.email 2>/dev/null || echo "bot@clawfactory.local")
+
     cat > "${INSTANCE_SECRETS_DIR}/controller.env" <<EOF
 # Controller environment for instance: ${INSTANCE_NAME}
 GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}
@@ -1259,6 +1264,10 @@ OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}
 
 # Instance name
 INSTANCE_NAME=${INSTANCE_NAME}
+
+# Git user config (for merge commits)
+GIT_USER_NAME=${git_user_name}
+GIT_USER_EMAIL=${git_user_email}
 EOF
 
     # Add GITHUB_TOKEN if provided (for bot push capability)
@@ -1266,6 +1275,19 @@ EOF
         echo "" >> "${INSTANCE_SECRETS_DIR}/controller.env"
         echo "# GitHub token for pushing proposal branches" >> "${INSTANCE_SECRETS_DIR}/controller.env"
         echo "GITHUB_TOKEN=${GITHUB_TOKEN}" >> "${INSTANCE_SECRETS_DIR}/controller.env"
+    fi
+
+    # Generate snapshot encryption key if age is available
+    if command -v age-keygen &>/dev/null; then
+        if [[ ! -f "${INSTANCE_SECRETS_DIR}/snapshot.key" ]]; then
+            info "Generating snapshot encryption key..."
+            age-keygen -o "${INSTANCE_SECRETS_DIR}/snapshot.key" 2>"${INSTANCE_SECRETS_DIR}/snapshot.pub"
+            chmod 600 "${INSTANCE_SECRETS_DIR}/snapshot.key"
+            chmod 644 "${INSTANCE_SECRETS_DIR}/snapshot.pub"
+            success "Snapshot encryption key generated"
+        fi
+    else
+        info "age not installed on host - key will be auto-generated in container on first snapshot"
     fi
 
     chmod 600 "${INSTANCE_SECRETS_DIR}"/*.env
