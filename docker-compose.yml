@@ -12,34 +12,13 @@
 #   state/        - Runtime state (encrypted snapshots)
 #     workspace/memory/  - Bot memory files (backed up in snapshots)
 #     installed/        - npm packages (rebuilt from {instance}_save/package.json)
+#
+# Multi-instance support:
+#   Start the router first: docker compose -f router/docker-compose.yml up -d
+#   Add to /etc/hosts: 127.0.0.1 sandy.local testbot.local
+#   Access: http://sandy.local:8080/controller
 
 services:
-  # ============================================================
-  # Proxy: Nginx reverse proxy for local access
-  # - Binds to localhost for secure local access
-  # - Routes to gateway and controller inside Docker network
-  # ============================================================
-  proxy:
-    image: nginx:alpine
-    container_name: clawfactory-${INSTANCE_NAME:-default}-proxy
-    restart: unless-stopped
-    volumes:
-      - ./proxy/nginx.conf:/etc/nginx/nginx.conf:ro
-    ports:
-      # Local access only (localhost)
-      - "127.0.0.1:18789:80"      # Gateway UI
-      - "127.0.0.1:8080:8080"     # Controller
-    networks:
-      - clawfactory
-    depends_on:
-      - gateway
-      - controller
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-
   # ============================================================
   # Gateway: OpenClaw agent runtime
   # - Connects to Discord
@@ -122,9 +101,10 @@ services:
       # Temp filesystem
       - type: tmpfs
         target: /tmp
-    # No ports exposed - access via proxy
+    # No ports exposed - access via router
     networks:
       - clawfactory
+      - clawfactory-shared
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:18789/health"]
       interval: 30s
@@ -171,9 +151,10 @@ services:
       # Docker socket for restarting gateway
       # Linux: /var/run/docker.sock, Windows: //var/run/docker.sock (Docker Desktop handles this)
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    # No ports exposed - access via proxy
+    # No ports exposed - access via router
     networks:
       - clawfactory
+      - clawfactory-shared
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
@@ -183,5 +164,8 @@ services:
 networks:
   clawfactory:
     driver: bridge
+  clawfactory-shared:
+    external: true
+    name: clawfactory-shared
 
 volumes: {}
