@@ -758,7 +758,23 @@ async def promote_ui(
     current_sha = git_get_main_sha() or "unknown"
     # Fetch from origin to get latest remote SHA
     remote_sha = git_get_remote_sha(fetch_first=True) or "unknown"
-    needs_update = current_sha != remote_sha and remote_sha != "unknown"
+
+    # Check if remote has commits that local doesn't have (remote is ahead)
+    # This is more accurate than just comparing SHAs (which fails when local is ahead)
+    needs_update = False
+    if remote_sha != "unknown":
+        try:
+            ahead_check = subprocess.run(
+                ["git", "log", "--oneline", "HEAD..origin/main"],
+                cwd=APPROVED_DIR,
+                capture_output=True,
+                text=True,
+            )
+            # If there are commits in HEAD..origin/main, remote is ahead
+            needs_update = bool(ahead_check.returncode == 0 and ahead_check.stdout.strip())
+        except Exception:
+            # Fall back to SHA comparison if git command fails
+            needs_update = current_sha != remote_sha
 
     status_msg = "Up to date" if not needs_update else f"⚠️ Update available"
     status_class = "success" if not needs_update else "warning"
