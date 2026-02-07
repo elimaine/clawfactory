@@ -297,8 +297,31 @@ RestartSec=5
 WantedBy=multi-user.target
 SVC
 
+        # ---- Systemd unit: LLM Proxy ----
+        cat > /etc/systemd/system/clawfactory-llm-proxy.service <<'SVC'
+[Unit]
+Description=ClawFactory LLM Proxy
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/clawfactory/controller
+ExecStart=/usr/bin/python3 -m uvicorn llm_proxy:create_app --factory --host 0.0.0.0 --port 9090
+Environment=TRAFFIC_LOG=/srv/clawfactory/audit/traffic.jsonl
+Environment=SCRUB_RULES_PATH=/srv/clawfactory/audit/scrub_rules.json
+Environment=CAPTURE_STATE_FILE=/srv/clawfactory/audit/capture_enabled
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SVC
+
         # ---- Default nginx config ----
         cat > /etc/nginx/sites-available/clawfactory <<'NGINX'
+log_format json_access escape=json '{\"timestamp\":\"\$time_iso8601\",\"remote_addr\":\"\$remote_addr\",\"method\":\"\$request_method\",\"uri\":\"\$request_uri\",\"status\":\$status,\"bytes\":\$body_bytes_sent,\"duration\":\$request_time,\"upstream_time\":\"\$upstream_response_time\",\"user_agent\":\"\$http_user_agent\",\"server_port\":\"\$server_port\"}';
+access_log /var/log/nginx/access.json json_access;
+
 server {
     listen 80;
     server_name _;

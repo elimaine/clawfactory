@@ -24,6 +24,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./proxy/nginx.conf:/etc/nginx/nginx.conf:ro
+      - nginx-logs:/var/log/nginx
     ports:
       - "127.0.0.1:${GATEWAY_PORT:-18789}:80"
       - "127.0.0.1:${CONTROLLER_PORT:-8080}:8080"
@@ -42,7 +43,7 @@ services:
   # ============================================================
   # Gateway: OpenClaw agent runtime
   # - Connects to Discord
-  # - Makes LLM calls
+  # - Makes LLM calls (routed through LLM proxy for logging)
   # - Uses OpenClaw's native sandbox for tool execution
   # - Bot pushes branches to approved/, PRs merged on GitHub
   # ============================================================
@@ -59,6 +60,10 @@ services:
       - OPENCLAW_GATEWAY_MODE=local
       - OPENCLAW_GATEWAY_AUTH=none
       - INSTANCE_NAME=${INSTANCE_NAME:-default}
+      # Route LLM API calls through logging proxy
+      - ANTHROPIC_BASE_URL=http://llm-proxy:9090/anthropic
+      - OPENAI_BASE_URL=http://llm-proxy:9090/openai
+      - GEMINI_API_BASE=http://llm-proxy:9090/gemini
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -124,12 +129,41 @@ services:
     # No ports exposed - access via proxy
     networks:
       - clawfactory
+    depends_on:
+      - llm-proxy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:18789/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 60s
+
+  # ============================================================
+  # LLM Proxy: Logging reverse proxy for AI provider APIs
+  # - Intercepts outbound LLM calls (Anthropic, OpenAI, Gemini)
+  # - Logs request/response to /srv/audit/traffic.jsonl
+  # - Extracts token usage, applies scrub rules
+  # ============================================================
+  llm-proxy:
+    build:
+      context: ./controller
+      dockerfile: Dockerfile
+    container_name: clawfactory-${INSTANCE_NAME:-default}-llm-proxy
+    restart: unless-stopped
+    command: ["python3", "-m", "uvicorn", "llm_proxy:create_app", "--factory", "--host", "0.0.0.0", "--port", "9090"]
+    environment:
+      - TRAFFIC_LOG=/srv/audit/traffic.jsonl
+      - SCRUB_RULES_PATH=/srv/audit/scrub_rules.json
+      - CAPTURE_STATE_FILE=/srv/audit/capture_enabled
+    volumes:
+      - ./audit:/srv/audit:rw
+    networks:
+      - clawfactory
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   # ============================================================
   # Controller: Authority & promotion
@@ -156,6 +190,10 @@ services:
       - GATEWAY_CONTAINER=clawfactory-${INSTANCE_NAME:-default}-gateway
       - SNAPSHOTS_DIR=/srv/snapshots
       - AGE_KEY=/srv/secrets/snapshot.key
+      - TRAFFIC_LOG=/srv/audit/traffic.jsonl
+      - SCRUB_RULES_PATH=/srv/audit/scrub_rules.json
+      - CAPTURE_STATE_FILE=/srv/audit/capture_enabled
+      - NGINX_LOG=/var/log/nginx/access.json
     volumes:
       # Git repo clone: Controller pulls main after PR merge
       - ./bot_repos/${INSTANCE_NAME:-default}/approved:/srv/bot/approved:rw
@@ -170,6 +208,8 @@ services:
       # Docker socket for restarting gateway
       # Linux: /var/run/docker.sock, Windows: //var/run/docker.sock (Docker Desktop handles this)
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Nginx logs (read-only, for inbound traffic viewer)
+      - nginx-logs:/var/log/nginx:ro
     # No ports exposed - access via proxy
     networks:
       - clawfactory
@@ -183,4 +223,5 @@ networks:
   clawfactory:
     driver: bridge
 
-volumes: {}
+volumes:
+  nginx-logs:

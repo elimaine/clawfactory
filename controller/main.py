@@ -26,6 +26,9 @@ from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Requ
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
+import traffic_log
+import scrub
+
 # Configuration from environment
 APPROVED_DIR = Path(os.environ.get("APPROVED_DIR", "/srv/bot/approved"))
 OPENCLAW_HOME = Path(os.environ.get("OPENCLAW_HOME", "/srv/bot/state"))
@@ -813,7 +816,16 @@ async def promote_ui(
         <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/search/searchcursor.min.js"></script>
         <style>
             * {{ box-sizing: border-box; }}
-            body {{ font-family: monospace; padding: 1rem; background: #1a1a1a; color: #e0e0e0; max-width: 1200px; margin: 0 auto; }}
+            body {{ font-family: monospace; padding: 0; background: #1a1a1a; color: #e0e0e0; margin: 0; display: flex; min-height: 100vh; }}
+            #sidebar {{ width: 220px; min-width: 220px; background: #151515; border-right: 1px solid #333; padding: 1rem 0; position: fixed; top: 0; left: 0; bottom: 0; overflow-y: auto; z-index: 100; }}
+            #sidebar .brand {{ padding: 0.75rem 1rem; font-size: 1.2rem; color: #4CAF50; font-weight: bold; border-bottom: 1px solid #333; margin-bottom: 0.5rem; }}
+            #sidebar .brand span {{ color: #2196F3; font-size: 0.9rem; }}
+            #sidebar a {{ display: block; padding: 0.6rem 1rem; color: #888; text-decoration: none; border-left: 3px solid transparent; }}
+            #sidebar a:hover {{ background: #1e1e1e; color: #e0e0e0; }}
+            #sidebar a.active {{ color: #4CAF50; border-left-color: #4CAF50; background: #1a2a1a; }}
+            #content {{ margin-left: 220px; flex: 1; padding: 1rem 1.5rem; overflow-y: auto; max-width: 1200px; }}
+            .page {{ display: none; }}
+            .page.active {{ display: block; }}
             h1 {{ color: #4CAF50; margin-bottom: 0.5rem; font-size: 1.5rem; }}
             h2 {{ color: #888; font-size: 1rem; margin-top: 1.5rem; border-bottom: 1px solid #333; padding-bottom: 0.5rem; }}
             h3 {{ color: #666; font-size: 0.9rem; margin: 1rem 0 0.5rem 0; }}
@@ -863,10 +875,29 @@ async def promote_ui(
             .CodeMirror {{ height: 400px; font-size: 0.8rem; border: 1px solid #444; border-radius: 4px; }}
             .CodeMirror-gutters {{ background: #1e1e1e; border-right: 1px solid #333; }}
             .CodeMirror-linenumber {{ color: #5c6370; }}
+            /* Traffic table styles */
+            .traffic-table {{ width: 100%; border-collapse: collapse; font-size: 0.8rem; }}
+            .traffic-table th {{ text-align: left; padding: 0.5rem; border-bottom: 2px solid #444; color: #888; }}
+            .traffic-table td {{ padding: 0.5rem; border-bottom: 1px solid #333; }}
+            .traffic-table tr:hover {{ background: #252525; }}
+            .traffic-table .provider {{ font-weight: bold; }}
+            .traffic-table .provider-anthropic {{ color: #d4a574; }}
+            .traffic-table .provider-openai {{ color: #74b9ff; }}
+            .traffic-table .provider-gemini {{ color: #a29bfe; }}
+            .traffic-detail {{ background: #1e1e1e; padding: 1rem; border-radius: 4px; margin-top: 0.5rem; }}
+            .traffic-detail pre {{ max-height: 400px; overflow: auto; }}
+            .sub-tabs {{ display: flex; gap: 0; border-bottom: 1px solid #444; margin-bottom: 1rem; }}
+            .sub-tab {{ background: none; border: none; padding: 0.5rem 1rem; color: #888; cursor: pointer; border-bottom: 2px solid transparent; border-radius: 0; font-family: monospace; }}
+            .sub-tab:hover {{ color: #e0e0e0; }}
+            .sub-tab.active {{ color: #4CAF50; border-bottom-color: #4CAF50; }}
+            .sub-content {{ display: none; }}
+            .sub-content.active {{ display: block; }}
+            .scrub-rule {{ background: #252525; padding: 0.75rem; border-radius: 4px; margin-bottom: 0.5rem; border: 1px solid #333; }}
+            .scrub-rule.builtin {{ border-left: 3px solid #2196F3; }}
             /* Mobile responsive */
             @media (max-width: 768px) {{
-                body {{ padding: 0.75rem; }}
-                h1 {{ font-size: 1.3rem; }}
+                #sidebar {{ display: none; }}
+                #content {{ margin-left: 0; padding: 0.75rem; }}
                 .grid {{ grid-template-columns: 1fr; gap: 1rem; }}
                 .stats {{ justify-content: space-around; }}
                 button {{ padding: 0.5rem 0.8rem; font-size: 0.85rem; }}
@@ -876,7 +907,18 @@ async def promote_ui(
         </style>
     </head>
     <body>
-        <h1>ClawFactory <span style="color: #2196F3">[{INSTANCE_NAME}]</span></h1>
+        <nav id="sidebar">
+            <div class="brand">ClawFactory <span>[{INSTANCE_NAME}]</span></div>
+            <a href="#dashboard" class="active" onclick="switchPage('dashboard')">Dashboard</a>
+            <a href="#gateway" onclick="switchPage('gateway')">Gateway</a>
+            <a href="#logs" onclick="switchPage('logs')">Logs</a>
+            <a href="#snapshots" onclick="switchPage('snapshots')">Snapshots</a>
+        </nav>
+
+        <main id="content">
+        <!-- ==================== DASHBOARD PAGE ==================== -->
+        <div id="page-dashboard" class="page active">
+        <h1>Dashboard</h1>
 
         <div class="stats">
             <div class="stat">
@@ -902,7 +944,7 @@ async def promote_ui(
                 <span id="proposed-config-reason" style="margin-left: 0.5rem; opacity: 0.9;"></span>
             </div>
             <div>
-                <button onclick="scrollToConfig()" style="background: white; color: #9c27b0; border: none; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; font-family: monospace;">View & Load</button>
+                <button onclick="switchPage('gateway'); scrollToConfig()" style="background: white; color: #9c27b0; border: none; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; font-family: monospace;">View & Load</button>
                 <button onclick="dismissProposal()" style="background: transparent; color: white; border: 1px solid white; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; margin-left: 0.5rem; font-family: monospace;">Dismiss</button>
             </div>
         </div>
@@ -984,52 +1026,24 @@ async def promote_ui(
                 <h2>Recent Commits</h2>
                 <pre>{commits}</pre>
             </div>
-
             <div>
-                <h2>System</h2>
+                <h2>Quick Actions</h2>
                 <div class="card">
                     <button onclick="restartGateway()" class="danger">Restart Gateway</button>
-                    <button onclick="runSecurityAudit()" class="secondary" style="margin-left: 0.5rem;">Security Audit</button>
-                    <button onclick="runSecurityAudit(true)" class="secondary">Deep Audit</button>
-                    <div id="security-result" class="result"></div>
+                    <div id="status-result" class="result"></div>
                 </div>
-
-                <h2>Snapshots</h2>
-                <div class="card">
-                    <button onclick="createSnapshot()">Create Snapshot</button>
-                    <button onclick="fetchSnapshots()" class="secondary">Refresh List</button>
-                    <button onclick="deleteAllSnapshots()" class="danger" style="margin-left: 0.5rem;">Delete All</button>
-                    <div id="snapshot-result" class="result"></div>
-                    <div id="snapshot-list" style="margin-top: 0.5rem;"></div>
-                    <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #333;">
-                        <label style="color: #888;">Restore from snapshot:</label>
-                        <select id="snapshot-select" style="margin: 0.5rem 0; padding: 0.3rem; background: #222; color: #eee; border: 1px solid #444;">
-                            <option value="latest">latest</option>
-                        </select>
-                        <button onclick="restoreSnapshot()" class="danger">Restore</button>
-                        <div id="restore-result" class="result" style="margin-top: 0.5rem;"></div>
-                    </div>
-                </div>
-
-                <h2>Audit Log</h2>
-                <div class="card">
-                    <button onclick="fetchAudit()">Refresh</button>
-                    <button onclick="fetchAudit(100)" class="secondary">Last 100</button>
-                    <pre id="audit-log">Click Refresh to load audit log...</pre>
-                </div>
-
             </div>
         </div>
+        </div><!-- /page-dashboard -->
 
-        <h2>Gateway Logs</h2>
+        <!-- ==================== GATEWAY PAGE ==================== -->
+        <div id="page-gateway" class="page">
+        <h1>Gateway</h1>
+
+        <h2>System Controls</h2>
         <div class="card">
-            <button onclick="fetchGatewayLogs()">Refresh</button>
-            <button onclick="fetchGatewayLogs(200)" class="secondary">Last 200</button>
-            <button onclick="fetchGatewayLogs(500)" class="secondary">Last 500</button>
-            <label style="margin-left: 1rem; color: #888;">
-                <input type="checkbox" id="logs-auto-refresh" onchange="toggleLogsAutoRefresh()"> Auto-refresh
-            </label>
-            <pre id="gateway-logs" style="max-height: 500px; overflow-y: auto; font-size: 0.8rem;">Click Refresh to load gateway logs...</pre>
+            <button onclick="restartGateway()" class="danger">Restart Gateway</button>
+            <div id="gateway-system-result" class="result"></div>
         </div>
 
         <h2>Gateway Config</h2>
@@ -1131,6 +1145,149 @@ async def promote_ui(
                 </div>
             </div>
         </div>
+        </div><!-- /page-gateway -->
+
+        <!-- ==================== LOGS PAGE ==================== -->
+        <div id="page-logs" class="page">
+        <h1>Logs</h1>
+
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+            <div class="sub-tabs" style="margin-bottom: 0;">
+                <button class="sub-tab active" onclick="switchSubTab('traffic')">Traffic</button>
+                <button class="sub-tab" onclick="switchSubTab('llm-sessions')">LLM Sessions</button>
+                <button class="sub-tab" onclick="switchSubTab('audit')">Audit</button>
+                <button class="sub-tab" onclick="switchSubTab('gateway-stdout')">Gateway Stdout</button>
+                <button class="sub-tab" onclick="switchSubTab('scrub-rules')">Scrub Rules</button>
+            </div>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+                <span id="capture-status-dot" style="width: 8px; height: 8px; border-radius: 50%; background: #666; display: inline-block;"></span>
+                <span id="capture-status-text" style="font-size: 0.8rem; color: #888;">Capture: --</span>
+                <button id="capture-toggle-btn" onclick="toggleCapture()" class="small" style="font-size: 0.75rem;">--</button>
+            </div>
+        </div>
+
+        <!-- Traffic sub-tab -->
+        <div id="sub-traffic" class="sub-content active">
+            <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin-bottom: 1rem;">
+                <select id="traffic-provider-filter" style="padding: 0.4rem; background: #2d2d2d; border: 1px solid #444; color: #e0e0e0; border-radius: 4px;">
+                    <option value="">All Providers</option>
+                    <option value="anthropic">Anthropic</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="gemini">Gemini</option>
+                </select>
+                <input type="text" id="traffic-search" placeholder="Search..." style="width: 200px; padding: 0.4rem;">
+                <button onclick="fetchTraffic()" class="secondary small">Search</button>
+                <button onclick="fetchTrafficStats()" class="secondary small">Stats</button>
+            </div>
+            <div id="traffic-stats" style="display: none; margin-bottom: 1rem;"></div>
+            <div id="traffic-table-container">
+                <p style="color: #888;">Click Search to load traffic data.</p>
+            </div>
+            <div id="traffic-detail" style="display: none;"></div>
+        </div>
+
+        <!-- LLM Sessions sub-tab -->
+        <div id="sub-llm-sessions" class="sub-content">
+            <p style="color: #888; font-size: 0.85rem;">Click on a traffic entry to view full request/response details.</p>
+            <div id="llm-session-detail" style="margin-top: 1rem;">
+                <p style="color: #888;">Select a traffic entry from the Traffic tab to view session details.</p>
+            </div>
+        </div>
+
+        <!-- Audit sub-tab -->
+        <div id="sub-audit" class="sub-content">
+            <button onclick="fetchAudit()">Refresh</button>
+            <button onclick="fetchAudit(100)" class="secondary">Last 100</button>
+            <pre id="audit-log" style="margin-top: 0.5rem;">Click Refresh to load audit log...</pre>
+        </div>
+
+        <!-- Gateway Stdout sub-tab -->
+        <div id="sub-gateway-stdout" class="sub-content">
+            <button onclick="fetchGatewayLogs()">Refresh</button>
+            <button onclick="fetchGatewayLogs(200)" class="secondary">Last 200</button>
+            <button onclick="fetchGatewayLogs(500)" class="secondary">Last 500</button>
+            <label style="margin-left: 1rem; color: #888;">
+                <input type="checkbox" id="logs-auto-refresh" onchange="toggleLogsAutoRefresh()"> Auto-refresh
+            </label>
+            <pre id="gateway-logs" style="max-height: 500px; overflow-y: auto; font-size: 0.8rem; margin-top: 0.5rem;">Click Refresh to load gateway logs...</pre>
+        </div>
+
+        <!-- Scrub Rules sub-tab -->
+        <div id="sub-scrub-rules" class="sub-content">
+            <p style="color: #888; font-size: 0.85rem; margin-bottom: 1rem;">
+                Regex patterns applied to scrub sensitive data from traffic logs before they're written to disk.
+            </p>
+            <button onclick="fetchScrubRules()">Load Rules</button>
+            <button onclick="saveScrubRules()" class="secondary">Save Rules</button>
+            <div id="scrub-rules-list" style="margin-top: 1rem;">
+                <p style="color: #888;">Click Load Rules to view current scrub rules.</p>
+            </div>
+
+            <div style="margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid #333;">
+                <h3 style="margin: 0 0 0.5rem 0;">Add Custom Rule</h3>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
+                    <div>
+                        <label style="color: #888; font-size: 0.85rem;">Name:</label>
+                        <input type="text" id="scrub-rule-name" placeholder="My Rule" style="width: 100%;">
+                    </div>
+                    <div>
+                        <label style="color: #888; font-size: 0.85rem;">ID:</label>
+                        <input type="text" id="scrub-rule-id" placeholder="my-rule" style="width: 100%;">
+                    </div>
+                    <div style="grid-column: 1 / -1;">
+                        <label style="color: #888; font-size: 0.85rem;">Pattern (regex):</label>
+                        <input type="text" id="scrub-rule-pattern" placeholder="secret_[A-Za-z0-9]+" style="width: 100%;">
+                    </div>
+                    <div style="grid-column: 1 / -1;">
+                        <label style="color: #888; font-size: 0.85rem;">Replacement:</label>
+                        <input type="text" id="scrub-rule-replacement" value="***REDACTED***" style="width: 100%;">
+                    </div>
+                </div>
+                <div style="margin-top: 0.5rem; display: flex; gap: 0.5rem;">
+                    <button onclick="addScrubRule()" class="small">Add Rule</button>
+                    <button onclick="testScrubRuleUI()" class="small secondary">Test Pattern</button>
+                </div>
+                <div style="margin-top: 0.5rem;">
+                    <label style="color: #888; font-size: 0.85rem;">Test sample:</label>
+                    <input type="text" id="scrub-test-sample" placeholder="Enter text to test against..." style="width: 100%;">
+                </div>
+                <div id="scrub-test-result" class="result" style="margin-top: 0.5rem;"></div>
+            </div>
+        </div>
+
+        </div><!-- /page-logs -->
+
+        <!-- ==================== SNAPSHOTS PAGE ==================== -->
+        <div id="page-snapshots" class="page">
+        <h1>Snapshots</h1>
+
+        <h2>Snapshots</h2>
+        <div class="card">
+            <button onclick="createSnapshot()">Create Snapshot</button>
+            <button onclick="fetchSnapshots()" class="secondary">Refresh List</button>
+            <button onclick="deleteAllSnapshots()" class="danger" style="margin-left: 0.5rem;">Delete All</button>
+            <div id="snapshot-result" class="result"></div>
+            <div id="snapshot-list" style="margin-top: 0.5rem;"></div>
+            <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #333;">
+                <label style="color: #888;">Restore from snapshot:</label>
+                <select id="snapshot-select" style="margin: 0.5rem 0; padding: 0.3rem; background: #222; color: #eee; border: 1px solid #444;">
+                    <option value="latest">latest</option>
+                </select>
+                <button onclick="restoreSnapshot()" class="danger">Restore</button>
+                <div id="restore-result" class="result" style="margin-top: 0.5rem;"></div>
+            </div>
+        </div>
+
+        <h2>Security Audit</h2>
+        <div class="card">
+            <button onclick="runSecurityAudit()" class="secondary">Security Audit</button>
+            <button onclick="runSecurityAudit(true)" class="secondary">Deep Audit</button>
+            <div id="security-result" class="result"></div>
+        </div>
+
+        </div><!-- /page-snapshots -->
+
+        </main><!-- /content -->
 
         <style>
             .channel-card {{
@@ -1170,18 +1327,369 @@ async def promote_ui(
             }}
         </style>
 
-        <hr style="margin: 2rem 0; border-color: #333;">
-        <p>
-            {"" if OFFLINE_MODE else f'<a href="https://github.com/{GITHUB_REPO}">GitHub Repo</a> |'}
-            <a href="/health">Health API</a> |
-            <a href="/status">Status API</a> |
-            <a href="/audit">Audit API</a>
-            {"| <span style='color: #4CAF50;'>Local Mode</span>" if OFFLINE_MODE else ""}
-        </p>
-
         <script>
             // Detect base path from current URL (handles /controller via Tailscale)
             const basePath = window.location.pathname.includes('/controller') ? '/controller' : '';
+
+            // ---- HTML escaping (XSS prevention) ----
+            function escHtml(str) {{
+                if (str === null || str === undefined) return '';
+                return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+            }}
+
+            // ---- Sidebar navigation ----
+            function switchPage(name) {{
+                document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+                document.querySelectorAll('#sidebar a').forEach(a => a.classList.remove('active'));
+                const page = document.getElementById('page-' + name);
+                if (page) page.classList.add('active');
+                const link = document.querySelector('#sidebar a[href="#' + name + '"]');
+                if (link) link.classList.add('active');
+                window.location.hash = name;
+
+                // Refresh CodeMirror when gateway tab activates (sizing fix)
+                if (name === 'gateway' && typeof configEditor !== 'undefined' && configEditor) {{
+                    setTimeout(() => configEditor.refresh(), 50);
+                }}
+                // Auto-load data when switching to logs
+                if (name === 'logs') {{
+                    const activeSubTab = document.querySelector('.sub-tab.active');
+                    if (activeSubTab && activeSubTab.textContent === 'Traffic') fetchTraffic();
+                }}
+            }}
+
+            // Hash-based routing
+            function handleHash() {{
+                const hash = window.location.hash.replace('#', '') || 'dashboard';
+                switchPage(hash);
+            }}
+            window.addEventListener('hashchange', handleHash);
+            // Set initial page from hash
+            if (window.location.hash) handleHash();
+
+            // Sub-tab switching (Logs page)
+            function switchSubTab(name) {{
+                document.querySelectorAll('.sub-content').forEach(c => c.classList.remove('active'));
+                document.querySelectorAll('.sub-tab').forEach(t => t.classList.remove('active'));
+                const content = document.getElementById('sub-' + name);
+                if (content) content.classList.add('active');
+                event.target.classList.add('active');
+            }}
+
+            // ---- Traffic functions ----
+            let trafficPage = 0;
+
+            async function fetchTraffic(page = 0) {{
+                trafficPage = page;
+                const container = document.getElementById('traffic-table-container');
+                const provider = document.getElementById('traffic-provider-filter').value;
+                const search = document.getElementById('traffic-search').value;
+                container.innerHTML = '<p style="color: #888;">Loading traffic...</p>';
+                try {{
+                    let url = basePath + '/traffic?limit=50&offset=' + (page * 50);
+                    if (provider) url += '&provider=' + provider;
+                    if (search) url += '&search=' + encodeURIComponent(search);
+                    const resp = await fetch(url);
+                    const data = await resp.json();
+                    renderTrafficTable(data.entries || []);
+                }} catch(e) {{
+                    container.innerHTML = '<p style="color: #ef9a9a;">Error: ' + escHtml(e.message) + '</p>';
+                }}
+            }}
+
+            function renderTrafficTable(entries) {{
+                const container = document.getElementById('traffic-table-container');
+                if (!entries || entries.length === 0) {{
+                    container.innerHTML = '<p style="color: #888;">No traffic entries found.</p>';
+                    return;
+                }}
+                let html = '<table class="traffic-table"><thead><tr>';
+                html += '<th>Time</th><th>Provider</th><th>Method</th><th>Path</th><th>Status</th><th>Duration</th><th>Tokens</th><th></th>';
+                html += '</tr></thead><tbody>';
+                entries.forEach(e => {{
+                    const ts = e.timestamp ? escHtml(e.timestamp.slice(11, 19)) : '--';
+                    const provClass = 'provider-' + escHtml(e.provider || 'unknown');
+                    const statusColor = (e.response_status >= 400) ? '#ef9a9a' : '#a5d6a7';
+                    const tokens = (e.tokens_in || 0) + (e.tokens_out || 0);
+                    const tokenStr = tokens > 0 ? tokens.toLocaleString() : '--';
+                    const duration = e.duration_ms ? Math.round(e.duration_ms) + 'ms' : '--';
+                    const streamBadge = e.streaming ? ' <span style="color: #888; font-size: 0.7rem;">SSE</span>' : '';
+                    const safeId = escHtml(e.id);
+                    html += `<tr style="cursor: pointer;" onclick="viewTrafficDetail('${{safeId}}')">`;
+                    html += `<td style="color: #888;">${{ts}}</td>`;
+                    html += `<td class="provider ${{provClass}}">${{escHtml(e.provider || '?')}}</td>`;
+                    html += `<td>${{escHtml(e.method || '?')}}</td>`;
+                    html += `<td style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${{escHtml(e.path || '?')}}${{streamBadge}}</td>`;
+                    html += `<td style="color: ${{statusColor}};">${{escHtml(e.response_status || '?')}}</td>`;
+                    html += `<td>${{duration}}</td>`;
+                    html += `<td>${{tokenStr}}</td>`;
+                    html += `<td><button class="small secondary" onclick="event.stopPropagation(); viewTrafficDetail('${{safeId}}')">Detail</button></td>`;
+                    html += '</tr>';
+                }});
+                html += '</tbody></table>';
+
+                // Pagination
+                html += '<div style="margin-top: 0.5rem; display: flex; gap: 0.5rem;">';
+                if (trafficPage > 0) html += `<button class="small secondary" onclick="fetchTraffic(${{trafficPage - 1}})">Previous</button>`;
+                if (entries.length === 50) html += `<button class="small secondary" onclick="fetchTraffic(${{trafficPage + 1}})">Next</button>`;
+                html += '</div>';
+
+                container.innerHTML = html;
+            }}
+
+            async function viewTrafficDetail(id) {{
+                // Switch to LLM Sessions sub-tab and show detail
+                const detail = document.getElementById('llm-session-detail');
+                detail.innerHTML = '<p style="color: #888;">Loading details...</p>';
+
+                // Switch to LLM Sessions tab
+                document.querySelectorAll('.sub-content').forEach(c => c.classList.remove('active'));
+                document.querySelectorAll('.sub-tab').forEach(t => t.classList.remove('active'));
+                document.getElementById('sub-llm-sessions').classList.add('active');
+                document.querySelectorAll('.sub-tab').forEach(t => {{
+                    if (t.textContent === 'LLM Sessions') t.classList.add('active');
+                }});
+
+                try {{
+                    const resp = await fetch(basePath + '/traffic/' + id);
+                    const data = await resp.json();
+
+                    let html = '<div class="traffic-detail">';
+                    html += `<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">`;
+                    html += `<h3 style="margin: 0; color: #4CAF50;">Request Detail</h3>`;
+                    html += `<button class="small secondary" onclick="document.querySelectorAll('.sub-content').forEach(c=>c.classList.remove('active'));document.getElementById('sub-traffic').classList.add('active');document.querySelectorAll('.sub-tab').forEach(t=>{{t.classList.remove('active');if(t.textContent==='Traffic')t.classList.add('active');}});">Back to Traffic</button>`;
+                    html += `</div>`;
+
+                    html += `<div class="stats">`;
+                    html += `<div class="stat"><div class="stat-value provider-${{escHtml(data.provider || '')}}">${{escHtml(data.provider || '?')}}</div><div class="stat-label">Provider</div></div>`;
+                    html += `<div class="stat"><div class="stat-value">${{escHtml(data.response_status || '?')}}</div><div class="stat-label">Status</div></div>`;
+                    html += `<div class="stat"><div class="stat-value">${{Math.round(data.duration_ms || 0)}}ms</div><div class="stat-label">Duration</div></div>`;
+                    html += `<div class="stat"><div class="stat-value">${{(data.tokens_in || 0).toLocaleString()}}</div><div class="stat-label">Tokens In</div></div>`;
+                    html += `<div class="stat"><div class="stat-value">${{(data.tokens_out || 0).toLocaleString()}}</div><div class="stat-label">Tokens Out</div></div>`;
+                    html += `</div>`;
+
+                    html += `<p style="color: #888; font-size: 0.85rem;"><strong>ID:</strong> ${{escHtml(data.id)}} | <strong>Time:</strong> ${{escHtml(data.timestamp)}} | <strong>Method:</strong> ${{escHtml(data.method)}} <strong>Path:</strong> ${{escHtml(data.path)}}${{data.streaming ? ' | <span style="color: #ff9800;">Streaming</span>' : ''}}</p>`;
+
+                    html += `<details style="margin-top: 1rem;"><summary style="cursor: pointer; color: #2196F3;">Request Headers</summary>`;
+                    html += `<pre style="margin-top: 0.5rem;">${{escHtml(JSON.stringify(data.request_headers || {{}}, null, 2))}}</pre></details>`;
+
+                    html += `<details open style="margin-top: 0.5rem;"><summary style="cursor: pointer; color: #4CAF50;">Request Body</summary>`;
+                    html += `<pre style="margin-top: 0.5rem;">${{escHtml(JSON.stringify(data.request_body || null, null, 2))}}</pre></details>`;
+
+                    html += `<details open style="margin-top: 0.5rem;"><summary style="cursor: pointer; color: #ff9800;">Response Body</summary>`;
+                    html += `<pre style="margin-top: 0.5rem;">${{escHtml(JSON.stringify(data.response_body || null, null, 2))}}</pre></details>`;
+
+                    if (data.error) {{
+                        html += `<div style="margin-top: 0.5rem; padding: 0.5rem; background: #3d2020; border: 1px solid #ef9a9a; border-radius: 4px;"><strong style="color: #ef9a9a;">Error:</strong> ${{escHtml(data.error)}}</div>`;
+                    }}
+
+                    html += '</div>';
+                    detail.innerHTML = html;
+                }} catch(e) {{
+                    detail.innerHTML = '<p style="color: #ef9a9a;">Error loading detail: ' + escHtml(e.message) + '</p>';
+                }}
+            }}
+
+            async function fetchTrafficStats() {{
+                const container = document.getElementById('traffic-stats');
+                container.style.display = 'block';
+                container.innerHTML = '<p style="color: #888;">Loading stats...</p>';
+                try {{
+                    const resp = await fetch(basePath + '/traffic/stats');
+                    const s = await resp.json();
+                    let html = '<div class="card"><div class="stats">';
+                    html += `<div class="stat"><div class="stat-value">${{s.total_requests}}</div><div class="stat-label">Total Requests</div></div>`;
+                    html += `<div class="stat"><div class="stat-value">${{Math.round(s.avg_duration_ms)}}ms</div><div class="stat-label">Avg Duration</div></div>`;
+                    html += `<div class="stat"><div class="stat-value">${{(s.total_tokens_in + s.total_tokens_out).toLocaleString()}}</div><div class="stat-label">Total Tokens</div></div>`;
+                    html += `<div class="stat"><div class="stat-value">${{s.error_rate}}%</div><div class="stat-label">Error Rate</div></div>`;
+                    html += '</div>';
+                    if (Object.keys(s.by_provider).length > 0) {{
+                        html += '<div style="margin-top: 0.5rem; font-size: 0.85rem;">';
+                        Object.entries(s.by_provider).forEach(([prov, count]) => {{
+                            html += `<span class="provider provider-${{escHtml(prov)}}" style="margin-right: 1rem;">${{escHtml(prov)}}: ${{count}}</span>`;
+                        }});
+                        html += '</div>';
+                    }}
+                    html += '</div>';
+                    container.innerHTML = html;
+                }} catch(e) {{
+                    container.innerHTML = '<p style="color: #ef9a9a;">Error: ' + escHtml(e.message) + '</p>';
+                }}
+            }}
+
+            // ---- Capture toggle ----
+            let captureEnabled = null;
+
+            async function fetchCaptureStatus() {{
+                try {{
+                    const resp = await fetch(basePath + '/capture');
+                    const data = await resp.json();
+                    captureEnabled = data.enabled;
+                    updateCaptureUI();
+                }} catch(e) {{
+                    document.getElementById('capture-status-text').textContent = 'Capture: error';
+                }}
+            }}
+
+            function updateCaptureUI() {{
+                const dot = document.getElementById('capture-status-dot');
+                const text = document.getElementById('capture-status-text');
+                const btn = document.getElementById('capture-toggle-btn');
+                if (captureEnabled) {{
+                    dot.style.background = '#4CAF50';
+                    dot.style.boxShadow = '0 0 6px #4CAF50';
+                    text.textContent = 'Capture: ON';
+                    text.style.color = '#4CAF50';
+                    btn.textContent = 'Disable';
+                    btn.className = 'small danger';
+                }} else {{
+                    dot.style.background = '#888';
+                    dot.style.boxShadow = 'none';
+                    text.textContent = 'Capture: OFF';
+                    text.style.color = '#888';
+                    btn.textContent = 'Enable';
+                    btn.className = 'small';
+                }}
+            }}
+
+            async function toggleCapture() {{
+                const newState = !captureEnabled;
+                const action = newState ? 'enable' : 'disable';
+                if (!confirm(`${{action.charAt(0).toUpperCase() + action.slice(1)}} traffic capture?`)) return;
+                try {{
+                    const resp = await fetch(basePath + '/capture', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ enabled: newState }})
+                    }});
+                    const data = await resp.json();
+                    captureEnabled = data.enabled;
+                    updateCaptureUI();
+                }} catch(e) {{
+                    alert('Error toggling capture: ' + e.message);
+                }}
+            }}
+
+            // Load capture status on page load
+            fetchCaptureStatus();
+
+            // ---- Scrub Rules functions ----
+            let currentScrubRules = [];
+
+            async function fetchScrubRules() {{
+                const list = document.getElementById('scrub-rules-list');
+                list.innerHTML = '<p style="color: #888;">Loading rules...</p>';
+                try {{
+                    const resp = await fetch(basePath + '/scrub-rules');
+                    const data = await resp.json();
+                    currentScrubRules = data.rules || [];
+                    renderScrubRules();
+                }} catch(e) {{
+                    list.innerHTML = '<p style="color: #ef9a9a;">Error: ' + escHtml(e.message) + '</p>';
+                }}
+            }}
+
+            function renderScrubRules() {{
+                const list = document.getElementById('scrub-rules-list');
+                if (!currentScrubRules || currentScrubRules.length === 0) {{
+                    list.innerHTML = '<p style="color: #888;">No rules configured.</p>';
+                    return;
+                }}
+                let html = '';
+                currentScrubRules.forEach((r, idx) => {{
+                    const builtinClass = r.builtin ? ' builtin' : '';
+                    const enabledColor = r.enabled ? '#4CAF50' : '#888';
+                    html += `<div class="scrub-rule${{builtinClass}}">`;
+                    html += `<div style="display: flex; justify-content: space-between; align-items: center;">`;
+                    html += `<div><strong style="color: ${{enabledColor}};">${{escHtml(r.name || r.id)}}</strong>`;
+                    if (r.builtin) html += ` <span style="color: #2196F3; font-size: 0.75rem;">built-in</span>`;
+                    html += `<br><code style="font-size: 0.75rem; color: #888;">${{escHtml(r.pattern)}}</code></div>`;
+                    html += `<div style="display: flex; gap: 0.3rem;">`;
+                    html += `<button class="small ${{r.enabled ? 'danger' : ''}}" onclick="toggleScrubRule(${{idx}})">${{r.enabled ? 'Disable' : 'Enable'}}</button>`;
+                    if (!r.builtin) html += `<button class="small danger" onclick="removeScrubRule(${{idx}})">Remove</button>`;
+                    html += `</div></div></div>`;
+                }});
+                list.innerHTML = html;
+            }}
+
+            function toggleScrubRule(idx) {{
+                if (currentScrubRules[idx]) {{
+                    currentScrubRules[idx].enabled = !currentScrubRules[idx].enabled;
+                    renderScrubRules();
+                }}
+            }}
+
+            function removeScrubRule(idx) {{
+                if (currentScrubRules[idx] && !currentScrubRules[idx].builtin) {{
+                    currentScrubRules.splice(idx, 1);
+                    renderScrubRules();
+                }}
+            }}
+
+            function addScrubRule() {{
+                const name = document.getElementById('scrub-rule-name').value.trim();
+                const id = document.getElementById('scrub-rule-id').value.trim();
+                const pattern = document.getElementById('scrub-rule-pattern').value.trim();
+                const replacement = document.getElementById('scrub-rule-replacement').value || '***REDACTED***';
+                if (!name || !id || !pattern) {{
+                    alert('Name, ID, and Pattern are required.');
+                    return;
+                }}
+                currentScrubRules.push({{ id, name, pattern, replacement, enabled: true, builtin: false }});
+                renderScrubRules();
+                document.getElementById('scrub-rule-name').value = '';
+                document.getElementById('scrub-rule-id').value = '';
+                document.getElementById('scrub-rule-pattern').value = '';
+            }}
+
+            async function saveScrubRules() {{
+                try {{
+                    const resp = await fetch(basePath + '/scrub-rules', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ rules: currentScrubRules }})
+                    }});
+                    const data = await resp.json();
+                    alert('Scrub rules saved (' + data.rule_count + ' rules).');
+                }} catch(e) {{
+                    alert('Error saving rules: ' + e.message);
+                }}
+            }}
+
+            async function testScrubRuleUI() {{
+                const pattern = document.getElementById('scrub-rule-pattern').value.trim();
+                const replacement = document.getElementById('scrub-rule-replacement').value || '***REDACTED***';
+                const sample = document.getElementById('scrub-test-sample').value;
+                const result = document.getElementById('scrub-test-result');
+
+                if (!pattern || !sample) {{
+                    result.style.display = 'block';
+                    result.className = 'result error';
+                    result.textContent = 'Enter both a pattern and sample text.';
+                    return;
+                }}
+
+                try {{
+                    const resp = await fetch(basePath + '/scrub-rules/test', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ pattern, replacement, sample }})
+                    }});
+                    const data = await resp.json();
+                    result.style.display = 'block';
+                    if (data.valid) {{
+                        result.className = 'result';
+                        result.innerHTML = `<strong>Matches:</strong> ${{data.matches}}<br><strong>Result:</strong> <code>${{escHtml(data.result)}}</code>`;
+                    }} else {{
+                        result.className = 'result error';
+                        result.textContent = 'Invalid regex: ' + data.error;
+                    }}
+                }} catch(e) {{
+                    result.style.display = 'block';
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
+                }}
+            }}
 
             // Initialize CodeMirror editor
             let configEditor;
@@ -1526,7 +2034,7 @@ async def promote_ui(
             // Gateway restart
             async function restartGateway() {{
                 if (!confirm('Restart the gateway? This will briefly interrupt the bot.')) return;
-                const result = document.getElementById('status-result') || document.getElementById('promote-result');
+                const result = document.getElementById('gateway-system-result') || document.getElementById('status-result') || document.getElementById('promote-result');
                 result.style.display = 'block';
                 result.className = 'result';
                 result.textContent = 'Restarting gateway...';
@@ -2209,10 +2717,11 @@ async def promote_ui(
             }}
 
             function scrollToConfig() {{
-                document.querySelector('h2:has(+ .card #config-editor-wrapper)')?.scrollIntoView({{ behavior: 'smooth' }});
-                // Fallback for browsers without :has support
-                const configSection = document.getElementById('config-editor-wrapper');
-                if (configSection) configSection.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+                switchPage('gateway');
+                setTimeout(() => {{
+                    const configSection = document.getElementById('config-editor-wrapper');
+                    if (configSection) configSection.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+                }}, 100);
             }}
 
             async function dismissProposal() {{
@@ -2615,8 +3124,6 @@ async def promote_ui(
             }}
 
             // Load data on page load
-            fetchAudit();
-            fetchSnapshots();
             fetchHealth();
             fetchBranches();
             checkConfigBackup();
@@ -2635,7 +3142,7 @@ async def promote_ui(
                 checkProposedConfig();
             }}, POLL_INTERVAL_SLOW);
 
-            console.log('Auto-polling enabled: status every 10s, data every 30s');
+            console.log('ClawFactory UI loaded. Auto-polling enabled.');
         </script>
     </body>
     </html>
@@ -2780,6 +3287,198 @@ async def get_audit(limit: int = 50):
 
     entries = [json.loads(line) for line in lines[-limit:]]
     return {"entries": entries}
+
+
+# ============================================================
+# Traffic Logs & Scrub Rules
+# ============================================================
+
+@app.get("/traffic")
+@app.get("/controller/traffic")
+async def get_traffic(
+    limit: int = 50,
+    offset: int = 0,
+    provider: Optional[str] = None,
+    status: Optional[int] = None,
+    search: Optional[str] = None,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """List traffic log entries (paginated, filterable)."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    # Validate parameters
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    if provider and provider not in ("anthropic", "openai", "gemini"):
+        raise HTTPException(status_code=400, detail="Invalid provider")
+    if status is not None and not (100 <= status <= 599):
+        raise HTTPException(status_code=400, detail="Invalid status code")
+    if search and len(search) > 500:
+        raise HTTPException(status_code=400, detail="Search query too long")
+    entries = traffic_log.read_traffic_log(limit=limit, offset=offset, provider=provider, status=status, search=search)
+    return {"entries": entries}
+
+
+@app.get("/traffic/stats")
+@app.get("/controller/traffic/stats")
+async def get_traffic_stats(
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Aggregate traffic stats."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return traffic_log.get_traffic_stats()
+
+
+@app.get("/traffic/inbound")
+@app.get("/controller/traffic/inbound")
+async def get_inbound_traffic(
+    limit: int = 50,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Nginx access log entries (inbound traffic)."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    limit = max(1, min(limit, 500))
+    return {"entries": traffic_log.read_nginx_log(limit=limit)}
+
+
+@app.get("/traffic/{request_id}")
+@app.get("/controller/traffic/{request_id}")
+async def get_traffic_detail(
+    request_id: str,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Single traffic entry detail with full request/response."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    entry = traffic_log.get_llm_session(request_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Traffic entry not found")
+    return entry
+
+
+@app.get("/scrub-rules")
+@app.get("/controller/scrub-rules")
+async def get_scrub_rules(
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Get current scrub rules."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return {"rules": scrub.load_rules()}
+
+
+@app.post("/scrub-rules")
+@app.post("/controller/scrub-rules")
+async def save_scrub_rules(
+    request: Request,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Save scrub rules."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    data = await request.json()
+    rules = data.get("rules", [])
+    if not isinstance(rules, list):
+        raise HTTPException(status_code=400, detail="rules must be a list")
+    if len(rules) > 100:
+        raise HTTPException(status_code=400, detail="Too many rules (max 100)")
+    # Validate each rule
+    for rule in rules:
+        if not isinstance(rule, dict):
+            raise HTTPException(status_code=400, detail="Each rule must be an object")
+        if not rule.get("id") or not isinstance(rule.get("id"), str):
+            raise HTTPException(status_code=400, detail="Each rule must have a string 'id'")
+        if len(rule.get("id", "")) > 64:
+            raise HTTPException(status_code=400, detail="Rule ID too long (max 64)")
+        if rule.get("pattern") and len(rule["pattern"]) > 1000:
+            raise HTTPException(status_code=400, detail="Pattern too long (max 1000)")
+    scrub.save_rules(rules)
+    audit_log("scrub_rules_updated", {"rule_count": len(rules)})
+    return {"status": "saved", "rule_count": len(rules)}
+
+
+@app.post("/scrub-rules/test")
+@app.post("/controller/scrub-rules/test")
+async def test_scrub_rule(
+    request: Request,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Test a regex pattern against sample text."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    data = await request.json()
+    pattern = data.get("pattern", "")
+    replacement = data.get("replacement", "***REDACTED***")
+    sample = data.get("sample", "")
+    if not isinstance(pattern, str) or not isinstance(replacement, str) or not isinstance(sample, str):
+        raise HTTPException(status_code=400, detail="pattern, replacement, and sample must be strings")
+    if len(pattern) > 1000:
+        raise HTTPException(status_code=400, detail="Pattern too long (max 1000)")
+    if len(sample) > 10000:
+        raise HTTPException(status_code=400, detail="Sample too long (max 10000)")
+    if len(replacement) > 500:
+        raise HTTPException(status_code=400, detail="Replacement too long (max 500)")
+    return scrub.test_pattern(pattern, replacement, sample)
+
+
+CAPTURE_STATE_FILE = Path(os.environ.get("CAPTURE_STATE_FILE", "/srv/audit/capture_enabled"))
+LLM_PROXY_URL = os.environ.get("LLM_PROXY_URL", "http://llm-proxy:9090")
+
+
+@app.get("/capture")
+@app.get("/controller/capture")
+async def get_capture(
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Get capture enabled state."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    # Read from state file directly (works for both Docker and Lima)
+    enabled = True
+    if CAPTURE_STATE_FILE.exists():
+        try:
+            enabled = CAPTURE_STATE_FILE.read_text().strip() == "1"
+        except Exception:
+            pass
+    return {"enabled": enabled}
+
+
+@app.post("/capture")
+@app.post("/controller/capture")
+async def set_capture(
+    request: Request,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Toggle capture on/off."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    data = await request.json()
+    enabled = bool(data.get("enabled", True))
+    # Write state file directly
+    CAPTURE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CAPTURE_STATE_FILE.write_text("1" if enabled else "0")
+    audit_log("capture_toggled", {"enabled": enabled})
+    return {"enabled": enabled}
 
 
 # ============================================================

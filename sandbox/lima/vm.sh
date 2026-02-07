@@ -272,6 +272,13 @@ ExecStart=
 ExecStart=/usr/bin/node dist/index.js gateway --port ${gw_port} --bind lan
 EOF
 
+        # Gateway override — add LLM proxy env vars
+        cat >> /etc/systemd/system/openclaw-gateway@${instance}.service.d/override.conf <<EOF
+Environment=ANTHROPIC_BASE_URL=http://127.0.0.1:9090/anthropic
+Environment=OPENAI_BASE_URL=http://127.0.0.1:9090/openai
+Environment=GEMINI_API_BASE=http://127.0.0.1:9090/gemini
+EOF
+
         # Controller override
         mkdir -p /etc/systemd/system/clawfactory-controller.service.d
         cat > /etc/systemd/system/clawfactory-controller.service.d/override.conf <<EOF
@@ -284,8 +291,21 @@ Environment=INSTANCE_NAME=${instance}
 Environment=GATEWAY_CONTAINER=local
 Environment=SNAPSHOTS_DIR=${LIMA_SRV}/snapshots/${instance}
 Environment=AGE_KEY=${LIMA_SRV}/secrets/${instance}/snapshot.key
+Environment=TRAFFIC_LOG=${LIMA_SRV}/audit/traffic.jsonl
+Environment=SCRUB_RULES_PATH=${LIMA_SRV}/audit/scrub_rules.json
+Environment=CAPTURE_STATE_FILE=${LIMA_SRV}/audit/capture_enabled
+Environment=NGINX_LOG=/var/log/nginx/access.json
 ExecStart=
 ExecStart=/usr/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port ${CONTROLLER_PORT:-8080}
+EOF
+
+        # LLM Proxy override
+        mkdir -p /etc/systemd/system/clawfactory-llm-proxy.service.d
+        cat > /etc/systemd/system/clawfactory-llm-proxy.service.d/override.conf <<EOF
+[Service]
+Environment=TRAFFIC_LOG=${LIMA_SRV}/audit/traffic.jsonl
+Environment=SCRUB_RULES_PATH=${LIMA_SRV}/audit/scrub_rules.json
+Environment=CAPTURE_STATE_FILE=${LIMA_SRV}/audit/capture_enabled
 EOF
 
         systemctl daemon-reload
@@ -294,21 +314,21 @@ EOF
     case "$action" in
         start)
             echo "Starting ClawFactory services..."
-            _lima_root "systemctl start openclaw-gateway@${instance} clawfactory-controller nginx docker"
+            _lima_root "systemctl start openclaw-gateway@${instance} clawfactory-llm-proxy clawfactory-controller nginx docker"
             echo "Services started"
             ;;
         stop)
             echo "Stopping ClawFactory services..."
-            _lima_root "systemctl stop openclaw-gateway@${instance} clawfactory-controller nginx" 2>/dev/null || true
+            _lima_root "systemctl stop openclaw-gateway@${instance} clawfactory-llm-proxy clawfactory-controller nginx" 2>/dev/null || true
             echo "Services stopped"
             ;;
         restart)
             echo "Restarting ClawFactory services..."
-            _lima_root "systemctl restart openclaw-gateway@${instance} clawfactory-controller nginx"
+            _lima_root "systemctl restart openclaw-gateway@${instance} clawfactory-llm-proxy clawfactory-controller nginx"
             echo "Services restarted"
             ;;
         status)
-            _lima_root "systemctl status --no-pager openclaw-gateway@${instance} clawfactory-controller nginx docker" 2>/dev/null || true
+            _lima_root "systemctl status --no-pager openclaw-gateway@${instance} clawfactory-llm-proxy clawfactory-controller nginx docker" 2>/dev/null || true
             ;;
         *)
             echo "Usage: lima_services {start|stop|restart|status}" >&2
@@ -357,7 +377,7 @@ for vm in json.loads(sys.stdin.read().rstrip().replace('}\n{', '},{')):
     # Service status
     echo ""
     echo "Services:"
-    for svc in openclaw-gateway@"${INSTANCE_NAME:-default}" clawfactory-controller nginx docker; do
+    for svc in openclaw-gateway@"${INSTANCE_NAME:-default}" clawfactory-llm-proxy clawfactory-controller nginx docker; do
         local svc_status
         svc_status=$(_lima_root "systemctl is-active $svc" 2>/dev/null || echo "unknown")
         printf "  %-40s %s\n" "$svc" "$svc_status"
@@ -378,6 +398,7 @@ lima_stop() {
     echo "Stopping ClawFactory services..."
     _lima_root "
         systemctl stop openclaw-gateway@${instance} 2>/dev/null || true
+        systemctl stop clawfactory-llm-proxy 2>/dev/null || true
         systemctl stop clawfactory-controller 2>/dev/null || true
         systemctl stop nginx 2>/dev/null || true
     "
