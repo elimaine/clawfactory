@@ -1,15 +1,22 @@
 # ClawFactory
 
-> **Status**: Work in progress - found a deeper architectural issue as of 4/2/26, basically we cant run docker in docker for subagents. this works single threaded, but cron jobs wont work until i take the gateway out of its own isolation.. which was half the security model, and would kill the multiple independent agents ecosystems idea..
+> **Status**: Work in progress - major hurdles overcome! this is midstage looking good, but still unstable for new installs. i recommend installing with claude. this was built on latest osx on m5 apple silicon. 
 
-A local-first launch platform for autonomous OpenClaw agents. Spin up sandboxed bots, wire them into Discord/Telegram/Slack, and let them loose — with you holding the leash. Encrypted snapshots, a mission control dashboard, git-backed personality versioning, instant restore, a kill switch for when things get weird, and full multi-agent fleet support.
+## Yo Dogg I heard you like OpenClaw Agents
+> so we put a VM in your VM, spun up 5 of them, and added a controller.
 
-## The Prime Directive
-
-> Chat is UI, GitHub is authority.
+## Vms all the way down.
 > The bot may propose, but can never silently promote or persist changes.
 
-Your agents talk through channels (Discord, Telegram, Slack, and more via OpenClaw extensions), but every meaningful change flows through git. No bot promotes itself. No silent mutations. Humans hold the merge button.
+This project has 3 modes: 
+
+- nested virtualization (recommended, osx apple silicon implemented)
+- single layer virtualization, openclaw gateway sandboxed
+- and no virtualization, with agents sandboxed through openclaw
+
+Pulls from latest version of openclaw but you can also swap in your workspace.
+
+Your agents talk through channels (Discord, Telegram, Slack, and more via OpenClaw extensions), but every meaningful change flows through the controller. Soft lock on bot promotion, need to be taught to push version proposals. No silent mutations should last long term. Humans hold the merge to long term state.
 
 ## Launch Sequence
 
