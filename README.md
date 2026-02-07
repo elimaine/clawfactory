@@ -1,15 +1,22 @@
 # ClawFactory
 
-> **Status**: Work in progress - i recommend installing with claude while this is unstable. this was built in latest osx on m5 apple silicon. nested virtualization isnt easy, but aside from renting a server its one if the best ways i found to massively reduces blast radious. you can also run this with just docker which gives it a smaller memory footprint but you lose a level of blast radious which could be everything the bot has access to.
+> **Status**: Work in progress - major hurdles overcome! this is midstage looking good, but still unstable for new installs. i recommend installing with claude. this was built on latest osx on m5 apple silicon. 
 
-A local-first launch platform for autonomous OpenClaw agents. Spin up sandboxed bots, wire them into Discord/Telegram/Slack, and let them loose — with you holding the leash. Encrypted snapshots, a mission control dashboard, git-backed personality versioning, instant restore, a kill switch for when things get weird, and full multi-agent fleet support.
+## Yo Dogg I heard you like OpenClaw Agents
+> so we put a VM in your VM, spun up 5 of them, and added a controller. Safest install I've found for local!
 
-## The Prime Directive
-
-> Chat is UI, GitHub is authority.
+## Vms all the way down.
 > The bot may propose, but can never silently promote or persist changes.
 
-Your agents talk through channels (Discord, Telegram, Slack, and more via OpenClaw extensions), but every meaningful change flows through git. No bot promotes itself. No silent mutations. Humans hold the merge button.
+This project has 3 modes: 
+
+- nested virtualization (recommended, osx apple silicon implemented)
+- single layer virtualization, openclaw gateway sandboxed
+- and no virtualization, with agents sandboxed through openclaw
+
+Pulls from latest version of openclaw but you can also swap in your workspace.
+
+Your agents talk through channels (Discord, Telegram, Slack, and more via OpenClaw extensions), but every meaningful change flows through the controller. Soft lock on bot promotion, need to be taught to push version proposals. No silent mutations should last long term. Humans hold the merge to long term state.
 
 ## Launch Sequence
 
