@@ -665,12 +665,35 @@ def promote_main() -> bool:
         return False
 
 
-def restart_gateway() -> bool:
-    """Restart the Gateway container."""
+def get_gateway_status() -> str:
+    """Get gateway status (systemd in Lima mode, Docker otherwise)."""
     try:
-        client = docker.from_env()
-        container = client.containers.get(GATEWAY_CONTAINER)
-        container.restart(timeout=30)
+        if IS_LIMA_MODE:
+            result = subprocess.run(
+                ["systemctl", "is-active", f"openclaw-gateway@{INSTANCE_NAME}"],
+                capture_output=True, text=True, timeout=5
+            )
+            status = result.stdout.strip()
+            # systemctl is-active returns: active, inactive, failed, activating, etc.
+            return "running" if status == "active" else status or "unknown"
+        else:
+            client = docker.from_env()
+            container = client.containers.get(GATEWAY_CONTAINER)
+            return container.status
+    except Exception:
+        return "unknown"
+
+
+def restart_gateway() -> bool:
+    """Restart the gateway (systemd in Lima mode, Docker otherwise)."""
+    try:
+        if IS_LIMA_MODE:
+            gateway_stop()
+            gateway_start()
+        else:
+            client = docker.from_env()
+            container = client.containers.get(GATEWAY_CONTAINER)
+            container.restart(timeout=30)
         audit_log("gateway_restart", {"container": GATEWAY_CONTAINER})
         return True
     except Exception as e:
@@ -805,57 +828,65 @@ async def promote_ui(
                 </html>
             """, status_code=401)
 
-    # Fetch latest from remote (uses GITHUB_TOKEN for auth)
-    git_fetch_origin()
-
-    # Get recent commits on origin/main
-    try:
-        result = subprocess.run(
-            ["git", "log", "origin/main", "--oneline", "-10"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-        )
-        commits = result.stdout.strip() if result.returncode == 0 else "Error reading commits"
-    except Exception as e:
-        commits = f"Error: {e}"
-
+    # Get recent commits and remote status
     current_sha = git_get_main_sha() or "unknown"
-    # Fetch from origin to get latest remote SHA
-    remote_sha = git_get_remote_sha(fetch_first=True) or "unknown"
 
-    # Check if remote has commits that local doesn't have (remote is ahead)
-    # This is more accurate than just comparing SHAs (which fails when local is ahead)
-    needs_update = False
-    if remote_sha != "unknown":
+    if OFFLINE_MODE:
+        # No remote configured — skip fetch/remote operations, show local history
         try:
-            ahead_check = subprocess.run(
-                ["git", "log", "--oneline", "HEAD..origin/main"],
+            result = subprocess.run(
+                ["git", "log", "HEAD", "--oneline", "-10"],
                 cwd=APPROVED_DIR,
                 capture_output=True,
                 text=True,
             )
-            # If there are commits in HEAD..origin/main, remote is ahead
-            needs_update = bool(ahead_check.returncode == 0 and ahead_check.stdout.strip())
-        except Exception:
-            # Fall back to SHA comparison if git command fails
-            needs_update = current_sha != remote_sha
+            commits = result.stdout.strip() if result.returncode == 0 else "No commits yet"
+        except Exception as e:
+            commits = f"Error: {e}"
+        remote_sha = "unknown"
+        needs_update = False
+        pending_changes = {"commits": [], "files": [], "diff_stat": ""}
+    else:
+        # Fetch latest from remote (uses GITHUB_TOKEN for auth)
+        git_fetch_origin()
+
+        # Get recent commits on origin/main
+        try:
+            result = subprocess.run(
+                ["git", "log", "origin/main", "--oneline", "-10"],
+                cwd=APPROVED_DIR,
+                capture_output=True,
+                text=True,
+            )
+            commits = result.stdout.strip() if result.returncode == 0 else "Error reading commits"
+        except Exception as e:
+            commits = f"Error: {e}"
+
+        # Fetch from origin to get latest remote SHA
+        remote_sha = git_get_remote_sha(fetch_first=True) or "unknown"
+
+        # Check if remote has commits that local doesn't have (remote is ahead)
+        needs_update = False
+        if remote_sha != "unknown":
+            try:
+                ahead_check = subprocess.run(
+                    ["git", "log", "--oneline", "HEAD..origin/main"],
+                    cwd=APPROVED_DIR,
+                    capture_output=True,
+                    text=True,
+                )
+                needs_update = bool(ahead_check.returncode == 0 and ahead_check.stdout.strip())
+            except Exception:
+                needs_update = current_sha != remote_sha
+
+        pending_changes = git_get_pending_changes() if needs_update else {"commits": [], "files": [], "diff_stat": ""}
 
     status_msg = "Up to date" if not needs_update else f"⚠️ Update available"
     status_class = "success" if not needs_update else "warning"
 
-    # Get pending changes if update available
-    pending_changes = git_get_pending_changes() if needs_update else {"commits": [], "files": [], "diff_stat": ""}
-
     # Get gateway status
-    try:
-        client = docker.from_env()
-        gateway = client.containers.get(GATEWAY_CONTAINER)
-        gateway_status = gateway.status
-        gateway_class = "success" if gateway_status == "running" else "error"
-    except Exception:
-        gateway_status = "unknown"
-        gateway_class = "warning"
+    gateway_status = get_gateway_status()
+    gateway_class = "success" if gateway_status == "running" else ("warning" if gateway_status == "unknown" else "error")
 
     html = f"""
     <!DOCTYPE html>
@@ -3023,7 +3054,7 @@ async def promote_ui(
                 if (!config.models.providers) config.models.providers = {{}};
                 if (!config.models.providers.ollama) {{
                     config.models.providers.ollama = {{
-                        baseUrl: "http://host.docker.internal:11434/v1",
+                        baseUrl: "{"http://localhost:11434/v1" if IS_LIMA_MODE else "http://host.docker.internal:11434/v1"}",
                         apiKey: "ollama-local",
                         models: []
                     }};
@@ -3468,6 +3499,9 @@ async def promote_main_endpoint(
 
     audit_log("promote_main_requested", {})
 
+    if OFFLINE_MODE:
+        raise HTTPException(status_code=400, detail="Cannot deploy from main — GitHub is not configured. Set up GitHub in Settings first.")
+
     if not promote_main():
         raise HTTPException(status_code=500, detail="Promotion failed")
 
@@ -3503,12 +3537,7 @@ async def status():
     """Get current system status."""
     current_sha = git_get_main_sha()
 
-    try:
-        client = docker.from_env()
-        gateway = client.containers.get(GATEWAY_CONTAINER)
-        gateway_status = gateway.status
-    except Exception:
-        gateway_status = "unknown"
+    gateway_status = get_gateway_status()
 
     return {
         "approved_sha": current_sha,
@@ -4832,8 +4861,11 @@ def fetch_ollama_models() -> list:
     import urllib.request
     import urllib.error
 
-    # Try common Ollama endpoints
+    # Try common Ollama endpoints (localhost first in Lima mode, Docker hostname first otherwise)
     base_urls = [
+        "http://localhost:11434",
+        "http://ollama:11434",
+    ] if IS_LIMA_MODE else [
         "http://host.docker.internal:11434",
         "http://localhost:11434",
         "http://ollama:11434",
@@ -4991,9 +5023,7 @@ async def gateway_config_save(
             audit_log("known_good_config_saved", {})
 
         # Stop the gateway first
-        client = docker.from_env()
-        gateway = client.containers.get(GATEWAY_CONTAINER)
-        gateway.stop(timeout=30)
+        gateway_stop()
         audit_log("gateway_stopped_for_config", {})
 
         # Write the config
@@ -5002,7 +5032,7 @@ async def gateway_config_save(
         audit_log("gateway_config_written", {})
 
         # Start the gateway
-        gateway.start()
+        gateway_start()
         audit_log("gateway_started_after_config", {})
 
         return {"status": "saved", "restarted": True}
@@ -5055,9 +5085,7 @@ async def gateway_config_revert(
         import shutil
 
         # Stop gateway
-        client = docker.from_env()
-        gateway = client.containers.get(GATEWAY_CONTAINER)
-        gateway.stop(timeout=30)
+        gateway_stop()
         audit_log("gateway_stopped_for_revert", {})
 
         # Copy known-good back
@@ -5065,7 +5093,7 @@ async def gateway_config_revert(
         audit_log("config_reverted", {})
 
         # Start gateway
-        gateway.start()
+        gateway_start()
         audit_log("gateway_started_after_revert", {})
 
         return {"status": "reverted", "restarted": True}
@@ -5197,12 +5225,22 @@ async def delete_proposed_config(
 # ============================================================
 
 def run_gateway_command(cmd: list[str], timeout: int = 30) -> tuple[bool, str]:
-    """Run a command inside the gateway container."""
+    """Run a command inside the gateway (subprocess in Lima mode, docker exec otherwise)."""
     try:
-        client = docker.from_env()
-        gateway = client.containers.get(GATEWAY_CONTAINER)
-        exit_code, output = gateway.exec_run(cmd, demux=False)
-        return exit_code == 0, output.decode() if output else ""
+        if IS_LIMA_MODE:
+            svc_user = f"openclaw-{INSTANCE_NAME}"
+            result = subprocess.run(
+                ["sudo", "-u", svc_user] + cmd,
+                cwd=str(APPROVED_DIR),
+                capture_output=True, text=True, timeout=timeout,
+            )
+            output = result.stdout + result.stderr
+            return result.returncode == 0, output
+        else:
+            client = docker.from_env()
+            gateway = client.containers.get(GATEWAY_CONTAINER)
+            exit_code, output = gateway.exec_run(cmd, demux=False)
+            return exit_code == 0, output.decode() if output else ""
     except Exception as e:
         return False, str(e)
 
@@ -5305,39 +5343,63 @@ async def gateway_rebuild_endpoint(
     audit_log("gateway_rebuild_requested", {"source": "api"})
 
     try:
-        client = docker.from_env()
+        if IS_LIMA_MODE:
+            # Lima mode: rebuild via pnpm install + build, then restart service
+            gateway_stop()
 
-        # Stop the gateway container
-        try:
-            container = client.containers.get(GATEWAY_CONTAINER)
-            container.stop(timeout=30)
-        except docker.errors.NotFound:
-            pass
+            svc_user = f"openclaw-{INSTANCE_NAME}"
+            install_result = subprocess.run(
+                ["sudo", "-u", svc_user, "pnpm", "install", "--frozen-lockfile"],
+                cwd=str(APPROVED_DIR),
+                capture_output=True, text=True, timeout=300,
+            )
+            if install_result.returncode != 0:
+                gateway_start()
+                return {"error": f"Install failed: {install_result.stderr}"}
 
-        # Rebuild the image using docker compose
-        # Note: This assumes docker compose is available and the compose file is accessible
-        rebuild_result = subprocess.run(
-            ["docker", "compose", "build", "--no-cache", "gateway"],
-            cwd=str(APPROVED_DIR.parent.parent.parent),  # Go up to clawfactory root
-            capture_output=True,
-            text=True,
-            timeout=600  # 10 minute timeout for build
-        )
+            build_result = subprocess.run(
+                ["sudo", "-u", svc_user, "pnpm", "run", "build"],
+                cwd=str(APPROVED_DIR),
+                capture_output=True, text=True, timeout=300,
+            )
+            if build_result.returncode != 0:
+                gateway_start()
+                return {"error": f"Build failed: {build_result.stderr}"}
 
-        if rebuild_result.returncode != 0:
-            return {"error": f"Build failed: {rebuild_result.stderr}"}
+            gateway_start()
+        else:
+            client = docker.from_env()
 
-        # Start the gateway container
-        start_result = subprocess.run(
-            ["docker", "compose", "up", "-d", "gateway"],
-            cwd=str(APPROVED_DIR.parent.parent.parent),
-            capture_output=True,
-            text=True,
-            timeout=60
-        )
+            # Stop the gateway container
+            try:
+                container = client.containers.get(GATEWAY_CONTAINER)
+                container.stop(timeout=30)
+            except docker.errors.NotFound:
+                pass
 
-        if start_result.returncode != 0:
-            return {"error": f"Start failed: {start_result.stderr}"}
+            # Rebuild the image using docker compose
+            rebuild_result = subprocess.run(
+                ["docker", "compose", "build", "--no-cache", "gateway"],
+                cwd=str(APPROVED_DIR.parent.parent.parent),  # Go up to clawfactory root
+                capture_output=True,
+                text=True,
+                timeout=600  # 10 minute timeout for build
+            )
+
+            if rebuild_result.returncode != 0:
+                return {"error": f"Build failed: {rebuild_result.stderr}"}
+
+            # Start the gateway container
+            start_result = subprocess.run(
+                ["docker", "compose", "up", "-d", "gateway"],
+                cwd=str(APPROVED_DIR.parent.parent.parent),
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+
+            if start_result.returncode != 0:
+                return {"error": f"Start failed: {start_result.stderr}"}
 
         return {"message": "Gateway rebuilt and restarted successfully"}
     except subprocess.TimeoutExpired:
@@ -5401,9 +5463,16 @@ async def gateway_logs_endpoint(
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     try:
-        client = docker.from_env()
-        container = client.containers.get(GATEWAY_CONTAINER)
-        logs = container.logs(tail=lines, timestamps=False).decode("utf-8", errors="replace")
+        if IS_LIMA_MODE:
+            result = subprocess.run(
+                ["journalctl", "-u", f"openclaw-gateway@{INSTANCE_NAME}", "-n", str(lines), "--no-pager"],
+                capture_output=True, text=True, timeout=10,
+            )
+            logs = result.stdout if result.returncode == 0 else f"Error reading logs: {result.stderr}"
+        else:
+            client = docker.from_env()
+            container = client.containers.get(GATEWAY_CONTAINER)
+            logs = container.logs(tail=lines, timestamps=False).decode("utf-8", errors="replace")
         return {"logs": logs, "lines": lines, "container": GATEWAY_CONTAINER}
     except docker.errors.NotFound:
         return {"error": f"Container {GATEWAY_CONTAINER} not found"}
@@ -5742,6 +5811,34 @@ async def settings_github_post(
     OFFLINE_MODE = not repo or "/" not in repo
     GIT_USER_NAME = username
     GIT_USER_EMAIL = email
+
+    # Configure git remote origin for the new repo
+    remote_url = f"https://github.com/{repo}.git"
+    try:
+        existing = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=APPROVED_DIR,
+            capture_output=True,
+            text=True,
+        )
+        if existing.returncode != 0:
+            # origin doesn't exist yet — add it
+            subprocess.run(
+                ["git", "remote", "add", "origin", remote_url],
+                cwd=APPROVED_DIR,
+                capture_output=True,
+                text=True,
+            )
+        elif existing.stdout.strip() != remote_url:
+            # origin exists but points to wrong repo — update it
+            subprocess.run(
+                ["git", "remote", "set-url", "origin", remote_url],
+                cwd=APPROVED_DIR,
+                capture_output=True,
+                text=True,
+            )
+    except Exception:
+        pass  # non-fatal — remote will be set up on next sync
 
     audit_log("github_connected", {"repo": repo})
     return {"ok": True}
