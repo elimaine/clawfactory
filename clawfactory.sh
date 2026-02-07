@@ -44,198 +44,92 @@ if [[ -f "$TOKEN_FILE" ]]; then
     CONTROLLER_TOKEN="${!ctrl_var:-}"
 fi
 
-# Check if router is running
-router_running() {
-    docker ps --filter "name=clawfactory-router" --format "{{.Names}}" 2>/dev/null | grep -q "clawfactory-router"
+# Load instance-specific ports (for multi-instance support)
+CONTROLLER_ENV="${SCRIPT_DIR}/secrets/${INSTANCE_NAME}/controller.env"
+GATEWAY_PORT="${GATEWAY_PORT:-18789}"
+CONTROLLER_PORT="${CONTROLLER_PORT:-8080}"
+if [[ -f "$CONTROLLER_ENV" ]]; then
+    _gw_port=$(grep -E "^GATEWAY_PORT=" "$CONTROLLER_ENV" 2>/dev/null | cut -d= -f2 || true)
+    _ctrl_port=$(grep -E "^CONTROLLER_PORT=" "$CONTROLLER_ENV" 2>/dev/null | cut -d= -f2 || true)
+    [[ -n "$_gw_port" ]] && GATEWAY_PORT="$_gw_port"
+    [[ -n "$_ctrl_port" ]] && CONTROLLER_PORT="$_ctrl_port"
+fi
+export GATEWAY_PORT CONTROLLER_PORT
+
+# Check if a port is in use by another clawfactory instance
+port_in_use() {
+    local port="$1"
+    docker ps --filter "name=clawfactory-" --format "{{.Ports}}" 2>/dev/null | grep -q ":${port}->"
 }
 
-# Check if hosts entry exists for an instance
-hosts_entry_exists() {
-    local instance="$1"
-    grep -q "${instance}\.local" /etc/hosts 2>/dev/null
-}
-
-# Get all configured instances
-get_all_instances() {
-    local instances=""
-    if [[ -d "${SCRIPT_DIR}/secrets" ]]; then
-        for d in "${SCRIPT_DIR}"/secrets/*/; do
-            if [[ -d "$d" ]]; then
-                local name=$(basename "$d")
-                instances="$instances $name"
-            fi
-        done
-    fi
-    echo "$instances"
-}
-
-# Get instances missing from hosts file
-get_missing_hosts() {
-    local missing=""
-    for instance in $(get_all_instances); do
-        if ! hosts_entry_exists "$instance"; then
-            missing="$missing ${instance}.local"
-        fi
+# Find next available port starting from base
+find_available_port() {
+    local base="$1"
+    local port="$base"
+    while port_in_use "$port"; do
+        port=$((port + 1))
     done
-    echo "$missing"
+    echo "$port"
 }
 
-# Prompt user to add hosts entries
-prompt_add_hosts() {
-    local missing=$(get_missing_hosts)
-    if [[ -z "${missing// }" ]]; then
-        return 0  # All entries exist
-    fi
+# Ensure ports are configured and available
+ensure_ports() {
+    local env_file="${SCRIPT_DIR}/secrets/${INSTANCE_NAME}/controller.env"
 
-    echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  Hosts file setup needed for multi-instance access"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo ""
-    echo "  ClawFactory uses subdomains to run multiple bots at once:"
-    echo "    - http://sandy.local:8080/controller"
-    echo "    - http://testbot.local:8080/controller"
-    echo ""
-    echo "  Missing entries:${missing}"
-    echo ""
-    echo "  This requires adding a line to /etc/hosts (one-time setup)."
-    echo ""
+    # Check if ports are already set in env file
+    local has_gw_port=$(grep -q "^GATEWAY_PORT=" "$env_file" 2>/dev/null && echo "yes" || echo "no")
+    local has_ctrl_port=$(grep -q "^CONTROLLER_PORT=" "$env_file" 2>/dev/null && echo "yes" || echo "no")
 
-    # Check if running interactively
-    if [[ -t 0 ]]; then
-        read -p "  Add hosts entries now? [y/N] " -n 1 -r
-        echo ""
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            add_hosts_entries
-        else
-            echo ""
-            echo "  To add manually later, run:"
-            echo "    ./clawfactory.sh hosts add"
-            echo ""
+    # If both ports are set, check if they're available
+    if [[ "$has_gw_port" == "yes" && "$has_ctrl_port" == "yes" ]]; then
+        if port_in_use "$GATEWAY_PORT" || port_in_use "$CONTROLLER_PORT"; then
+            echo "⚠ Configured ports ($CONTROLLER_PORT/$GATEWAY_PORT) are in use by another instance"
+            echo "  Stop the other instance or update ports in: $env_file"
+            return 1
         fi
-    else
-        echo "  Run './clawfactory.sh hosts add' to set this up."
-        echo ""
-    fi
-}
-
-# Add hosts entries with sudo
-add_hosts_entries() {
-    local missing=$(get_missing_hosts)
-    if [[ -z "${missing// }" ]]; then
-        echo "  All hosts entries already exist."
         return 0
     fi
 
-    local hosts_line="127.0.0.1${missing}"
+    # Auto-assign ports if not set
+    local new_gw_port=$(find_available_port 18789)
+    local new_ctrl_port=$(find_available_port 8080)
 
-    echo ""
-    echo "  Adding to /etc/hosts:"
-    echo "    ${hosts_line}"
-    echo ""
-
-    # Use sudo to append to hosts file
-    if echo "$hosts_line" | sudo tee -a /etc/hosts > /dev/null; then
-        echo "  ✓ Hosts entries added successfully!"
-        echo ""
-        echo "  You can now access:"
-        for instance in $(get_all_instances); do
-            echo "    http://${instance}.local:8080/controller"
-        done
-        echo ""
-    else
-        echo "  ✗ Failed to add hosts entries."
-        echo "  Try manually: echo '${hosts_line}' | sudo tee -a /etc/hosts"
+    # If defaults are available, use them
+    if [[ "$new_gw_port" == "18789" && "$new_ctrl_port" == "8080" ]]; then
+        GATEWAY_PORT=18789
+        CONTROLLER_PORT=8080
+        export GATEWAY_PORT CONTROLLER_PORT
+        return 0
     fi
+
+    # Need to assign new ports - add to env file
+    echo "Assigning ports for [${INSTANCE_NAME}]: Controller=${new_ctrl_port}, Gateway=${new_gw_port}"
+
+    if [[ "$has_gw_port" == "no" ]]; then
+        echo "" >> "$env_file"
+        echo "# Auto-assigned ports for multi-instance support" >> "$env_file"
+        echo "GATEWAY_PORT=${new_gw_port}" >> "$env_file"
+    fi
+    if [[ "$has_ctrl_port" == "no" ]]; then
+        echo "CONTROLLER_PORT=${new_ctrl_port}" >> "$env_file"
+    fi
+
+    GATEWAY_PORT="$new_gw_port"
+    CONTROLLER_PORT="$new_ctrl_port"
+    export GATEWAY_PORT CONTROLLER_PORT
 }
 
 case "${1:-help}" in
-    router)
-        case "${2:-status}" in
-            start)
-                docker compose -f "${SCRIPT_DIR}/router/docker-compose.yml" up -d
-                echo "✓ Router started"
-                echo ""
-                echo "Add to /etc/hosts:"
-                echo "  127.0.0.1 ${INSTANCE_NAME}.local"
-                echo ""
-                echo "Then access: http://${INSTANCE_NAME}.local:8080/controller"
-                ;;
-            stop)
-                docker compose -f "${SCRIPT_DIR}/router/docker-compose.yml" down
-                echo "✓ Router stopped"
-                ;;
-            *)
-                if router_running; then
-                    echo "Router: running"
-                else
-                    echo "Router: stopped"
-                    echo "  Start with: ./clawfactory.sh router start"
-                fi
-                ;;
-        esac
-        ;;
-    hosts)
-        case "${2:-show}" in
-            add)
-                add_hosts_entries
-                ;;
-            check)
-                missing=$(get_missing_hosts)
-                if [[ -z "${missing// }" ]]; then
-                    echo "✓ All hosts entries are configured"
-                else
-                    echo "Missing hosts entries:${missing}"
-                    echo ""
-                    echo "Run './clawfactory.sh hosts add' to fix"
-                fi
-                ;;
-            *)
-                # Show current status and instructions
-                echo "Hosts file status:"
-                echo ""
-                for instance in $(get_all_instances); do
-                    if hosts_entry_exists "$instance"; then
-                        echo "  ✓ ${instance}.local"
-                    else
-                        echo "  ✗ ${instance}.local (missing)"
-                    fi
-                done
-                echo ""
-                missing=$(get_missing_hosts)
-                if [[ -n "${missing// }" ]]; then
-                    echo "To add missing entries:"
-                    echo "  ./clawfactory.sh hosts add"
-                    echo ""
-                    echo "Or manually:"
-                    echo "  echo '127.0.0.1${missing}' | sudo tee -a /etc/hosts"
-                else
-                    echo "All instances are configured!"
-                fi
-                ;;
-        esac
-        ;;
     start)
-        # Ensure router is running first
-        if ! router_running; then
-            echo "Starting router for subdomain access..."
-            docker compose -f "${SCRIPT_DIR}/router/docker-compose.yml" up -d
-        fi
-
+        ensure_ports || exit 1
         ${COMPOSE_CMD} up -d
         echo "✓ ClawFactory [${INSTANCE_NAME}] started"
-
-        if [[ -n "$CONTROLLER_TOKEN" ]]; then
-            echo "  Gateway:    http://${INSTANCE_NAME}.local:18789/?token=${GATEWAY_TOKEN}"
-            echo "  Controller: http://${INSTANCE_NAME}.local:8080/controller?token=${CONTROLLER_TOKEN}"
+        if [[ -n "$GATEWAY_TOKEN" ]]; then
+            echo "  Gateway:    http://localhost:${GATEWAY_PORT}/?token=${GATEWAY_TOKEN}"
+            echo "  Controller: http://localhost:${CONTROLLER_PORT}/controller?token=${CONTROLLER_TOKEN}"
         else
-            echo "  Gateway:    http://${INSTANCE_NAME}.local:18789"
-            echo "  Controller: http://${INSTANCE_NAME}.local:8080/controller"
-        fi
-
-        # Check if hosts entry exists for this instance
-        if ! hosts_entry_exists "$INSTANCE_NAME"; then
-            prompt_add_hosts
+            echo "  Gateway:    http://localhost:${GATEWAY_PORT}"
+            echo "  Controller: http://localhost:${CONTROLLER_PORT}/controller"
         fi
         ;;
     stop)
@@ -251,22 +145,16 @@ case "${1:-help}" in
         ${COMPOSE_CMD} build --no-cache
         ${COMPOSE_CMD} up -d --force-recreate
         echo "✓ ClawFactory [${INSTANCE_NAME}] rebuilt and restarted"
-        if router_running; then
-            if [[ -n "$CONTROLLER_TOKEN" ]]; then
-                echo "  Gateway:    http://${INSTANCE_NAME}.local:18789/?token=${GATEWAY_TOKEN}"
-                echo "  Controller: http://${INSTANCE_NAME}.local:8080/controller?token=${CONTROLLER_TOKEN}"
-            else
-                echo "  Gateway:    http://${INSTANCE_NAME}.local:18789"
-                echo "  Controller: http://${INSTANCE_NAME}.local:8080/controller"
-            fi
+        if [[ -n "$GATEWAY_TOKEN" ]]; then
+            echo "  Gateway:    http://localhost:${GATEWAY_PORT}/?token=${GATEWAY_TOKEN}"
+            echo "  Controller: http://localhost:${CONTROLLER_PORT}/controller?token=${CONTROLLER_TOKEN}"
         else
-            echo ""
-            echo "  Note: Router not running. Start it for subdomain access:"
-            echo "    ./clawfactory.sh router start"
+            echo "  Gateway:    http://localhost:${GATEWAY_PORT}"
+            echo "  Controller: http://localhost:${CONTROLLER_PORT}/controller"
         fi
         ;;
     status)
-        ${COMPOSE_CMD} ps -a
+        docker ps -a --filter "name=clawfactory-" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
         ;;
     logs)
         container="${2:-gateway}"
@@ -278,35 +166,19 @@ case "${1:-help}" in
         ;;
     controller)
         echo "Controller UI for [${INSTANCE_NAME}]:"
-        if router_running; then
-            if [[ -n "$CONTROLLER_TOKEN" ]]; then
-                echo "http://${INSTANCE_NAME}.local:8080/controller?token=${CONTROLLER_TOKEN}"
-            else
-                echo "http://${INSTANCE_NAME}.local:8080/controller"
-            fi
+        if [[ -n "$CONTROLLER_TOKEN" ]]; then
+            echo "http://localhost:${CONTROLLER_PORT}/controller?token=${CONTROLLER_TOKEN}"
         else
-            echo "Router not running. Start it first:"
-            echo "  ./clawfactory.sh router start"
+            echo "http://localhost:${CONTROLLER_PORT}/controller"
         fi
         ;;
     audit)
-        if router_running; then
-            curl -s "http://${INSTANCE_NAME}.local:8080/controller/audit" | jq '.entries[-10:]'
-        else
-            echo "Router not running. Start it first:"
-            echo "  ./clawfactory.sh router start"
-        fi
+        curl -s "http://localhost:${CONTROLLER_PORT}/controller/audit" | jq '.entries[-10:]'
         ;;
     info)
         echo "Instance: ${INSTANCE_NAME}"
-        echo "Containers: ${CONTAINER_PREFIX}-{gateway,controller}"
-        echo "URL: http://${INSTANCE_NAME}.local:8080/controller"
-        if router_running; then
-            echo "Router: running"
-        else
-            echo "Router: stopped (run './clawfactory.sh router start')"
-        fi
-        # Show tokens if available
+        echo "Containers: ${CONTAINER_PREFIX}-{gateway,controller,proxy}"
+        echo "Ports: Gateway=${GATEWAY_PORT}, Controller=${CONTROLLER_PORT}"
         if [[ -f "${SCRIPT_DIR}/secrets/tokens.env" ]]; then
             source "${SCRIPT_DIR}/secrets/tokens.env"
             gw_var="${INSTANCE_NAME}_gateway_token"
@@ -322,8 +194,6 @@ case "${1:-help}" in
             echo "Error: Instance directory not found: $REPO_DIR"
             exit 1
         fi
-
-        # Load GitHub config from .env (save instance name first)
         SAVED_INSTANCE="${INSTANCE_NAME}"
         if [[ -f "${SCRIPT_DIR}/.env" ]]; then
             source "${SCRIPT_DIR}/.env"
@@ -351,7 +221,6 @@ case "${1:-help}" in
             if [[ -n "$GITHUB_OWNER" ]]; then
                 expected_remote="https://github.com/${GITHUB_OWNER}/${INSTANCE_NAME}-bot.git"
                 echo "Expected remote: $expected_remote"
-                # Strip credentials from current remote for comparison
                 current_clean=$(echo "$current_remote" | sed 's|https://[^@]*@|https://|')
                 if [[ "$current_clean" != "$expected_remote" && "$current_clean" != "${expected_remote%.git}" ]]; then
                     echo ""
@@ -364,54 +233,54 @@ case "${1:-help}" in
         ;;
     list)
         echo "Configured instances:"
-        if [[ -f "${SCRIPT_DIR}/secrets/tokens.env" ]]; then
-            grep '_gateway_token=' "${SCRIPT_DIR}/secrets/tokens.env" 2>/dev/null | sed 's/_gateway_token=.*//' | sort -u | sed 's/^/  /'
-        elif [[ -f "${SCRIPT_DIR}/.clawfactory.conf" ]]; then
-            source "${SCRIPT_DIR}/.clawfactory.conf"
-            echo "  ${INSTANCE_NAME:-default}"
+        if [[ -d "${SCRIPT_DIR}/secrets" ]]; then
+            for d in "${SCRIPT_DIR}"/secrets/*/; do
+                if [[ -d "$d" ]] && [[ -f "${d}controller.env" ]]; then
+                    name=$(basename "$d")
+                    gw_port=$(grep -E "^GATEWAY_PORT=" "${d}controller.env" 2>/dev/null | cut -d= -f2 || true)
+                    ctrl_port=$(grep -E "^CONTROLLER_PORT=" "${d}controller.env" 2>/dev/null | cut -d= -f2 || true)
+                    gw_port="${gw_port:-18789}"
+                    ctrl_port="${ctrl_port:-8080}"
+                    echo "  ${name}: localhost:${ctrl_port} (gateway: ${gw_port})"
+                fi
+            done
         else
             echo "  (none - run install.sh first)"
         fi
         echo ""
         echo "Running containers:"
-        docker ps --filter "name=clawfactory-" --format "table {{.Names}}\t{{.Status}}" 2>/dev/null || echo "  (none)"
+        docker ps --filter "name=clawfactory-" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null || echo "  (none)"
         ;;
     *)
-        echo "ClawFactory - Agent Runtime [${INSTANCE_NAME}]"
+        echo "ClawFactory - Agent Runtime"
         echo ""
-        echo "Usage: ./clawfactory.sh [-i <instance>] <command>"
+        echo "Usage: ./clawfactory.sh -i <instance> <command>"
         echo ""
         echo "Options:"
-        echo "  -i, --instance <name>   Specify instance (default: from .clawfactory.conf)"
+        echo "  -i, --instance <name>   Specify instance (required)"
         echo ""
         echo "Commands:"
         echo "  start           Start containers"
         echo "  stop            Stop all containers"
         echo "  restart         Restart all containers"
         echo "  rebuild         Rebuild images and restart"
-        echo "  status          Show container status"
-        echo "  logs [service]  Follow logs (gateway/controller)"
+        echo "  status          Show container status (all instances)"
+        echo "  logs [service]  Follow logs (gateway/proxy/controller)"
         echo "  shell [service] Open shell in container"
         echo "  controller      Show controller URL"
         echo "  audit           Show recent audit log"
         echo "  info            Show instance info and tokens"
         echo "  remote [fix]    Show/fix git remote URL"
-        echo "  list            List all instances and running containers"
-        echo "  router [start|stop]  Manage subdomain router"
-        echo "  hosts [add|check]    Manage /etc/hosts entries"
+        echo "  list            List all instances with ports"
+        echo ""
+        echo "Multi-instance setup:"
+        echo "  Add to secrets/<instance>/controller.env:"
+        echo "    GATEWAY_PORT=18790"
+        echo "    CONTROLLER_PORT=8081"
         echo ""
         echo "Examples:"
-        echo "  ./clawfactory.sh router start       # Start router (first time)"
-        echo "  ./clawfactory.sh hosts              # Show hosts file entry"
-        echo "  ./clawfactory.sh -i sandy start     # Start 'sandy' instance"
-        echo "  ./clawfactory.sh -i testbot start   # Start 'testbot' instance"
-        echo "  ./clawfactory.sh list               # List all instances"
-        echo ""
-        echo "Multi-instance access (via subdomains):"
-        echo "  1. ./clawfactory.sh router start"
-        echo "  2. Add to /etc/hosts: 127.0.0.1 sandy.local testbot.local"
-        echo "  3. Access: http://sandy.local:8080/controller"
-        echo ""
-        echo "Run './clawfactory.sh info' to see tokens"
+        echo "  ./clawfactory.sh -i testbot start"
+        echo "  ./clawfactory.sh -i sandy start"
+        echo "  ./clawfactory.sh list"
         ;;
 esac
