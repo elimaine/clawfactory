@@ -4,15 +4,43 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IPTABLES_BACKUP="${SCRIPT_DIR}/.iptables.backup"
 
+# Load sandbox mode
+SANDBOX_MODE="none"
+if [[ -f "${SCRIPT_DIR}/.clawfactory.conf" ]]; then
+    source "${SCRIPT_DIR}/.clawfactory.conf"
+fi
+# Backward compat
+if [[ -z "${SANDBOX_MODE:-}" ]]; then
+    if [[ "${SANDBOX_ENABLED:-false}" == "true" ]]; then
+        SANDBOX_MODE="sysbox"
+    else
+        SANDBOX_MODE="none"
+    fi
+fi
+
 case "${1:-}" in
     lock)
-        echo "🔒 KILL SWITCH ACTIVATED"
+        echo "KILL SWITCH ACTIVATED"
         echo ""
 
-        # Stop Docker stack
+        if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
+            # Firecracker mode: kill the entire VM
+            echo "Stopping Firecracker VM..."
+            if [[ -f "${SCRIPT_DIR}/sandbox/firecracker/vm.sh" ]]; then
+                source "${SCRIPT_DIR}/sandbox/firecracker/vm.sh"
+                fc_stop_vm 2>/dev/null || true
+            fi
+            # Also stop Lima VM for full isolation
+            if command -v limactl >/dev/null 2>&1; then
+                echo "Stopping Lima VM..."
+                limactl stop clawfactory-fc 2>/dev/null || true
+            fi
+        fi
+
+        # Stop Docker stack (regardless of mode — catch any running containers)
         echo "Stopping containers..."
         cd "${SCRIPT_DIR}"
-        docker compose down --timeout 5 || true
+        docker compose down --timeout 5 2>/dev/null || true
 
         # Save current iptables (macOS doesn't use iptables)
         if command -v iptables >/dev/null 2>&1; then
@@ -35,12 +63,15 @@ case "${1:-}" in
         fi
 
         echo ""
-        echo "✓ System locked. All containers stopped."
+        echo "System locked. All services stopped."
+        if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
+            echo "  Firecracker VM killed. Lima VM stopped."
+        fi
         echo "  Run './killswitch.sh restore' to restore."
         ;;
 
     restore)
-        echo "🔓 Restoring system..."
+        echo "Restoring system..."
 
         # Restore iptables
         if [[ -f "${IPTABLES_BACKUP}" ]] && command -v iptables >/dev/null 2>&1; then
@@ -49,13 +80,17 @@ case "${1:-}" in
             rm -f "${IPTABLES_BACKUP}"
         fi
 
-        # Restart Docker stack
-        echo "Starting containers..."
-        cd "${SCRIPT_DIR}"
-        docker compose up -d
+        if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
+            echo "Firecracker mode: use './clawfactory.sh -i <instance> start' to restart."
+        else
+            # Restart Docker stack
+            echo "Starting containers..."
+            cd "${SCRIPT_DIR}"
+            docker compose up -d
+        fi
 
         echo ""
-        echo "✓ System restored."
+        echo "System restored."
         ;;
 
     *)
@@ -63,5 +98,7 @@ case "${1:-}" in
         echo ""
         echo "  lock    - Stop everything, lock down network"
         echo "  restore - Restore normal operation"
+        echo ""
+        echo "  Current sandbox mode: ${SANDBOX_MODE}"
         ;;
 esac

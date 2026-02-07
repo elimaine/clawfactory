@@ -61,22 +61,36 @@ load_config() {
 
 # Save config file
 save_config() {
+    # Backward compat: migrate SANDBOX_ENABLED to SANDBOX_MODE
+    if [[ -z "${SANDBOX_MODE:-}" ]]; then
+        if [[ "${SANDBOX_ENABLED:-false}" == "true" ]]; then
+            SANDBOX_MODE="sysbox"
+        else
+            SANDBOX_MODE="none"
+        fi
+    fi
+
     cat > "$CONFIG_FILE" <<EOF
 # ClawFactory Instance Configuration
 INSTANCE_NAME="${INSTANCE_NAME:-}"
 GITHUB_USERNAME="${GITHUB_USERNAME:-}"
 GITHUB_ORG="${GITHUB_ORG:-}"
-SANDBOX_ENABLED="${SANDBOX_ENABLED:-false}"
+SANDBOX_MODE="${SANDBOX_MODE:-none}"
 EOF
 
     # Also save to .env for docker-compose
+    # Map SANDBOX_MODE back to SANDBOX_ENABLED for docker-compose compat
+    local sandbox_enabled="false"
+    [[ "${SANDBOX_MODE:-none}" == "sysbox" ]] && sandbox_enabled="true"
+
     cat > "${SCRIPT_DIR}/.env" <<EOF
 # Docker Compose environment (auto-generated)
 INSTANCE_NAME=${INSTANCE_NAME:-clawfactory}
 COMPOSE_PROJECT_NAME=clawfactory-${INSTANCE_NAME:-default}
 GITHUB_USERNAME=${GITHUB_USERNAME:-}
 GITHUB_ORG=${GITHUB_ORG:-}
-SANDBOX_ENABLED=${SANDBOX_ENABLED:-false}
+SANDBOX_ENABLED=${sandbox_enabled}
+SANDBOX_MODE=${SANDBOX_MODE:-none}
 EOF
 }
 
@@ -155,72 +169,120 @@ preflight() {
         info "  Install from: https://cli.github.com/"
     fi
 
-    # Check for Sysbox (optional, for sandbox support)
+    # Check for Sysbox (optional, for sandbox support on Linux)
     SYSBOX_AVAILABLE=false
     if docker info 2>/dev/null | grep -qi sysbox; then
         SYSBOX_AVAILABLE=true
         success "Sysbox runtime detected (sandbox support available)"
     else
-        info "Sysbox not detected (sandbox mode unavailable)"
-        info "  Install Sysbox for agent sandbox support:"
-        info "  https://github.com/nestybox/sysbox#installation"
+        info "Sysbox not detected"
+    fi
+
+    # Check for Lima (optional, for Firecracker sandbox on macOS)
+    LIMA_AVAILABLE=false
+    if command -v limactl >/dev/null 2>&1; then
+        LIMA_AVAILABLE=true
+        success "Lima detected (Firecracker sandbox available)"
+    else
+        info "Lima not detected"
     fi
 
     success "Core dependencies satisfied"
 }
 
 # ============================================================
-# Configure Sandbox Mode (requires Sysbox)
+# Configure Sandbox Mode
 # ============================================================
 configure_sandbox() {
     echo ""
     echo "=== Sandbox Mode ==="
     echo ""
 
-    # Sysbox only works on Linux
     if [[ "$(uname)" == "Darwin" ]]; then
-        echo "Sandbox mode is not available on macOS."
-        echo "Sysbox (required for sandboxing) only supports Linux."
+        # macOS: offer Firecracker or none
+        echo "Sandbox options for macOS:"
         echo ""
-        echo "Tools will run directly on the gateway container."
-        echo "For sandboxed execution, deploy on a Linux host."
+        echo "  1) Firecracker VM (recommended) - VM-level isolation via microVM"
+        echo "  2) None                         - tools run directly on gateway"
         echo ""
-        SANDBOX_ENABLED="false"
-        return
-    fi
 
-    if [[ "$SYSBOX_AVAILABLE" != "true" ]]; then
-        echo "Sysbox runtime is NOT installed."
-        echo "Sandbox mode allows the agent to run tools in isolated Docker containers."
+        if [[ "$LIMA_AVAILABLE" == "true" ]]; then
+            info "Lima is installed (required for Firecracker)"
+        else
+            info "Lima not installed - will be installed if you select Firecracker"
+        fi
         echo ""
-        echo "To enable sandbox mode later:"
-        echo "  1. Install Sysbox: https://github.com/nestybox/sysbox#installation"
-        echo "  2. Run: ./clawfactory.sh sandbox enable"
-        echo "  3. Run: ./clawfactory.sh rebuild"
-        echo ""
-        SANDBOX_ENABLED="false"
-        return
-    fi
 
-    echo "Sysbox is installed! You can enable sandbox mode."
-    echo ""
-    echo "Sandbox mode enables:"
-    echo "  - Isolated Docker containers for tool execution"
-    echo "  - Secure execution of untrusted code"
-    echo "  - OpenClaw's native sandbox feature"
-    echo ""
-    echo "Without sandbox mode:"
-    echo "  - Tools run directly on the gateway container"
-    echo "  - Less isolation but simpler setup"
-    echo ""
+        read -p "Select sandbox mode [1]: " sandbox_choice
+        sandbox_choice="${sandbox_choice:-1}"
 
-    read -p "Enable sandbox mode? [Y/n]: " enable_sandbox
-    if [[ "$enable_sandbox" =~ ^[Nn]$ ]]; then
-        SANDBOX_ENABLED="false"
-        info "Sandbox mode disabled"
+        case "$sandbox_choice" in
+            1)
+                SANDBOX_MODE="firecracker"
+                success "Sandbox mode: Firecracker VM"
+                echo ""
+                echo "Firecracker setup provisions a Lima VM with nested virtualization"
+                echo "and builds a rootfs with all ClawFactory dependencies."
+                echo "This takes several minutes on first run."
+                echo ""
+                read -p "Run Firecracker setup now? [Y/n]: " run_setup
+                if [[ ! "$run_setup" =~ ^[Nn]$ ]]; then
+                    bash "${SCRIPT_DIR}/sandbox/firecracker/setup.sh" setup
+                else
+                    echo ""
+                    info "Skipped. Run later with: ./sandbox/firecracker/setup.sh"
+                fi
+                ;;
+            *)
+                SANDBOX_MODE="none"
+                info "Sandbox mode: none (tools run directly on gateway)"
+                ;;
+        esac
     else
-        SANDBOX_ENABLED="true"
-        success "Sandbox mode enabled"
+        # Linux: offer Sysbox, Firecracker, or none
+        echo "Sandbox options:"
+        echo ""
+        if [[ "$SYSBOX_AVAILABLE" == "true" ]]; then
+            echo "  1) Sysbox (recommended)  - Docker-in-Docker with VM-like isolation"
+        else
+            echo "  1) Sysbox               - not installed (https://github.com/nestybox/sysbox)"
+        fi
+        echo "  2) Firecracker VM       - full microVM isolation"
+        echo "  3) None                 - tools run directly on gateway"
+        echo ""
+
+        read -p "Select sandbox mode [1]: " sandbox_choice
+        sandbox_choice="${sandbox_choice:-1}"
+
+        case "$sandbox_choice" in
+            1)
+                if [[ "$SYSBOX_AVAILABLE" != "true" ]]; then
+                    warn "Sysbox is not installed."
+                    echo "  Install from: https://github.com/nestybox/sysbox#installation"
+                    echo "  Then re-run this installer."
+                    SANDBOX_MODE="none"
+                else
+                    SANDBOX_MODE="sysbox"
+                    success "Sandbox mode: Sysbox"
+                fi
+                ;;
+            2)
+                SANDBOX_MODE="firecracker"
+                success "Sandbox mode: Firecracker VM"
+                echo ""
+                read -p "Run Firecracker setup now? [Y/n]: " run_setup
+                if [[ ! "$run_setup" =~ ^[Nn]$ ]]; then
+                    bash "${SCRIPT_DIR}/sandbox/firecracker/setup.sh" setup
+                else
+                    echo ""
+                    info "Skipped. Run later with: ./sandbox/firecracker/setup.sh"
+                fi
+                ;;
+            *)
+                SANDBOX_MODE="none"
+                info "Sandbox mode: none"
+                ;;
+        esac
     fi
 }
 
@@ -501,9 +563,9 @@ create_state_config() {
       }'
     fi
 
-    # Build sandbox config based on SANDBOX_ENABLED
+    # Build sandbox config based on SANDBOX_MODE
     local sandbox_mode="off"
-    if [[ "${SANDBOX_ENABLED:-false}" == "true" ]]; then
+    if [[ "${SANDBOX_MODE:-none}" != "none" ]]; then
         sandbox_mode="non-main"  # Sandbox non-main sessions (default safe mode)
     fi
 
@@ -1694,11 +1756,11 @@ main() {
     success "Installation complete!"
     echo ""
     echo "Instance: ${INSTANCE_NAME}"
-    if [[ "${SANDBOX_ENABLED:-false}" == "true" ]]; then
-        echo "Sandbox: enabled (Sysbox)"
-    else
-        echo "Sandbox: disabled"
-    fi
+    case "${SANDBOX_MODE:-none}" in
+        sysbox)      echo "Sandbox: Sysbox (Docker-in-Docker isolation)" ;;
+        firecracker) echo "Sandbox: Firecracker microVM" ;;
+        *)           echo "Sandbox: none (tools run directly on gateway)" ;;
+    esac
     echo ""
     echo "Next steps:"
     echo "  1. Run: ./clawfactory.sh start"

@@ -8,6 +8,15 @@ if [[ -f "${SCRIPT_DIR}/.clawfactory.conf" ]]; then
     source "${SCRIPT_DIR}/.clawfactory.conf"
 fi
 
+# Backward compat: SANDBOX_ENABLED=true -> SANDBOX_MODE=sysbox
+if [[ -z "${SANDBOX_MODE:-}" ]]; then
+    if [[ "${SANDBOX_ENABLED:-false}" == "true" ]]; then
+        SANDBOX_MODE="sysbox"
+    else
+        SANDBOX_MODE="none"
+    fi
+fi
+
 # Parse -i/--instance flag
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -56,6 +65,19 @@ if [[ -f "$CONTROLLER_ENV" ]]; then
 fi
 export GATEWAY_PORT CONTROLLER_PORT
 
+# Source Firecracker helpers if in firecracker mode
+if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
+    if [[ -f "${SCRIPT_DIR}/sandbox/firecracker/vm.sh" ]]; then
+        source "${SCRIPT_DIR}/sandbox/firecracker/vm.sh"
+    else
+        echo "Error: sandbox/firecracker/vm.sh not found" >&2
+        echo "Run ./sandbox/firecracker/setup.sh first." >&2
+        exit 1
+    fi
+fi
+
+# --- Docker-mode helpers (non-firecracker) ---
+
 # Check if a port is in use by another clawfactory instance
 port_in_use() {
     local port="$1"
@@ -83,7 +105,7 @@ ensure_ports() {
     # If both ports are set, check if they're available
     if [[ "$has_gw_port" == "yes" && "$has_ctrl_port" == "yes" ]]; then
         if port_in_use "$GATEWAY_PORT" || port_in_use "$CONTROLLER_PORT"; then
-            echo "⚠ Configured ports ($CONTROLLER_PORT/$GATEWAY_PORT) are in use by another instance"
+            echo "Warning: Configured ports ($CONTROLLER_PORT/$GATEWAY_PORT) are in use by another instance"
             echo "  Stop the other instance or update ports in: $env_file"
             return 1
         fi
@@ -119,50 +141,103 @@ ensure_ports() {
     export GATEWAY_PORT CONTROLLER_PORT
 }
 
+# --- Helper to print access URLs ---
+print_urls() {
+    if [[ -n "$GATEWAY_TOKEN" ]]; then
+        echo "  Gateway:    http://localhost:${GATEWAY_PORT}/?token=${GATEWAY_TOKEN}"
+        echo "  Controller: http://localhost:${CONTROLLER_PORT}/controller?token=${CONTROLLER_TOKEN}"
+    else
+        echo "  Gateway:    http://localhost:${GATEWAY_PORT}"
+        echo "  Controller: http://localhost:${CONTROLLER_PORT}/controller"
+    fi
+}
+
+# ============================================================
+# Command dispatch
+# ============================================================
 case "${1:-help}" in
     start)
-        ensure_ports || exit 1
-        ${COMPOSE_CMD} up -d
-        echo "✓ ClawFactory [${INSTANCE_NAME}] started"
-        if [[ -n "$GATEWAY_TOKEN" ]]; then
-            echo "  Gateway:    http://localhost:${GATEWAY_PORT}/?token=${GATEWAY_TOKEN}"
-            echo "  Controller: http://localhost:${CONTROLLER_PORT}/controller?token=${CONTROLLER_TOKEN}"
+        if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
+            fc_ensure_lima
+            fc_setup_network
+            fc_start_vm
+            fc_sync
+            fc_build
+            fc_services start
+            fc_forward_ports
+            echo ""
+            echo "ClawFactory [${INSTANCE_NAME}] started (Firecracker VM)"
+            print_urls
         else
-            echo "  Gateway:    http://localhost:${GATEWAY_PORT}"
-            echo "  Controller: http://localhost:${CONTROLLER_PORT}/controller"
+            ensure_ports || exit 1
+            ${COMPOSE_CMD} up -d
+            echo "ClawFactory [${INSTANCE_NAME}] started"
+            print_urls
         fi
         ;;
     stop)
-        ${COMPOSE_CMD} down
-        echo "✓ ClawFactory [${INSTANCE_NAME}] stopped"
+        if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
+            fc_services stop
+            fc_stop_vm
+            echo "ClawFactory [${INSTANCE_NAME}] stopped (Firecracker VM)"
+        else
+            ${COMPOSE_CMD} down
+            echo "ClawFactory [${INSTANCE_NAME}] stopped"
+        fi
         ;;
     restart)
-        ${COMPOSE_CMD} up -d --force-recreate
-        echo "✓ ClawFactory [${INSTANCE_NAME}] restarted"
+        if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
+            fc_services restart
+            echo "ClawFactory [${INSTANCE_NAME}] restarted (Firecracker VM)"
+        else
+            ${COMPOSE_CMD} up -d --force-recreate
+            echo "ClawFactory [${INSTANCE_NAME}] restarted"
+        fi
         ;;
     rebuild)
-        echo "Rebuilding ClawFactory [${INSTANCE_NAME}]..."
-        ${COMPOSE_CMD} build --no-cache
-        ${COMPOSE_CMD} up -d --force-recreate
-        echo "✓ ClawFactory [${INSTANCE_NAME}] rebuilt and restarted"
-        if [[ -n "$GATEWAY_TOKEN" ]]; then
-            echo "  Gateway:    http://localhost:${GATEWAY_PORT}/?token=${GATEWAY_TOKEN}"
-            echo "  Controller: http://localhost:${CONTROLLER_PORT}/controller?token=${CONTROLLER_TOKEN}"
+        if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
+            echo "Rebuilding ClawFactory [${INSTANCE_NAME}] in Firecracker VM..."
+            fc_sync
+            fc_build
+            fc_services restart
+            echo "ClawFactory [${INSTANCE_NAME}] rebuilt and restarted"
+            print_urls
         else
-            echo "  Gateway:    http://localhost:${GATEWAY_PORT}"
-            echo "  Controller: http://localhost:${CONTROLLER_PORT}/controller"
+            echo "Rebuilding ClawFactory [${INSTANCE_NAME}]..."
+            ${COMPOSE_CMD} build --no-cache
+            ${COMPOSE_CMD} up -d --force-recreate
+            echo "ClawFactory [${INSTANCE_NAME}] rebuilt and restarted"
+            print_urls
         fi
         ;;
     status)
-        docker ps -a --filter "name=clawfactory-" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+        if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
+            fc_status
+        else
+            docker ps -a --filter "name=clawfactory-" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+        fi
         ;;
     logs)
-        container="${2:-gateway}"
-        docker logs -f "${CONTAINER_PREFIX}-${container}"
+        service="${2:-gateway}"
+        if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
+            case "$service" in
+                gateway)    fc_exec "journalctl -u openclaw-gateway -f --no-pager" ;;
+                controller) fc_exec "journalctl -u clawfactory-controller -f --no-pager" ;;
+                proxy)      fc_exec "journalctl -u nginx -f --no-pager" ;;
+                docker)     fc_exec "journalctl -u docker -f --no-pager" ;;
+                *)          fc_exec "journalctl -u $service -f --no-pager" ;;
+            esac
+        else
+            docker logs -f "${CONTAINER_PREFIX}-${service}"
+        fi
         ;;
     shell)
-        container="${2:-gateway}"
-        docker exec -it "${CONTAINER_PREFIX}-${container}" /bin/bash
+        if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
+            fc_ssh
+        else
+            container="${2:-gateway}"
+            docker exec -it "${CONTAINER_PREFIX}-${container}" /bin/bash
+        fi
         ;;
     controller)
         echo "Controller UI for [${INSTANCE_NAME}]:"
@@ -177,7 +252,13 @@ case "${1:-help}" in
         ;;
     info)
         echo "Instance: ${INSTANCE_NAME}"
-        echo "Containers: ${CONTAINER_PREFIX}-{gateway,controller,proxy}"
+        echo "Sandbox:  ${SANDBOX_MODE}"
+        if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
+            echo "Mode:     Firecracker microVM"
+        else
+            echo "Mode:     Docker Compose"
+            echo "Containers: ${CONTAINER_PREFIX}-{gateway,controller,proxy}"
+        fi
         echo "Ports: Gateway=${GATEWAY_PORT}, Controller=${CONTROLLER_PORT}"
         if [[ -f "${SCRIPT_DIR}/secrets/tokens.env" ]]; then
             source "${SCRIPT_DIR}/secrets/tokens.env"
@@ -216,7 +297,7 @@ case "${1:-help}" in
             echo "Setting remote to: $expected_remote"
             git -C "$REPO_DIR" remote set-url origin "$expected_remote" 2>/dev/null || \
                 git -C "$REPO_DIR" remote add origin "$expected_remote"
-            echo "✓ Remote updated"
+            echo "Remote updated"
         else
             if [[ -n "$GITHUB_OWNER" ]]; then
                 expected_remote="https://github.com/${GITHUB_OWNER}/${INSTANCE_NAME}-bot.git"
@@ -224,15 +305,17 @@ case "${1:-help}" in
                 current_clean=$(echo "$current_remote" | sed 's|https://[^@]*@|https://|')
                 if [[ "$current_clean" != "$expected_remote" && "$current_clean" != "${expected_remote%.git}" ]]; then
                     echo ""
-                    echo "⚠ Remote mismatch! Run './clawfactory.sh -i ${INSTANCE_NAME} remote fix' to correct"
+                    echo "Remote mismatch! Run './clawfactory.sh -i ${INSTANCE_NAME} remote fix' to correct"
                 else
-                    echo "✓ Remote is correct"
+                    echo "Remote is correct"
                 fi
             fi
         fi
         ;;
     list)
         echo "Configured instances:"
+        echo "  Sandbox mode: ${SANDBOX_MODE}"
+        echo ""
         if [[ -d "${SCRIPT_DIR}/secrets" ]]; then
             for d in "${SCRIPT_DIR}"/secrets/*/; do
                 if [[ -d "$d" ]] && [[ -f "${d}controller.env" ]]; then
@@ -248,39 +331,78 @@ case "${1:-help}" in
             echo "  (none - run install.sh first)"
         fi
         echo ""
-        echo "Running containers:"
-        docker ps --filter "name=clawfactory-" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null || echo "  (none)"
+        if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
+            echo "Firecracker VM status:"
+            fc_status 2>/dev/null || echo "  Not running"
+        else
+            echo "Running containers:"
+            docker ps --filter "name=clawfactory-" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null || echo "  (none)"
+        fi
+        ;;
+    firecracker)
+        subcmd="${2:-help}"
+        case "$subcmd" in
+            setup)
+                bash "${SCRIPT_DIR}/sandbox/firecracker/setup.sh" setup
+                ;;
+            ssh)
+                if [[ "$SANDBOX_MODE" != "firecracker" ]]; then
+                    echo "Error: SANDBOX_MODE is '${SANDBOX_MODE}', not 'firecracker'" >&2
+                    exit 1
+                fi
+                fc_ensure_lima
+                fc_ssh
+                ;;
+            teardown)
+                bash "${SCRIPT_DIR}/sandbox/firecracker/setup.sh" teardown
+                ;;
+            status)
+                if [[ "$SANDBOX_MODE" != "firecracker" ]]; then
+                    echo "Error: SANDBOX_MODE is '${SANDBOX_MODE}', not 'firecracker'" >&2
+                    exit 1
+                fi
+                fc_status
+                ;;
+            *)
+                echo "Firecracker sandbox commands:"
+                echo ""
+                echo "  ./clawfactory.sh firecracker setup     Provision Lima + Firecracker"
+                echo "  ./clawfactory.sh firecracker ssh        SSH into Firecracker VM"
+                echo "  ./clawfactory.sh firecracker status     Show VM + service status"
+                echo "  ./clawfactory.sh firecracker teardown   Remove Lima VM and all data"
+                ;;
+        esac
         ;;
     *)
         echo "ClawFactory - Agent Runtime"
         echo ""
-        echo "Usage: ./clawfactory.sh -i <instance> <command>"
+        echo "Usage: ./clawfactory.sh [-i <instance>] <command>"
         echo ""
         echo "Options:"
         echo "  -i, --instance <name>   Specify instance (required)"
         echo ""
         echo "Commands:"
-        echo "  start           Start containers"
-        echo "  stop            Stop all containers"
-        echo "  restart         Restart all containers"
-        echo "  rebuild         Rebuild images and restart"
-        echo "  status          Show container status (all instances)"
+        echo "  start           Start services"
+        echo "  stop            Stop all services"
+        echo "  restart         Restart services"
+        echo "  rebuild         Rebuild and restart"
+        echo "  status          Show service status"
         echo "  logs [service]  Follow logs (gateway/proxy/controller)"
-        echo "  shell [service] Open shell in container"
+        echo "  shell [service] Open shell (Firecracker: VM shell)"
         echo "  controller      Show controller URL"
         echo "  audit           Show recent audit log"
         echo "  info            Show instance info and tokens"
         echo "  remote [fix]    Show/fix git remote URL"
-        echo "  list            List all instances with ports"
+        echo "  list            List all instances"
+        echo "  firecracker     Firecracker sandbox management"
         echo ""
-        echo "Multi-instance setup:"
-        echo "  Add to secrets/<instance>/controller.env:"
-        echo "    GATEWAY_PORT=18790"
-        echo "    CONTROLLER_PORT=8081"
+        echo "Sandbox mode: ${SANDBOX_MODE}"
         echo ""
         echo "Examples:"
-        echo "  ./clawfactory.sh -i testbot start"
         echo "  ./clawfactory.sh -i sandy start"
+        echo "  ./clawfactory.sh -i sandy logs gateway"
+        echo "  ./clawfactory.sh -i sandy stop"
+        echo "  ./clawfactory.sh firecracker ssh"
         echo "  ./clawfactory.sh list"
         ;;
 esac

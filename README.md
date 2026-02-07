@@ -33,22 +33,29 @@ Supported channels: Discord, Telegram, Slack (more via OpenClaw extensions)
 - **GitHub CLI** (`gh`) - authenticated with `gh auth login`
 - API keys for your chosen providers - see [API Key Guide](docs/API-KEYS.md)
 
-### Optional: Sysbox (for Sandbox Mode, Linux only)
+### Sandbox Options
 
-To enable OpenClaw's sandbox feature (isolated Docker containers for tool execution), install [Sysbox](https://github.com/nestybox/sysbox).
+| Mode | Platform | Isolation | Setup |
+|------|----------|-----------|-------|
+| `none` | Any | Container only | Default, no extra deps |
+| `sysbox` | Linux only | Docker-in-Docker | Install [Sysbox](https://github.com/nestybox/sysbox) |
+| `firecracker` | macOS (Apple Silicon) | Full microVM | `./sandbox/firecracker/setup.sh` |
 
-**Note**: Sysbox only supports Linux. On macOS, tools run directly on the gateway container.
+The installer detects your platform and offers the appropriate options.
+
+#### Sysbox (Linux)
 
 ```bash
-# Ubuntu/Debian (amd64)
 wget https://downloads.nestybox.com/sysbox/releases/v0.6.4/sysbox-ce_0.6.4-0.linux_amd64.deb
 sudo dpkg -i sysbox-ce_0.6.4-0.linux_amd64.deb
-
-# Verify installation
 docker info | grep -i sysbox
 ```
 
-Without Sysbox, tools run directly on the gateway container (less isolation but simpler setup).
+#### Firecracker (macOS)
+
+> **Warning:** Firecracker sandbox support is experimental and may be unstable.
+
+Provides VM-level isolation via Firecracker microVMs running inside a Lima VM with nested virtualization. See [Firecracker Architecture](#firecracker-architecture-macos) below.
 
 ## Architecture
 
@@ -85,6 +92,57 @@ GitHub: your-org/{instance}-bot (fork of openclaw/openclaw)
              ├── memory/           ← memory markdown (git tracked)
              └── {instance}_save/  ← bot's declarative state
                  └── package.json  ← dependencies (installed on startup)
+```
+
+### Firecracker Architecture (macOS)
+
+> **Warning:** Experimental — may be unstable. Tested on Apple Silicon only.
+
+When `SANDBOX_MODE=firecracker`, services run natively inside a Firecracker microVM instead of Docker containers. Docker is only used inside the VM for OpenClaw's tool sandbox.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  macOS Host                                             │
+│                                                         │
+│  ┌───────────────────────────────────────────────────┐  │
+│  │  Lima VM (VZ framework, nested virtualization)    │  │
+│  │                                                   │  │
+│  │  socat :18789 ──► 172.16.0.2:80                   │  │
+│  │  socat :8080  ──► 172.16.0.2:8080                 │  │
+│  │                                                   │  │
+│  │  ┌─────────────────────────────────────────────┐  │  │
+│  │  │  Firecracker microVM (172.16.0.2)           │  │  │
+│  │  │                                             │  │  │
+│  │  │  systemd                                    │  │  │
+│  │  │  ├── nginx          :80 → :18789, :8081     │  │  │
+│  │  │  ├── node gateway   :18789                  │  │  │
+│  │  │  ├── python ctrl    :8081                   │  │  │
+│  │  │  └── dockerd        (tool sandbox only)     │  │  │
+│  │  │                                             │  │  │
+│  │  │  /srv/clawfactory/  (synced from host)      │  │  │
+│  │  └─────────────────────────────────────────────┘  │  │
+│  └───────────────────────────────────────────────────┘  │
+│                                                         │
+│  [Kill Switch] ── stops Lima VM entirely                │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Resource scaling:** During setup you choose how many concurrent instances to run. Memory, CPUs, and disk scale automatically:
+
+| Instances | Firecracker RAM | Lima RAM | vCPUs | Rootfs |
+|-----------|----------------|----------|-------|--------|
+| 1         | 4 GiB          | 5 GiB   | 3     | 6 GiB  |
+| 2         | 6 GiB          | 7 GiB   | 4     | 8 GiB  |
+| 3         | 8 GiB          | 9 GiB   | 5     | 10 GiB |
+
+**Security:** The VM password is randomly generated at setup and stored in `secrets/firecracker.password` (mode 600). The VM is only reachable via a point-to-point TAP interface inside Lima. If an agent escapes its Docker sandbox, it is still contained within the Firecracker microVM. The kill switch stops the entire Lima VM.
+
+```bash
+# Firecracker commands
+./clawfactory.sh firecracker setup      # Provision Lima + Firecracker
+./clawfactory.sh firecracker ssh        # SSH into the microVM
+./clawfactory.sh firecracker status     # Show VM + service status
+./clawfactory.sh firecracker teardown   # Remove everything
 ```
 
 ## Directory Structure
@@ -213,7 +271,9 @@ secrets/
 | `secrets/<instance>/controller.env` | GitHub webhook secret, Controller token |
 | `secrets/<instance>/snapshot.key` | Age private key for encrypted snapshots |
 | `secrets/tokens.env` | Token registry for all instances |
-| `.clawfactory.conf` | Default instance name |
+| `secrets/firecracker.password` | Generated VM root password (firecracker mode) |
+| `secrets/firecracker.sizing` | VM resource sizing config (firecracker mode) |
+| `.clawfactory.conf` | Instance config (`SANDBOX_MODE`, etc.) |
 
 Tokens are auto-generated by `install.sh`. To view them:
 ```bash
@@ -246,10 +306,16 @@ Tokens are auto-generated by `install.sh`. To view them:
 ./clawfactory.sh -i bot1 stop       # Stop 'bot1' instance
 ./clawfactory.sh -i bot1 info       # Show 'bot1' info and tokens
 
-# Sandbox management (requires Sysbox)
-./clawfactory.sh sandbox            # Show sandbox status
-./clawfactory.sh sandbox enable     # Enable sandbox mode
-./clawfactory.sh sandbox disable    # Disable sandbox mode
+# Sandbox management
+./clawfactory.sh sandbox            # Show sandbox status (sysbox mode)
+./clawfactory.sh sandbox enable     # Enable sysbox sandbox mode
+./clawfactory.sh sandbox disable    # Disable sysbox sandbox mode
+
+# Firecracker sandbox (macOS)
+./clawfactory.sh firecracker setup     # Provision Lima + Firecracker
+./clawfactory.sh firecracker ssh       # SSH into VM
+./clawfactory.sh firecracker status    # VM + service status
+./clawfactory.sh firecracker teardown  # Remove everything
 ```
 
 ## Promotion Flow
@@ -386,7 +452,7 @@ The Controller dashboard includes a Gateway Config editor with:
 
 1. Bot proposes changes via git branches, cannot merge to main itself
 2. Bot cannot promote itself (requires human merge or UI action)
-3. Gateway sandbox cannot escalate to host (Sysbox provides nested container isolation)
+3. Gateway sandbox cannot escalate to host (Sysbox on Linux, Firecracker microVM on macOS)
 4. Chat messages are not authority signals
 5. Kill switch always wins
 6. Sensitive state is encrypted (snapshots use age encryption)
