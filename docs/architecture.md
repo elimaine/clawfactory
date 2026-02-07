@@ -15,12 +15,18 @@ ClawFactory is a launch platform for autonomous agents. Three subsystems work to
 │  │  ┌─────────┐    ┌───────────────┐    ┌──────────────┐   ││
 │  │  │  Proxy  │───►│    Gateway    │    │  Controller  │   ││
 │  │  │ (nginx) │    │   (OpenClaw)  │    │   (FastAPI)  │   ││
-│  │  │         │───►│               │    │              │   ││
-│  │  └────┬────┘    │ • Channels    │    │ • Webhooks   │   ││
-│  │       │         │ • LLM calls   │    │ • Promotion  │   ││
-│  │       │         │ • Sandbox     │    │ • Snapshots  │   ││
-│  │  localhost      │ • Memory      │    │ • Pairing    │   ││
-│  │  :18789/:8080   └───────────────┘    └──────────────┘   ││
+│  │  │         │───►│    │          │    │              │   ││
+│  │  └────┬────┘    │    │ LLM calls│    │ • Webhooks   │   ││
+│  │       │         │    ▼          │    │ • Promotion  │   ││
+│  │       │         └────┼──────────┘    │ • Snapshots  │   ││
+│  │  localhost           │               │ • Traffic UI │   ││
+│  │  :18789/:8080   ┌────▼──────────┐    └──────────────┘   ││
+│  │                 │  LLM Proxy   │         ▲              ││
+│  │                 │  :9090       │         │ reads        ││
+│  │                 │  ──► Anthropic│    audit/traffic.jsonl ││
+│  │                 │  ──► OpenAI  │─────────┘              ││
+│  │                 │  ──► Gemini  │                        ││
+│  │                 └──────────────┘                        ││
 │  └──────────────────────────────────────────────────────────┘│
 │                                                              │
 │  ┌──────────────────────────────────────────────────────────┐│
@@ -43,7 +49,7 @@ GitHub: your-org/{instance}-bot (fork of openclaw/openclaw)
 
 ### Lima Mode (macOS)
 
-When `SANDBOX_MODE=lima`, the entire agent stack runs as systemd services inside a Lima VM with near-native VZ framework networking. No Docker overhead for the core services — Docker only runs inside the VM for OpenClaw's built-in tool sandbox. See [Sandbox](sandbox.md) for the full breakdown.
+When `SANDBOX_MODE=lima`, the entire agent stack runs as systemd services inside a Lima VM with near-native VZ framework networking. Files sync from host to VM via rsync over SSH. No Docker overhead for the core services — Docker only runs inside the VM for OpenClaw's built-in tool sandbox. See [Sandbox](sandbox.md) for the full breakdown.
 
 ## Subsystems
 
@@ -53,6 +59,7 @@ Each subsystem has strict boundaries — they can only write to what they own.
 |-----------|------|------------|--------------|
 | **Proxy** | Front door, routes all traffic | localhost:18789, :8080 | None |
 | **Gateway** | The agent itself — runs OpenClaw | Internal network | approved/ (git branches), state/ |
+| **LLM Proxy** | Logs outbound AI API calls | Internal :9090 | audit/traffic.jsonl |
 | **Controller** | Human authority layer | Internal network | approved/ (git pull), snapshots/ |
 
 ## Directory Layout

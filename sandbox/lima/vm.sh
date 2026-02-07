@@ -24,6 +24,10 @@ _lima_root() {
     limactl shell "$LIMA_VM_NAME" -- sudo bash -c "$1"
 }
 
+# SSH config for host-to-VM rsync (not running rsync inside the VM)
+LIMA_SSH_CONFIG="${HOME}/.lima/${LIMA_VM_NAME}/ssh.config"
+LIMA_SSH_HOST="lima-${LIMA_VM_NAME}"
+
 # ============================================================
 # lima_ensure — Start Lima VM if not running
 # ============================================================
@@ -59,46 +63,45 @@ for vm in json.loads(sys.stdin.read().rstrip().replace('}\n{', '},{')):
 # ============================================================
 lima_sync() {
     local instance="${INSTANCE_NAME:-default}"
+
+    # Pull snapshots from VM before syncing (so we don't lose any)
+    _lima_snapshot_pull "$instance"
+
     echo "Syncing files to Lima VM (instance: ${instance})..."
 
     local cf_root="${SCRIPT_DIR}"
     local staging="/tmp/cf-sync"
+    local rsh="ssh -F ${LIMA_SSH_CONFIG}"
 
-    _lima_exec mkdir -p "$staging"
+    _lima_exec mkdir -p "${staging}/controller" "${staging}/proxy"
 
-    # Sync controller
-    _lima_exec rsync -a --delete \
-        --exclude '__pycache__' \
-        "${cf_root}/controller/" "${staging}/controller/" 2>/dev/null || \
-    limactl copy --recursive \
-        "${cf_root}/controller" \
-        "${LIMA_VM_NAME}:${staging}/controller"
+    # Sync controller (host → VM over SSH)
+    rsync -a --delete --exclude '__pycache__' \
+        -e "$rsh" \
+        "${cf_root}/controller/" "${LIMA_SSH_HOST}:${staging}/controller/"
 
     # Sync proxy config
-    _lima_exec rsync -a --delete \
-        "${cf_root}/proxy/" "${staging}/proxy/" 2>/dev/null || \
-    limactl copy --recursive \
-        "${cf_root}/proxy" \
-        "${LIMA_VM_NAME}:${staging}/proxy"
+    rsync -a --delete \
+        -e "$rsh" \
+        "${cf_root}/proxy/" "${LIMA_SSH_HOST}:${staging}/proxy/"
 
     # Sync bot_repos for this instance
     if [[ -d "${cf_root}/bot_repos/${instance}" ]]; then
-        _lima_exec mkdir -p "${staging}/bot_repos/${instance}"
-        _lima_exec rsync -a --delete \
+        _lima_exec mkdir -p "${staging}/bot_repos/${instance}/approved"
+
+        rsync -a --delete \
             --exclude '.git' \
             --exclude 'node_modules' \
             --exclude '.DS_Store' \
+            -e "$rsh" \
             "${cf_root}/bot_repos/${instance}/approved/" \
-            "${staging}/bot_repos/${instance}/approved/" 2>/dev/null || \
-        limactl copy --recursive \
-            "${cf_root}/bot_repos/${instance}/approved" \
-            "${LIMA_VM_NAME}:${staging}/bot_repos/${instance}/approved"
+            "${LIMA_SSH_HOST}:${staging}/bot_repos/${instance}/approved/"
 
         # Sync state directory (OpenClaw config, credentials, identity)
         # Uses --update so VM-side changes aren't overwritten by stale host files
         if [[ -d "${cf_root}/bot_repos/${instance}/state" ]]; then
             _lima_exec mkdir -p "${staging}/bot_repos/${instance}/state"
-            _lima_exec rsync -a --update \
+            rsync -a --update \
                 --exclude '.DS_Store' \
                 --exclude '.obsidian' \
                 --exclude 'installed' \
@@ -107,26 +110,22 @@ lima_sync() {
                 --exclude 'workspace' \
                 --exclude 'media' \
                 --exclude 'update-check.json' \
+                -e "$rsh" \
                 "${cf_root}/bot_repos/${instance}/state/" \
-                "${staging}/bot_repos/${instance}/state/" 2>/dev/null || \
-            limactl copy --recursive \
-                "${cf_root}/bot_repos/${instance}/state" \
-                "${LIMA_VM_NAME}:${staging}/bot_repos/${instance}/state"
+                "${LIMA_SSH_HOST}:${staging}/bot_repos/${instance}/state/"
         fi
     fi
 
     # Sync secrets for this instance (restricted permissions)
     if [[ -d "${cf_root}/secrets/${instance}" ]]; then
         _lima_exec mkdir -p "${staging}/secrets/${instance}"
-        _lima_exec rsync -a \
+        rsync -a \
+            -e "$rsh" \
             "${cf_root}/secrets/${instance}/" \
-            "${staging}/secrets/${instance}/" 2>/dev/null || \
-        limactl copy --recursive \
-            "${cf_root}/secrets/${instance}" \
-            "${LIMA_VM_NAME}:${staging}/secrets/${instance}"
+            "${LIMA_SSH_HOST}:${staging}/secrets/${instance}/"
     fi
 
-    # Deploy to /srv/clawfactory
+    # Deploy from staging to /srv/clawfactory (runs inside VM)
     _lima_root "
         rsync -a --delete \
             --exclude 'node_modules' \
@@ -145,7 +144,44 @@ lima_sync() {
     "
 
     # Keep staging for build step
+
+    # Migrate Docker-era paths in state config
+    _lima_fix_docker_paths "$instance"
+
     echo "Files synced"
+}
+
+# ============================================================
+# _lima_fix_docker_paths — Fix paths left over from Docker mode
+# ============================================================
+_lima_fix_docker_paths() {
+    local instance="$1"
+    local state_dir="${LIMA_SRV}/bot_repos/${instance}/state"
+
+    _lima_root "
+        changed=false
+
+        # Fix all JSON files that may contain Docker-era paths:
+        #   openclaw.json, agents/*/sessions/sessions.json, etc.
+        for f in \$(find ${state_dir} -name '*.json' ! -name '*.bak*' 2>/dev/null); do
+            if grep -q '/home/node' \"\$f\" 2>/dev/null; then
+                sed -i 's|/home/node/.openclaw/workspace|${state_dir}/workspace|g' \"\$f\"
+                sed -i 's|/home/node/.openclaw|${state_dir}|g' \"\$f\"
+                sed -i 's|/home/node|/home/openclaw-${instance}|g' \"\$f\"
+                changed=true
+            fi
+            if grep -q 'host.docker.internal' \"\$f\" 2>/dev/null; then
+                sed -i 's|host.docker.internal|127.0.0.1|g' \"\$f\"
+                changed=true
+            fi
+        done
+
+        if [ \"\$changed\" = true ]; then
+            mkdir -p ${state_dir}/workspace
+            chown -R openclaw-${instance}:openclaw-${instance} ${state_dir}/workspace 2>/dev/null || true
+            echo '[sync] Migrated Docker-era paths in state files'
+        fi
+    "
 }
 
 # ============================================================
@@ -198,6 +234,13 @@ lima_build() {
             pnpm build 2>/dev/null || npm run build
         "
         echo "[build] OpenClaw built"
+
+        echo "[build] Building Control UI..."
+        _lima_root "
+            cd ${LIMA_SRV}/bot_repos/${instance}/approved
+            pnpm ui:build 2>/dev/null || npm run ui:build 2>/dev/null || echo '[build] No ui:build script found (skipped)'
+        "
+        echo "[build] Control UI built"
     else
         echo "[build] No package.json found, skipping Node.js build"
     fi
@@ -239,11 +282,35 @@ lima_services() {
         chown -R ${svc_user}:${svc_user} ${LIMA_SRV}/bot_repos/${instance}/
         chmod 700 ${LIMA_SRV}/bot_repos/${instance}/
 
-        # Secrets readable only by this instance's user + root
+        # Secrets: split permissions so gateway can't read admin token
         if [ -d ${LIMA_SRV}/secrets/${instance} ]; then
-            chown -R root:${svc_user} ${LIMA_SRV}/secrets/${instance}/
+            chown root:${svc_user} ${LIMA_SRV}/secrets/${instance}/
             chmod 750 ${LIMA_SRV}/secrets/${instance}/
-            chmod 640 ${LIMA_SRV}/secrets/${instance}/*.env 2>/dev/null || true
+
+            # controller.env: root-only (admin token, GitHub tokens)
+            if [ -f ${LIMA_SRV}/secrets/${instance}/controller.env ]; then
+                chown root:root ${LIMA_SRV}/secrets/${instance}/controller.env
+                chmod 600 ${LIMA_SRV}/secrets/${instance}/controller.env
+            fi
+
+            # gateway.env: readable by gateway user (API keys, internal token)
+            if [ -f ${LIMA_SRV}/secrets/${instance}/gateway.env ]; then
+                chown root:${svc_user} ${LIMA_SRV}/secrets/${instance}/gateway.env
+                chmod 640 ${LIMA_SRV}/secrets/${instance}/gateway.env
+            fi
+
+            # snapshot key: readable by gateway user (for age encryption)
+            if [ -f ${LIMA_SRV}/secrets/${instance}/snapshot.key ]; then
+                chown root:${svc_user} ${LIMA_SRV}/secrets/${instance}/snapshot.key
+                chmod 640 ${LIMA_SRV}/secrets/${instance}/snapshot.key
+            fi
+
+            # Generate GATEWAY_INTERNAL_TOKEN if missing
+            if ! grep -q 'GATEWAY_INTERNAL_TOKEN' ${LIMA_SRV}/secrets/${instance}/gateway.env 2>/dev/null; then
+                itok=\$(head -c 32 /dev/urandom | xxd -p)
+                echo \"GATEWAY_INTERNAL_TOKEN=\${itok}\" >> ${LIMA_SRV}/secrets/${instance}/gateway.env
+                echo '[services] Generated GATEWAY_INTERNAL_TOKEN'
+            fi
         fi
 
         # Snapshots owned by instance user
@@ -272,8 +339,9 @@ ExecStart=
 ExecStart=/usr/bin/node dist/index.js gateway --port ${gw_port} --bind lan
 EOF
 
-        # Gateway override — add LLM proxy env vars
+        # Gateway override — load gateway secrets + LLM proxy env vars
         cat >> /etc/systemd/system/openclaw-gateway@${instance}.service.d/override.conf <<EOF
+EnvironmentFile=${LIMA_SRV}/secrets/${instance}/gateway.env
 Environment=ANTHROPIC_BASE_URL=http://127.0.0.1:9090/anthropic
 Environment=OPENAI_BASE_URL=http://127.0.0.1:9090/openai
 Environment=GEMINI_API_BASE=http://127.0.0.1:9090/gemini
@@ -284,6 +352,7 @@ EOF
         cat > /etc/systemd/system/clawfactory-controller.service.d/override.conf <<EOF
 [Service]
 EnvironmentFile=${LIMA_SRV}/secrets/${instance}/controller.env
+EnvironmentFile=${LIMA_SRV}/secrets/${instance}/gateway.env
 Environment=APPROVED_DIR=${LIMA_SRV}/bot_repos/${instance}/approved
 Environment=OPENCLAW_HOME=${LIMA_SRV}/bot_repos/${instance}/state
 Environment=AUDIT_LOG=${LIMA_SRV}/audit/audit.jsonl
@@ -342,7 +411,14 @@ EOF
 # ============================================================
 lima_openclaw() {
     local instance="${INSTANCE_NAME:-default}"
-    _lima_exec bash -c "cd ${LIMA_SRV}/bot_repos/${instance}/approved && ./openclaw.mjs $*"
+    local svc_user="openclaw-${instance}"
+    _lima_root "
+        sudo -u ${svc_user} \
+            env HOME=/home/${svc_user} \
+            OPENCLAW_STATE_DIR=${LIMA_SRV}/bot_repos/${instance}/state \
+            \$(cat ${LIMA_SRV}/secrets/${instance}/gateway.env 2>/dev/null | grep -v '^#' | xargs) \
+            bash -c 'cd ${LIMA_SRV}/bot_repos/${instance}/approved && node openclaw.mjs $*'
+    "
 }
 
 # ============================================================
@@ -391,10 +467,38 @@ for vm in json.loads(sys.stdin.read().rstrip().replace('}\n{', '},{')):
 }
 
 # ============================================================
+# _lima_snapshot_pull — Sync snapshots from VM back to host
+# ============================================================
+_lima_snapshot_pull() {
+    local instance="${1:-${INSTANCE_NAME:-default}}"
+    local host_dir="${SCRIPT_DIR}/snapshots/${instance}"
+    local rsh="ssh -F ${LIMA_SSH_CONFIG}"
+
+    # Only pull if snapshots exist in the VM
+    if ! _lima_exec test -d "${LIMA_SRV}/snapshots/${instance}" 2>/dev/null; then
+        return 0
+    fi
+
+    mkdir -p "$host_dir"
+    rsync -a \
+        --exclude 'latest.tar.age' \
+        -e "$rsh" \
+        "${LIMA_SSH_HOST}:${LIMA_SRV}/snapshots/${instance}/" \
+        "${host_dir}/"
+
+    local count
+    count=$(ls "$host_dir"/*.tar.age 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$count" -gt 0 ]]; then
+        echo "[snapshots] Pulled ${count} snapshot(s) to host"
+    fi
+}
+
+# ============================================================
 # lima_stop — Stop services (doesn't stop VM)
 # ============================================================
 lima_stop() {
     local instance="${INSTANCE_NAME:-default}"
+    _lima_snapshot_pull "$instance"
     echo "Stopping ClawFactory services..."
     _lima_root "
         systemctl stop openclaw-gateway@${instance} 2>/dev/null || true

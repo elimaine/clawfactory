@@ -33,25 +33,48 @@ docker info | grep -i sysbox
 The heavy-duty option. The entire agent stack runs as systemd services inside a Lima virtual machine using Apple's VZ framework, which delivers near-native networking speeds. Docker only exists inside the VM for OpenClaw's tool sandbox — your host stays clean.
 
 ```
-┌──────────────────────────────────────────────────┐
-│  macOS Host                                      │
-│                                                  │
-│  ┌────────────────────────────────────────────┐  │
-│  │  Lima VM (VZ framework)                    │  │
-│  │                                            │  │
-│  │  systemd                                   │  │
-│  │  ├── nginx          :80 → :18789, :8081    │  │
-│  │  ├── node gateway   :18789                 │  │
-│  │  ├── python ctrl    :8080                  │  │
-│  │  └── dockerd        (tool sandbox only)    │  │
-│  │                                            │  │
-│  │  /srv/clawfactory/  (synced from host)     │  │
-│  └────────────────────────────────────────────┘  │
-│                                                  │
-│  VZ auto-forwards ports to macOS localhost       │
-│  [Kill Switch] ── stops Lima VM entirely         │
-└──────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│  macOS Host                                                     │
+│                                                                 │
+│  clawfactory.sh ── rsync over SSH ──┐                           │
+│                                     ▼                           │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │  Lima VM (VZ framework, Ubuntu 24.04)                     │  │
+│  │                                                           │  │
+│  │  systemd services:                                        │  │
+│  │  ┌─────────┐   ┌──────────────┐   ┌──────────────────┐   │  │
+│  │  │  nginx  │──►│   Gateway    │──►│    LLM Proxy     │   │  │
+│  │  │  :80    │   │  (OpenClaw)  │   │  :9090           │   │  │
+│  │  │  :8081  │─┐ │  :18789      │   │                  │   │  │
+│  │  └─────────┘ │ └──────────────┘   │ Anthropic ──► api.anthropic.com
+│  │              │                    │ OpenAI   ──► api.openai.com
+│  │              │ ┌──────────────┐   │ Gemini   ──► googleapis.com
+│  │              └►│  Controller  │   └──────────────────┘   │  │
+│  │                │  (FastAPI)   │         │                │  │
+│  │                │  :8080       │         ▼                │  │
+│  │                └──────────────┘   /srv/clawfactory/      │  │
+│  │                                  audit/traffic.jsonl     │  │
+│  │  dockerd (tool sandbox only)                             │  │
+│  └───────────────────────────────────────────────────────────┘  │
+│                                                                 │
+│  VZ auto-forwards ports to macOS localhost                      │
+│  [Kill Switch] ── stops Lima VM entirely                        │
+└─────────────────────────────────────────────────────────────────┘
 ```
+
+### File Sync
+
+The host filesystem is **not mounted** into the VM (`mounts: []`). On every `start` or `rebuild`, `clawfactory.sh` syncs files from the host to the VM using rsync over the Lima SSH tunnel:
+
+```
+Host                              Lima VM
+controller/  ──rsync──►  /tmp/cf-sync/controller/
+proxy/       ──rsync──►  /tmp/cf-sync/proxy/         ──sudo rsync──►  /srv/clawfactory/
+bot_repos/   ──rsync──►  /tmp/cf-sync/bot_repos/
+secrets/     ──rsync──►  /tmp/cf-sync/secrets/
+```
+
+State directories use `--update` to preserve VM-side changes. Node modules are excluded from sync and installed inside the VM during the build step.
 
 ### Provisioning
 
