@@ -65,6 +65,55 @@ if [[ -f "$CONTROLLER_ENV" ]]; then
 fi
 export GATEWAY_PORT CONTROLLER_PORT
 
+# --- GitHub PAT for bot repo remotes ---
+GITHUB_PAT_FILE="${SCRIPT_DIR}/secrets/github.pat"
+
+# Ensure bot repo remote has credentials embedded
+ensure_bot_remote() {
+    local instance="${1:-$INSTANCE_NAME}"
+    local repo_dir="${SCRIPT_DIR}/bot_repos/${instance}/approved"
+
+    [[ -d "$repo_dir/.git" ]] || return 0
+
+    local current_remote
+    current_remote=$(git -C "$repo_dir" remote get-url origin 2>/dev/null || true)
+    [[ -n "$current_remote" ]] || return 0
+
+    # Already has credentials embedded
+    if [[ "$current_remote" == *"x-access-token:"* ]]; then
+        # Check if the PAT file exists and differs from what's in the URL
+        if [[ -f "$GITHUB_PAT_FILE" ]]; then
+            local stored_pat
+            stored_pat=$(cat "$GITHUB_PAT_FILE")
+            local url_pat
+            url_pat=$(echo "$current_remote" | sed -n 's|.*x-access-token:\([^@]*\)@.*|\1|p')
+            if [[ "$url_pat" != "$stored_pat" ]]; then
+                # Update with newer PAT
+                local clean_url
+                clean_url=$(echo "$current_remote" | sed 's|https://[^@]*@|https://|')
+                local new_url="https://x-access-token:${stored_pat}@${clean_url#https://}"
+                git -C "$repo_dir" remote set-url origin "$new_url"
+                echo "Updated credentials for ${instance} bot repo"
+            fi
+        fi
+        return 0
+    fi
+
+    # No credentials — inject PAT if available
+    if [[ ! -f "$GITHUB_PAT_FILE" ]]; then
+        echo "Warning: ${instance} bot repo has no credentials on remote URL"
+        echo "  Create secrets/github.pat with a PAT that has 'repo' + 'workflow' scopes"
+        echo "  echo 'ghp_your_token_here' > ${GITHUB_PAT_FILE} && chmod 600 ${GITHUB_PAT_FILE}"
+        return 0
+    fi
+
+    local pat
+    pat=$(cat "$GITHUB_PAT_FILE")
+    local new_url="https://x-access-token:${pat}@${current_remote#https://}"
+    git -C "$repo_dir" remote set-url origin "$new_url"
+    echo "Added credentials to ${instance} bot repo remote"
+}
+
 # Source Firecracker helpers if in firecracker mode
 if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
     if [[ -f "${SCRIPT_DIR}/sandbox/firecracker/vm.sh" ]]; then
@@ -157,6 +206,7 @@ print_urls() {
 # ============================================================
 case "${1:-help}" in
     start)
+        ensure_bot_remote
         if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
             fc_ensure_lima
             fc_setup_network
@@ -195,6 +245,7 @@ case "${1:-help}" in
         fi
         ;;
     rebuild)
+        ensure_bot_remote
         if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
             echo "Rebuilding ClawFactory [${INSTANCE_NAME}] in Firecracker VM..."
             fc_sync
@@ -348,24 +399,45 @@ case "${1:-help}" in
             fi
         fi
         ;;
-    list)
-        echo "Configured instances:"
-        echo "  Sandbox mode: ${SANDBOX_MODE}"
+    bots|list)
+        echo "=== Saved Bots ==="
         echo ""
-        if [[ -d "${SCRIPT_DIR}/secrets" ]]; then
-            for d in "${SCRIPT_DIR}"/secrets/*/; do
-                if [[ -d "$d" ]] && [[ -f "${d}controller.env" ]]; then
+        if [[ -d "${SCRIPT_DIR}/bot_repos" ]]; then
+            bot_count=0
+            for d in "${SCRIPT_DIR}"/bot_repos/*/; do
+                if [[ -d "$d" ]]; then
                     name=$(basename "$d")
-                    gw_port=$(grep -E "^GATEWAY_PORT=" "${d}controller.env" 2>/dev/null | cut -d= -f2 || true)
-                    ctrl_port=$(grep -E "^CONTROLLER_PORT=" "${d}controller.env" 2>/dev/null | cut -d= -f2 || true)
-                    gw_port="${gw_port:-18789}"
-                    ctrl_port="${ctrl_port:-8080}"
-                    echo "  ${name}: localhost:${ctrl_port} (gateway: ${gw_port})"
+                    ensure_bot_remote "$name" 2>/dev/null
+                    has_secrets="no"
+                    has_snapshots="no"
+                    gw_port="-"
+                    ctrl_port="-"
+                    if [[ -f "${SCRIPT_DIR}/secrets/${name}/controller.env" ]]; then
+                        has_secrets="yes"
+                        gw_port=$(grep -E "^GATEWAY_PORT=" "${SCRIPT_DIR}/secrets/${name}/controller.env" 2>/dev/null | cut -d= -f2 || true)
+                        ctrl_port=$(grep -E "^CONTROLLER_PORT=" "${SCRIPT_DIR}/secrets/${name}/controller.env" 2>/dev/null | cut -d= -f2 || true)
+                        gw_port="${gw_port:-18789}"
+                        ctrl_port="${ctrl_port:-8080}"
+                    fi
+                    if [[ -d "${SCRIPT_DIR}/snapshots/${name}" ]] && ls "${SCRIPT_DIR}/snapshots/${name}/"*.tar.age &>/dev/null; then
+                        has_snapshots="yes"
+                    fi
+                    printf "  %-15s secrets:%-3s  snapshots:%-3s" "$name" "$has_secrets" "$has_snapshots"
+                    if [[ "$has_secrets" == "yes" ]]; then
+                        printf "  ports: %s/%s" "$ctrl_port" "$gw_port"
+                    fi
+                    echo ""
+                    ((bot_count++))
                 fi
             done
+            if [[ $bot_count -eq 0 ]]; then
+                echo "  (none - run install.sh first)"
+            fi
         else
             echo "  (none - run install.sh first)"
         fi
+        echo ""
+        echo "Sandbox mode: ${SANDBOX_MODE}"
         echo ""
         if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
             echo "Firecracker VM status:"
@@ -430,16 +502,16 @@ case "${1:-help}" in
         echo "  snapshot        Manage snapshots (list/create/delete)"
         echo "  info            Show instance info and tokens"
         echo "  remote [fix]    Show/fix git remote URL"
-        echo "  list            List all instances"
+        echo "  bots            List all saved bots"
         echo "  firecracker     Firecracker sandbox management"
         echo ""
         echo "Sandbox mode: ${SANDBOX_MODE}"
         echo ""
         echo "Examples:"
-        echo "  ./clawfactory.sh -i sandy start"
-        echo "  ./clawfactory.sh -i sandy logs gateway"
-        echo "  ./clawfactory.sh -i sandy stop"
+        echo "  ./clawfactory.sh -i bot1 start"
+        echo "  ./clawfactory.sh -i bot1 logs gateway"
+        echo "  ./clawfactory.sh -i bot2 stop"
         echo "  ./clawfactory.sh firecracker ssh"
-        echo "  ./clawfactory.sh list"
+        echo "  ./clawfactory.sh bots"
         ;;
 esac
