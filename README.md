@@ -1,6 +1,6 @@
 # ClawFactory
 
-> **Status**: Work in progress - i recommend installing with claude while this is unstable. this was built in latest osx on m5 apple silicon. nested virtualization isnt easy, but aside from renting a server its best way i found to massively reduces blast radious. you can also run this with just docker. its smaller memory footprint but the tradeoff is blast radious is everything the whole bot has access to.
+> **Status**: Work in progress - i recommend installing with claude while this is unstable. this was built in latest osx on m5 apple silicon. nested virtualization isnt easy, but aside from renting a server its one if the best ways i found to massively reduces blast radious. you can also run this with just docker which gives it a smaller memory footprint but you lose a level of blast radious which could be everything the bot has access to.
 
 A local-first launch platform for autonomous OpenClaw agents. Spin up sandboxed bots, wire them into Discord/Telegram/Slack, and let them loose — with you holding the leash. Encrypted snapshots, a mission control dashboard, git-backed personality versioning, instant restore, a kill switch for when things get weird, and full multi-agent fleet support.
 
