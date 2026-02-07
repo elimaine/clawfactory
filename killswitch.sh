@@ -24,16 +24,27 @@ case "${1:-}" in
         echo ""
 
         if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
-            # Firecracker mode: kill the entire VM
+            # Firecracker mode: kill the entire VM stack
             echo "Stopping Firecracker VM..."
             if [[ -f "${SCRIPT_DIR}/sandbox/firecracker/vm.sh" ]]; then
                 source "${SCRIPT_DIR}/sandbox/firecracker/vm.sh"
                 fc_stop_vm 2>/dev/null || true
             fi
-            # Also stop Lima VM for full isolation
+            # Stop Lima VM entirely for full isolation
             if command -v limactl >/dev/null 2>&1; then
-                echo "Stopping Lima VM..."
-                limactl stop clawfactory-fc 2>/dev/null || true
+                echo "Stopping Lima VM (timeout 30s)..."
+                limactl stop clawfactory-fc &>/dev/null &
+                local _lima_pid=$!
+                local _waited=0
+                while kill -0 "$_lima_pid" 2>/dev/null && [[ $_waited -lt 30 ]]; do
+                    sleep 1
+                    ((_waited++))
+                done
+                if kill -0 "$_lima_pid" 2>/dev/null; then
+                    echo "Graceful stop timed out, force stopping..."
+                    kill "$_lima_pid" 2>/dev/null || true
+                    limactl stop --force clawfactory-fc 2>/dev/null || true
+                fi
             fi
         fi
 

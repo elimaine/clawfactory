@@ -28,7 +28,7 @@ FC_TAP_DEV="tap0"
 FC_GUEST_IP="172.16.0.2"
 FC_HOST_IP="172.16.0.1"
 FC_GUEST_MAC="AA:FC:00:00:00:01"
-FC_DIR="/home/\${USER}.linux/firecracker"
+FC_DIR="/opt/firecracker"
 
 # Password + sizing file (generated during setup)
 FC_SECRETS_DIR="${CF_ROOT}/secrets"
@@ -240,7 +240,7 @@ install_firecracker() {
 # ============================================================
 prepare_kernel() {
     info "Phase 4: Preparing kernel..."
-    lima_exec mkdir -p "$FC_DIR"
+    lima_root "mkdir -p ${FC_DIR} && chmod 777 ${FC_DIR}"
 
     if lima_exec test -f "${FC_DIR}/vmlinux" 2>/dev/null; then
         ok "Kernel already prepared"
@@ -508,22 +508,44 @@ NGINX
 teardown() {
     info "Tearing down Firecracker sandbox..."
 
-    # Stop Firecracker if running
     if limactl list -q 2>/dev/null | grep -q "^${LIMA_VM_NAME}$"; then
+        # Kill socat port forwarders
+        lima_root "pkill -f 'socat.*172\.16\.0\.2' 2>/dev/null || true" 2>/dev/null || true
+
+        # Stop Firecracker VM
         lima_root "
             if [ -f ${FC_DIR}/fc.pid ]; then
                 kill \$(cat ${FC_DIR}/fc.pid) 2>/dev/null || true
                 rm -f ${FC_DIR}/fc.pid /tmp/firecracker.socket
             fi
+            # Kill any orphaned firecracker processes
+            pkill -f firecracker 2>/dev/null || true
+            # Clean up TAP device
             ip link del ${FC_TAP_DEV} 2>/dev/null || true
+            # Clean up NAT rules
+            iptables -t nat -F 2>/dev/null || true
+            iptables -F FORWARD 2>/dev/null || true
         " 2>/dev/null || true
 
+        # Stop and delete the Lima VM
         limactl stop "$LIMA_VM_NAME" 2>/dev/null || true
         limactl delete "$LIMA_VM_NAME" 2>/dev/null || true
         ok "Lima VM '${LIMA_VM_NAME}' deleted"
     else
-        ok "Lima VM not found, nothing to tear down"
+        ok "Lima VM not found"
     fi
+
+    # Clean up generated secrets
+    if [[ -f "$FC_PASSWORD_FILE" ]]; then
+        rm -f "$FC_PASSWORD_FILE"
+        ok "Removed secrets/firecracker.password"
+    fi
+    if [[ -f "$FC_SIZING_FILE" ]]; then
+        rm -f "$FC_SIZING_FILE"
+        ok "Removed secrets/firecracker.sizing"
+    fi
+
+    ok "Firecracker sandbox fully cleaned up"
 }
 
 # ============================================================
