@@ -9,6 +9,9 @@ bot_repos/
 # OS
 .DS_Store
 
+# Snapshots
+snapshots/
+
 # Backups
 *.backup
 .iptables.backup
