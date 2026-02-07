@@ -250,6 +250,42 @@ case "${1:-help}" in
     audit)
         curl -s "http://localhost:${CONTROLLER_PORT}/controller/audit" | jq '.entries[-10:]'
         ;;
+    snapshot)
+        subcmd="${2:-list}"
+        case "$subcmd" in
+            list)
+                curl -s "http://localhost:${CONTROLLER_PORT}/controller/snapshot" | jq '.snapshots'
+                ;;
+            create)
+                curl -s -X POST "http://localhost:${CONTROLLER_PORT}/controller/snapshot" | jq '.'
+                ;;
+            delete)
+                target="${3:-}"
+                if [[ -z "$target" ]]; then
+                    echo "Usage: ./clawfactory.sh snapshot delete <name|all>"
+                    echo ""
+                    echo "  <name>  Delete a specific snapshot (e.g. snapshot-2026-02-05T01-02-09Z.tar.age)"
+                    echo "  all     Delete all snapshots"
+                    exit 1
+                fi
+                if [[ "$target" == "all" ]]; then
+                    read -p "Delete ALL snapshots for [${INSTANCE_NAME}]? [y/N]: " confirm
+                    [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Cancelled"; exit 0; }
+                fi
+                curl -s -X POST "http://localhost:${CONTROLLER_PORT}/controller/snapshot/delete" \
+                    -H "Content-Type: application/json" \
+                    -d "{\"snapshot\": \"${target}\"}" | jq '.'
+                ;;
+            *)
+                echo "Snapshot commands:"
+                echo ""
+                echo "  ./clawfactory.sh snapshot list              List snapshots"
+                echo "  ./clawfactory.sh snapshot create            Create a snapshot"
+                echo "  ./clawfactory.sh snapshot delete <name>     Delete a snapshot"
+                echo "  ./clawfactory.sh snapshot delete all        Delete all snapshots"
+                ;;
+        esac
+        ;;
     info)
         echo "Instance: ${INSTANCE_NAME}"
         echo "Sandbox:  ${SANDBOX_MODE}"
@@ -391,6 +427,7 @@ case "${1:-help}" in
         echo "  shell [service] Open shell (Firecracker: VM shell)"
         echo "  controller      Show controller URL"
         echo "  audit           Show recent audit log"
+        echo "  snapshot        Manage snapshots (list/create/delete)"
         echo "  info            Show instance info and tokens"
         echo "  remote [fix]    Show/fix git remote URL"
         echo "  list            List all instances"

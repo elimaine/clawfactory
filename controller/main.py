@@ -998,6 +998,7 @@ async def promote_ui(
                 <div class="card">
                     <button onclick="createSnapshot()">Create Snapshot</button>
                     <button onclick="fetchSnapshots()" class="secondary">Refresh List</button>
+                    <button onclick="deleteAllSnapshots()" class="danger" style="margin-left: 0.5rem;">Delete All</button>
                     <div id="snapshot-result" class="result"></div>
                     <div id="snapshot-list" style="margin-top: 0.5rem;"></div>
                     <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #333;">
@@ -1762,9 +1763,12 @@ async def promote_ui(
                     let selectHtml = '<option value="latest">latest</option>';
                     data.snapshots.forEach(s => {{
                         const latest = s.latest ? ' <span style="color: #4CAF50;">(latest)</span>' : '';
-                        html += `<div style="padding: 0.3rem 0; border-bottom: 1px solid #333; font-size: 0.85rem;">
-                            <code>${{s.name}}</code>${{latest}}<br>
-                            <small style="color: #888;">${{formatSize(s.size)}} · ${{s.created}}</small>
+                        html += `<div style="padding: 0.3rem 0; border-bottom: 1px solid #333; font-size: 0.85rem; display: flex; justify-content: space-between; align-items: center;">
+                            <div>
+                                <code>${{s.name}}</code>${{latest}}<br>
+                                <small style="color: #888;">${{formatSize(s.size)}} · ${{s.created}}</small>
+                            </div>
+                            <button onclick="deleteSnapshot('${{s.name}}')" style="background: #c62828; color: white; border: none; padding: 0.2rem 0.5rem; border-radius: 3px; cursor: pointer; font-size: 0.75rem;">Delete</button>
                         </div>`;
                         selectHtml += `<option value="${{s.name}}">${{s.name}}</option>`;
                     }});
@@ -1805,6 +1809,58 @@ async def promote_ui(
                         if (data.warning) {{
                             result.textContent += '\\nWarning: ' + data.warning;
                         }}
+                    }}
+                }} catch(e) {{
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
+                }}
+            }}
+
+            async function deleteSnapshot(name) {{
+                if (!confirm(`Delete snapshot "${{name}}"?`)) return;
+                const result = document.getElementById('snapshot-result');
+                result.style.display = 'block';
+                result.className = 'result';
+                result.textContent = 'Deleting...';
+                try {{
+                    const resp = await fetch(basePath + '/snapshot/delete', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ snapshot: name }})
+                    }});
+                    const data = await resp.json();
+                    if (data.error || data.detail) {{
+                        result.className = 'result error';
+                        result.textContent = 'Error: ' + (data.error || data.detail);
+                    }} else {{
+                        result.textContent = 'Deleted: ' + data.deleted;
+                        fetchSnapshots();
+                    }}
+                }} catch(e) {{
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
+                }}
+            }}
+
+            async function deleteAllSnapshots() {{
+                if (!confirm('Delete ALL snapshots? This cannot be undone.')) return;
+                const result = document.getElementById('snapshot-result');
+                result.style.display = 'block';
+                result.className = 'result';
+                result.textContent = 'Deleting all snapshots...';
+                try {{
+                    const resp = await fetch(basePath + '/snapshot/delete', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ snapshot: 'all' }})
+                    }});
+                    const data = await resp.json();
+                    if (data.error || data.detail) {{
+                        result.className = 'result error';
+                        result.textContent = 'Error: ' + (data.error || data.detail);
+                    }} else {{
+                        result.textContent = 'Deleted ' + data.deleted + ' snapshot(s)';
+                        fetchSnapshots();
                     }}
                 }} catch(e) {{
                     result.className = 'result error';
@@ -3471,6 +3527,98 @@ async def snapshot_list(
         "snapshots": list_snapshots(),
         "encryption_ready": AGE_KEY.exists() or ensure_snapshot_key()
     }
+
+
+def delete_snapshot(snapshot_name: str) -> dict:
+    """Delete a snapshot file."""
+    if not SNAPSHOTS_DIR.exists():
+        return {"error": "Snapshots directory does not exist"}
+
+    if snapshot_name == "latest":
+        return {"error": "Cannot delete 'latest' directly. Delete the actual snapshot file instead."}
+
+    snapshot_path = SNAPSHOTS_DIR / snapshot_name
+    if not snapshot_path.exists():
+        snapshot_path = SNAPSHOTS_DIR / f"{snapshot_name}.tar.age"
+
+    if not snapshot_path.exists():
+        return {"error": f"Snapshot not found: {snapshot_name}"}
+
+    # Safety: only allow deleting files matching the snapshot pattern
+    if not snapshot_path.name.startswith("snapshot-") or not snapshot_path.name.endswith(".tar.age"):
+        return {"error": "Invalid snapshot filename"}
+
+    # Check if this is the latest symlink target
+    latest_link = SNAPSHOTS_DIR / "latest.tar.age"
+    update_latest = False
+    if latest_link.is_symlink() and latest_link.resolve() == snapshot_path.resolve():
+        update_latest = True
+
+    size = snapshot_path.stat().st_size
+    snapshot_path.unlink()
+    audit_log("snapshot_deleted", {"name": snapshot_name, "size": size})
+
+    # If we deleted the latest target, point latest to the next most recent
+    if update_latest:
+        latest_link.unlink(missing_ok=True)
+        remaining = sorted(SNAPSHOTS_DIR.glob("snapshot-*.tar.age"), reverse=True)
+        if remaining:
+            latest_link.symlink_to(remaining[0].name)
+            audit_log("snapshot_latest_updated", {"name": remaining[0].name})
+
+    return {"deleted": snapshot_name, "size": size}
+
+
+def delete_all_snapshots() -> dict:
+    """Delete all snapshots."""
+    if not SNAPSHOTS_DIR.exists():
+        return {"deleted": 0}
+
+    count = 0
+    total_size = 0
+    for f in SNAPSHOTS_DIR.glob("snapshot-*.tar.age"):
+        total_size += f.stat().st_size
+        f.unlink()
+        count += 1
+
+    # Remove latest symlink
+    latest_link = SNAPSHOTS_DIR / "latest.tar.age"
+    latest_link.unlink(missing_ok=True)
+
+    audit_log("snapshots_deleted_all", {"count": count, "total_size": total_size})
+    return {"deleted": count, "total_size": total_size}
+
+
+class SnapshotDeleteRequest(BaseModel):
+    snapshot: str = ""
+
+
+@app.post("/snapshot/delete")
+@app.post("/controller/snapshot/delete")
+async def snapshot_delete_endpoint(
+    request: SnapshotDeleteRequest,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Delete a snapshot or all snapshots."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if not request.snapshot:
+        return {"error": "No snapshot specified"}
+
+    if request.snapshot == "all":
+        audit_log("snapshot_delete_all_requested", {})
+        result = delete_all_snapshots()
+    else:
+        audit_log("snapshot_delete_requested", {"snapshot": request.snapshot})
+        result = delete_snapshot(request.snapshot)
+
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+
+    return result
 
 
 def restore_snapshot(snapshot_name: str) -> dict:
