@@ -1,6 +1,6 @@
 # ClawFactory
 
-> **Status**: Work in progress - found a deeper architectural issue as of 4/2/26, basically we cant run docker in docker for subagents. this works single threaded, but cron jobs wont work until i take the gateway out of its own isolation.. which was half the security model, and would kill the multiple independent agents ecosystems idea..
+> **Status**: Work in progress - i recommend installing with claude while this is unstable. this was built in latest osx on m5 apple silicon. nested virtualization isnt easy, but aside from renting a server its best way i found to massively reduces blast radious. you can also run this with just docker. its smaller memory footprint but the tradeoff is blast radious is everything the whole bot has access to.
 
 A local-first launch platform for autonomous OpenClaw agents. Spin up sandboxed bots, wire them into Discord/Telegram/Slack, and let them loose — with you holding the leash. Encrypted snapshots, a mission control dashboard, git-backed personality versioning, instant restore, a kill switch for when things get weird, and full multi-agent fleet support.
 
