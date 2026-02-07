@@ -87,13 +87,32 @@ lima_sync() {
         _lima_exec rsync -a --delete \
             --exclude '.git' \
             --exclude 'node_modules' \
-            --exclude 'state/installed' \
             --exclude '.DS_Store' \
             "${cf_root}/bot_repos/${instance}/approved/" \
             "${staging}/bot_repos/${instance}/approved/" 2>/dev/null || \
         limactl copy --recursive \
             "${cf_root}/bot_repos/${instance}/approved" \
             "${LIMA_VM_NAME}:${staging}/bot_repos/${instance}/approved"
+
+        # Sync state directory (OpenClaw config, credentials, identity)
+        # Uses --update so VM-side changes aren't overwritten by stale host files
+        if [[ -d "${cf_root}/bot_repos/${instance}/state" ]]; then
+            _lima_exec mkdir -p "${staging}/bot_repos/${instance}/state"
+            _lima_exec rsync -a --update \
+                --exclude '.DS_Store' \
+                --exclude '.obsidian' \
+                --exclude 'installed' \
+                --exclude 'sandboxes' \
+                --exclude 'subagents' \
+                --exclude 'workspace' \
+                --exclude 'media' \
+                --exclude 'update-check.json' \
+                "${cf_root}/bot_repos/${instance}/state/" \
+                "${staging}/bot_repos/${instance}/state/" 2>/dev/null || \
+            limactl copy --recursive \
+                "${cf_root}/bot_repos/${instance}/state" \
+                "${LIMA_VM_NAME}:${staging}/bot_repos/${instance}/state"
+        fi
     fi
 
     # Sync secrets for this instance (restricted permissions)
@@ -112,7 +131,6 @@ lima_sync() {
         rsync -a --delete \
             --exclude 'node_modules' \
             --exclude '.pnpm-lock-hash' \
-            --exclude 'bot_repos/*/state' \
             --exclude 'snapshots' \
             ${staging}/ ${LIMA_SRV}/
 
@@ -124,9 +142,6 @@ lima_sync() {
         # Lock down secrets — only root can read controller env
         chmod 700 ${LIMA_SRV}/secrets/${instance}/ 2>/dev/null || true
         chmod 600 ${LIMA_SRV}/secrets/${instance}/*.env 2>/dev/null || true
-
-        # Copy nginx config
-        cp ${LIMA_SRV}/proxy/nginx.conf /etc/nginx/sites-available/clawfactory 2>/dev/null || true
     "
 
     # Keep staging for build step
@@ -219,7 +234,7 @@ lima_services() {
         usermod -aG docker ${svc_user} 2>/dev/null || true
 
         # Set up isolated directory ownership
-        mkdir -p ${LIMA_SRV}/bot_repos/${instance}/state/openclaw
+        mkdir -p ${LIMA_SRV}/bot_repos/${instance}/state
         mkdir -p ${LIMA_SRV}/bot_repos/${instance}/approved
         chown -R ${svc_user}:${svc_user} ${LIMA_SRV}/bot_repos/${instance}/
         chmod 700 ${LIMA_SRV}/bot_repos/${instance}/
@@ -251,7 +266,7 @@ Group=${svc_user}
 Environment=INSTANCE_NAME=${instance}
 Environment=OPENCLAW_GATEWAY_MODE=local
 Environment=OPENCLAW_GATEWAY_AUTH=none
-Environment=OPENCLAW_STATE_DIR=${LIMA_SRV}/bot_repos/${instance}/state/openclaw
+Environment=OPENCLAW_STATE_DIR=${LIMA_SRV}/bot_repos/${instance}/state
 Environment=HOME=/home/${svc_user}
 ExecStart=
 ExecStart=/usr/bin/node dist/index.js gateway --port ${gw_port} --bind lan
