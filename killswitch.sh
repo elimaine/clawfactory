@@ -23,19 +23,13 @@ case "${1:-}" in
         echo "KILL SWITCH ACTIVATED"
         echo ""
 
-        if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
-            # Firecracker mode: kill the entire VM stack
-            echo "Stopping Firecracker VM..."
-            if [[ -f "${SCRIPT_DIR}/sandbox/firecracker/vm.sh" ]]; then
-                source "${SCRIPT_DIR}/sandbox/firecracker/vm.sh"
-                fc_stop_vm 2>/dev/null || true
-            fi
-            # Stop Lima VM entirely for full isolation
+        if [[ "$SANDBOX_MODE" == "lima" ]]; then
+            # Lima mode: stop the VM entirely
             if command -v limactl >/dev/null 2>&1; then
                 echo "Stopping Lima VM (timeout 30s)..."
-                limactl stop clawfactory-fc &>/dev/null &
-                local _lima_pid=$!
-                local _waited=0
+                limactl stop clawfactory &>/dev/null &
+                _lima_pid=$!
+                _waited=0
                 while kill -0 "$_lima_pid" 2>/dev/null && [[ $_waited -lt 30 ]]; do
                     sleep 1
                     ((_waited++))
@@ -43,7 +37,7 @@ case "${1:-}" in
                 if kill -0 "$_lima_pid" 2>/dev/null; then
                     echo "Graceful stop timed out, force stopping..."
                     kill "$_lima_pid" 2>/dev/null || true
-                    limactl stop --force clawfactory-fc 2>/dev/null || true
+                    limactl stop --force clawfactory 2>/dev/null || true
                 fi
             fi
         fi
@@ -66,7 +60,6 @@ case "${1:-}" in
             iptables -P OUTPUT DROP
             iptables -A INPUT -i lo -j ACCEPT
             iptables -A OUTPUT -o lo -j ACCEPT
-            # Allow established connections (for SSH)
             iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
             iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
         else
@@ -75,8 +68,8 @@ case "${1:-}" in
 
         echo ""
         echo "System locked. All services stopped."
-        if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
-            echo "  Firecracker VM killed. Lima VM stopped."
+        if [[ "$SANDBOX_MODE" == "lima" ]]; then
+            echo "  Lima VM stopped."
         fi
         echo "  Run './killswitch.sh restore' to restore."
         ;;
@@ -91,8 +84,8 @@ case "${1:-}" in
             rm -f "${IPTABLES_BACKUP}"
         fi
 
-        if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
-            echo "Firecracker mode: use './clawfactory.sh -i <instance> start' to restart."
+        if [[ "$SANDBOX_MODE" == "lima" ]]; then
+            echo "Lima mode: use './clawfactory.sh -i <instance> start' to restart."
         else
             # Restart Docker stack
             echo "Starting containers..."

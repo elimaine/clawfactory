@@ -114,18 +114,18 @@ ensure_bot_remote() {
     echo "Added credentials to ${instance} bot repo remote"
 }
 
-# Source Firecracker helpers if in firecracker mode
-if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
-    if [[ -f "${SCRIPT_DIR}/sandbox/firecracker/vm.sh" ]]; then
-        source "${SCRIPT_DIR}/sandbox/firecracker/vm.sh"
+# Source Lima helpers if in lima mode
+if [[ "$SANDBOX_MODE" == "lima" ]]; then
+    if [[ -f "${SCRIPT_DIR}/sandbox/lima/vm.sh" ]]; then
+        source "${SCRIPT_DIR}/sandbox/lima/vm.sh"
     else
-        echo "Error: sandbox/firecracker/vm.sh not found" >&2
-        echo "Run ./sandbox/firecracker/setup.sh first." >&2
+        echo "Error: sandbox/lima/vm.sh not found" >&2
+        echo "Run ./sandbox/lima/setup.sh first." >&2
         exit 1
     fi
 fi
 
-# --- Docker-mode helpers (non-firecracker) ---
+# --- Docker-mode helpers (non-lima) ---
 
 # Check if a port is in use by another clawfactory instance
 port_in_use() {
@@ -207,16 +207,13 @@ print_urls() {
 case "${1:-help}" in
     start)
         ensure_bot_remote
-        if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
-            fc_ensure_lima
-            fc_setup_network
-            fc_start_vm
-            fc_sync
-            fc_build
-            fc_services start
-            fc_forward_ports
+        if [[ "$SANDBOX_MODE" == "lima" ]]; then
+            lima_ensure
+            lima_sync
+            lima_build
+            lima_services start
             echo ""
-            echo "ClawFactory [${INSTANCE_NAME}] started (Firecracker VM)"
+            echo "ClawFactory [${INSTANCE_NAME}] started (Lima VM)"
             print_urls
         else
             ensure_ports || exit 1
@@ -226,19 +223,18 @@ case "${1:-help}" in
         fi
         ;;
     stop)
-        if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
-            fc_services stop
-            fc_stop_vm
-            echo "ClawFactory [${INSTANCE_NAME}] stopped (Firecracker VM)"
+        if [[ "$SANDBOX_MODE" == "lima" ]]; then
+            lima_stop
+            echo "ClawFactory [${INSTANCE_NAME}] stopped (Lima VM)"
         else
             ${COMPOSE_CMD} down
             echo "ClawFactory [${INSTANCE_NAME}] stopped"
         fi
         ;;
     restart)
-        if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
-            fc_services restart
-            echo "ClawFactory [${INSTANCE_NAME}] restarted (Firecracker VM)"
+        if [[ "$SANDBOX_MODE" == "lima" ]]; then
+            lima_services restart
+            echo "ClawFactory [${INSTANCE_NAME}] restarted (Lima VM)"
         else
             ${COMPOSE_CMD} up -d --force-recreate
             echo "ClawFactory [${INSTANCE_NAME}] restarted"
@@ -246,11 +242,11 @@ case "${1:-help}" in
         ;;
     rebuild)
         ensure_bot_remote
-        if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
-            echo "Rebuilding ClawFactory [${INSTANCE_NAME}] in Firecracker VM..."
-            fc_sync
-            fc_build
-            fc_services restart
+        if [[ "$SANDBOX_MODE" == "lima" ]]; then
+            echo "Rebuilding ClawFactory [${INSTANCE_NAME}] in Lima VM..."
+            lima_sync
+            lima_build
+            lima_services restart
             echo "ClawFactory [${INSTANCE_NAME}] rebuilt and restarted"
             print_urls
         else
@@ -262,29 +258,29 @@ case "${1:-help}" in
         fi
         ;;
     status)
-        if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
-            fc_status
+        if [[ "$SANDBOX_MODE" == "lima" ]]; then
+            lima_status
         else
             docker ps -a --filter "name=clawfactory-" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
         fi
         ;;
     logs)
         service="${2:-gateway}"
-        if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
+        if [[ "$SANDBOX_MODE" == "lima" ]]; then
             case "$service" in
-                gateway)    fc_exec "journalctl -u openclaw-gateway -f --no-pager" ;;
-                controller) fc_exec "journalctl -u clawfactory-controller -f --no-pager" ;;
-                proxy)      fc_exec "journalctl -u nginx -f --no-pager" ;;
-                docker)     fc_exec "journalctl -u docker -f --no-pager" ;;
-                *)          fc_exec "journalctl -u $service -f --no-pager" ;;
+                gateway)    _lima_root "journalctl -u openclaw-gateway@${INSTANCE_NAME} -f --no-pager" ;;
+                controller) _lima_root "journalctl -u clawfactory-controller -f --no-pager" ;;
+                proxy)      _lima_root "journalctl -u nginx -f --no-pager" ;;
+                docker)     _lima_root "journalctl -u docker -f --no-pager" ;;
+                *)          _lima_root "journalctl -u $service -f --no-pager" ;;
             esac
         else
             docker logs -f "${CONTAINER_PREFIX}-${service}"
         fi
         ;;
     shell)
-        if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
-            fc_ssh
+        if [[ "$SANDBOX_MODE" == "lima" ]]; then
+            lima_shell
         else
             container="${2:-gateway}"
             docker exec -it "${CONTAINER_PREFIX}-${container}" /bin/bash
@@ -340,8 +336,8 @@ case "${1:-help}" in
     info)
         echo "Instance: ${INSTANCE_NAME}"
         echo "Sandbox:  ${SANDBOX_MODE}"
-        if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
-            echo "Mode:     Firecracker microVM"
+        if [[ "$SANDBOX_MODE" == "lima" ]]; then
+            echo "Mode:     Lima VM"
         else
             echo "Mode:     Docker Compose"
             echo "Containers: ${CONTAINER_PREFIX}-{gateway,controller,proxy}"
@@ -439,45 +435,53 @@ case "${1:-help}" in
         echo ""
         echo "Sandbox mode: ${SANDBOX_MODE}"
         echo ""
-        if [[ "$SANDBOX_MODE" == "firecracker" ]]; then
-            echo "Firecracker VM status:"
-            fc_status 2>/dev/null || echo "  Not running"
+        if [[ "$SANDBOX_MODE" == "lima" ]]; then
+            echo "Lima VM status:"
+            lima_status 2>/dev/null || echo "  Not running"
         else
             echo "Running containers:"
             docker ps --filter "name=clawfactory-" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null || echo "  (none)"
         fi
         ;;
-    firecracker)
+    openclaw)
+        shift
+        if [[ "$SANDBOX_MODE" == "lima" ]]; then
+            lima_openclaw "$@"
+        else
+            # Docker mode: exec into gateway container
+            docker exec -it "${CONTAINER_PREFIX}-gateway" ./openclaw.mjs "$@"
+        fi
+        ;;
+    lima)
         subcmd="${2:-help}"
         case "$subcmd" in
             setup)
-                bash "${SCRIPT_DIR}/sandbox/firecracker/setup.sh" setup
+                bash "${SCRIPT_DIR}/sandbox/lima/setup.sh" setup
                 ;;
-            ssh)
-                if [[ "$SANDBOX_MODE" != "firecracker" ]]; then
-                    echo "Error: SANDBOX_MODE is '${SANDBOX_MODE}', not 'firecracker'" >&2
+            shell)
+                if [[ "$SANDBOX_MODE" != "lima" ]]; then
+                    echo "Error: SANDBOX_MODE is '${SANDBOX_MODE}', not 'lima'" >&2
                     exit 1
                 fi
-                fc_ensure_lima
-                fc_ssh
+                lima_shell
                 ;;
             teardown)
-                bash "${SCRIPT_DIR}/sandbox/firecracker/setup.sh" teardown
+                bash "${SCRIPT_DIR}/sandbox/lima/setup.sh" teardown
                 ;;
             status)
-                if [[ "$SANDBOX_MODE" != "firecracker" ]]; then
-                    echo "Error: SANDBOX_MODE is '${SANDBOX_MODE}', not 'firecracker'" >&2
+                if [[ "$SANDBOX_MODE" != "lima" ]]; then
+                    echo "Error: SANDBOX_MODE is '${SANDBOX_MODE}', not 'lima'" >&2
                     exit 1
                 fi
-                fc_status
+                lima_status
                 ;;
             *)
-                echo "Firecracker sandbox commands:"
+                echo "Lima sandbox commands:"
                 echo ""
-                echo "  ./clawfactory.sh firecracker setup     Provision Lima + Firecracker"
-                echo "  ./clawfactory.sh firecracker ssh        SSH into Firecracker VM"
-                echo "  ./clawfactory.sh firecracker status     Show VM + service status"
-                echo "  ./clawfactory.sh firecracker teardown   Remove Lima VM and all data"
+                echo "  ./clawfactory.sh lima setup     Provision Lima VM"
+                echo "  ./clawfactory.sh lima shell     Shell into Lima VM"
+                echo "  ./clawfactory.sh lima status    Show VM + service status"
+                echo "  ./clawfactory.sh lima teardown  Remove Lima VM and all data"
                 ;;
         esac
         ;;
@@ -496,14 +500,15 @@ case "${1:-help}" in
         echo "  rebuild         Rebuild and restart"
         echo "  status          Show service status"
         echo "  logs [service]  Follow logs (gateway/proxy/controller)"
-        echo "  shell [service] Open shell (Firecracker: VM shell)"
+        echo "  shell [service] Open shell (Lima: VM shell)"
         echo "  controller      Show controller URL"
         echo "  audit           Show recent audit log"
         echo "  snapshot        Manage snapshots (list/create/delete)"
+        echo "  openclaw <args> Run OpenClaw CLI (e.g. openclaw onboard)"
         echo "  info            Show instance info and tokens"
         echo "  remote [fix]    Show/fix git remote URL"
         echo "  bots            List all saved bots"
-        echo "  firecracker     Firecracker sandbox management"
+        echo "  lima            Lima sandbox management"
         echo ""
         echo "Sandbox mode: ${SANDBOX_MODE}"
         echo ""
@@ -511,7 +516,8 @@ case "${1:-help}" in
         echo "  ./clawfactory.sh -i bot1 start"
         echo "  ./clawfactory.sh -i bot1 logs gateway"
         echo "  ./clawfactory.sh -i bot2 stop"
-        echo "  ./clawfactory.sh firecracker ssh"
+        echo "  ./clawfactory.sh -i bot1 openclaw onboard"
+        echo "  ./clawfactory.sh lima shell"
         echo "  ./clawfactory.sh bots"
         ;;
 esac

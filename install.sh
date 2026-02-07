@@ -178,11 +178,11 @@ preflight() {
         info "Sysbox not detected"
     fi
 
-    # Check for Lima (optional, for Firecracker sandbox on macOS)
+    # Check for Lima (optional, for Lima VM sandbox on macOS)
     LIMA_AVAILABLE=false
     if command -v limactl >/dev/null 2>&1; then
         LIMA_AVAILABLE=true
-        success "Lima detected (Firecracker sandbox available)"
+        success "Lima detected (VM sandbox available)"
     else
         info "Lima not detected"
     fi
@@ -199,17 +199,17 @@ configure_sandbox() {
     echo ""
 
     if [[ "$(uname)" == "Darwin" ]]; then
-        # macOS: offer Firecracker or none
+        # macOS: offer Lima VM or none
         echo "Sandbox options for macOS:"
         echo ""
-        echo "  1) Firecracker VM (recommended) - VM-level isolation via microVM"
-        echo "  2) None                         - tools run directly on gateway"
+        echo "  1) Lima VM (recommended) - services run in a Linux VM"
+        echo "  2) None                  - tools run directly (Docker Compose)"
         echo ""
 
         if [[ "$LIMA_AVAILABLE" == "true" ]]; then
-            info "Lima is installed (required for Firecracker)"
+            info "Lima is installed"
         else
-            info "Lima not installed - will be installed if you select Firecracker"
+            info "Lima not installed - will be installed if you select Lima VM"
         fi
         echo ""
 
@@ -218,28 +218,27 @@ configure_sandbox() {
 
         case "$sandbox_choice" in
             1)
-                SANDBOX_MODE="firecracker"
-                success "Sandbox mode: Firecracker VM"
+                SANDBOX_MODE="lima"
+                success "Sandbox mode: Lima VM"
                 echo ""
-                echo "Firecracker setup provisions a Lima VM with nested virtualization"
-                echo "and builds a rootfs with all ClawFactory dependencies."
+                echo "Lima setup creates a Linux VM with all ClawFactory dependencies."
                 echo "This takes several minutes on first run."
                 echo ""
-                read -p "Run Firecracker setup now? [Y/n]: " run_setup
+                read -p "Run Lima setup now? [Y/n]: " run_setup
                 if [[ ! "$run_setup" =~ ^[Nn]$ ]]; then
-                    bash "${SCRIPT_DIR}/sandbox/firecracker/setup.sh" setup
+                    bash "${SCRIPT_DIR}/sandbox/lima/setup.sh" setup
                 else
                     echo ""
-                    info "Skipped. Run later with: ./sandbox/firecracker/setup.sh"
+                    info "Skipped. Run later with: ./sandbox/lima/setup.sh"
                 fi
                 ;;
             *)
                 SANDBOX_MODE="none"
-                info "Sandbox mode: none (tools run directly on gateway)"
+                info "Sandbox mode: none (Docker Compose)"
                 ;;
         esac
     else
-        # Linux: offer Sysbox, Firecracker, or none
+        # Linux: offer Sysbox, Lima, or none
         echo "Sandbox options:"
         echo ""
         if [[ "$SYSBOX_AVAILABLE" == "true" ]]; then
@@ -247,8 +246,8 @@ configure_sandbox() {
         else
             echo "  1) Sysbox               - not installed (https://github.com/nestybox/sysbox)"
         fi
-        echo "  2) Firecracker VM       - full microVM isolation"
-        echo "  3) None                 - tools run directly on gateway"
+        echo "  2) Lima VM              - services run in a Linux VM"
+        echo "  3) None                 - tools run directly (Docker Compose)"
         echo ""
 
         read -p "Select sandbox mode [1]: " sandbox_choice
@@ -267,15 +266,15 @@ configure_sandbox() {
                 fi
                 ;;
             2)
-                SANDBOX_MODE="firecracker"
-                success "Sandbox mode: Firecracker VM"
+                SANDBOX_MODE="lima"
+                success "Sandbox mode: Lima VM"
                 echo ""
-                read -p "Run Firecracker setup now? [Y/n]: " run_setup
+                read -p "Run Lima setup now? [Y/n]: " run_setup
                 if [[ ! "$run_setup" =~ ^[Nn]$ ]]; then
-                    bash "${SCRIPT_DIR}/sandbox/firecracker/setup.sh" setup
+                    bash "${SCRIPT_DIR}/sandbox/lima/setup.sh" setup
                 else
                     echo ""
-                    info "Skipped. Run later with: ./sandbox/firecracker/setup.sh"
+                    info "Skipped. Run later with: ./sandbox/lima/setup.sh"
                 fi
                 ;;
             *)
@@ -1758,7 +1757,7 @@ main() {
     echo "Instance: ${INSTANCE_NAME}"
     case "${SANDBOX_MODE:-none}" in
         sysbox)      echo "Sandbox: Sysbox (Docker-in-Docker isolation)" ;;
-        firecracker) echo "Sandbox: Firecracker microVM" ;;
+        lima)        echo "Sandbox: Lima VM" ;;
         *)           echo "Sandbox: none (tools run directly on gateway)" ;;
     esac
     echo ""
