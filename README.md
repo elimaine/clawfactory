@@ -3,7 +3,7 @@
 > **Status**: Work in progress - major hurdles overcome! this is midstage looking good, but still unstable for new installs. i recommend installing with claude. this was built on latest osx on m5 apple silicon. 
 
 ## Yo Dogg I heard you like OpenClaw Agents
-> so we put a VM in your VM, spun up 5 of them, and added a controller. Safest install I've found for local!
+> so we put a VM in your VM, spun up 5 of them, and added a controller.
 
 ## Vms all the way down.
 > The bot may propose, but can never silently promote or persist changes.
