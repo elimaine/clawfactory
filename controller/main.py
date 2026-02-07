@@ -37,15 +37,47 @@ GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
 ALLOWED_MERGE_ACTORS = os.environ.get("ALLOWED_MERGE_ACTORS", "").split(",")
 INSTANCE_NAME = os.environ.get("INSTANCE_NAME", "default")
 GATEWAY_CONTAINER = os.environ.get("GATEWAY_CONTAINER", f"clawfactory-{INSTANCE_NAME}-gateway")
+GATEWAY_PORT = os.environ.get("GATEWAY_PORT", "18789")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "")
 CONTROLLER_API_TOKEN = os.environ.get("CONTROLLER_API_TOKEN", "")
+GATEWAY_INTERNAL_TOKEN = os.environ.get("GATEWAY_INTERNAL_TOKEN", "")
 SNAPSHOTS_DIR = Path(os.environ.get("SNAPSHOTS_DIR", "/srv/snapshots"))
 AGE_KEY = Path(os.environ.get("AGE_KEY", "/srv/secrets/snapshot.key"))
+SECRETS_DIR = Path(os.environ.get("SECRETS_DIR", f"/srv/clawfactory/secrets/{INSTANCE_NAME}"))
 GIT_USER_NAME = os.environ.get("GIT_USER_NAME", "ClawFactory Controller")
 GIT_USER_EMAIL = os.environ.get("GIT_USER_EMAIL", "controller@clawfactory.local")
 
 # Detect offline mode (no GitHub configured)
 OFFLINE_MODE = not GITHUB_REPO or GITHUB_REPO.strip() == "" or "/" not in GITHUB_REPO
+
+# Lima mode: GATEWAY_CONTAINER=local means systemd, not Docker
+IS_LIMA_MODE = GATEWAY_CONTAINER == "local"
+
+
+def gateway_stop():
+    """Stop the gateway (systemd in Lima mode, Docker otherwise)."""
+    if IS_LIMA_MODE:
+        subprocess.run(
+            ["systemctl", "stop", f"openclaw-gateway@{INSTANCE_NAME}"],
+            capture_output=True, timeout=30
+        )
+    else:
+        client = docker.from_env()
+        container = client.containers.get(GATEWAY_CONTAINER)
+        container.stop(timeout=30)
+
+
+def gateway_start():
+    """Start the gateway (systemd in Lima mode, Docker otherwise)."""
+    if IS_LIMA_MODE:
+        subprocess.run(
+            ["systemctl", "start", f"openclaw-gateway@{INSTANCE_NAME}"],
+            capture_output=True, timeout=30
+        )
+    else:
+        client = docker.from_env()
+        container = client.containers.get(GATEWAY_CONTAINER)
+        container.start()
 
 app = FastAPI(title="ClawFactory Controller", version="1.0.0")
 
@@ -146,6 +178,36 @@ def check_auth(
         bearer_token = auth_header[7:]
         if verify_token(bearer_token):
             return True
+
+    return False
+
+
+def check_internal_auth(
+    token: Optional[str] = None,
+    auth_header: Optional[str] = None,
+) -> bool:
+    """
+    Check if request has valid internal (gateway) or admin authentication.
+
+    Internal endpoints accept GATEWAY_INTERNAL_TOKEN or CONTROLLER_API_TOKEN.
+    If neither is configured, access is open (backward compatibility).
+    """
+    if not GATEWAY_INTERNAL_TOKEN and not CONTROLLER_API_TOKEN:
+        return True
+
+    actual_token = None
+    if token:
+        actual_token = token
+    elif auth_header and auth_header.startswith("Bearer "):
+        actual_token = auth_header[7:]
+
+    if not actual_token:
+        return False
+
+    if GATEWAY_INTERNAL_TOKEN and secrets.compare_digest(actual_token, GATEWAY_INTERNAL_TOKEN):
+        return True
+    if CONTROLLER_API_TOKEN and secrets.compare_digest(actual_token, CONTROLLER_API_TOKEN):
+        return True
 
     return False
 
@@ -913,6 +975,7 @@ async def promote_ui(
             <a href="#gateway" onclick="switchPage('gateway')">Gateway</a>
             <a href="#logs" onclick="switchPage('logs')">Logs</a>
             <a href="#snapshots" onclick="switchPage('snapshots')">Snapshots</a>
+            <a href="#settings" onclick="switchPage('settings')">Settings</a>
         </nav>
 
         <main id="content">
@@ -928,9 +991,9 @@ async def promote_ui(
             <div class="stat">
                 <div class="stat-value {gateway_class}">
                     <span id="gateway-status-indicator" class="status-dot"></span>
-                    {gateway_status}
+                    <a href="http://localhost:{GATEWAY_PORT}" target="_blank" style="color: inherit; text-decoration: none;" title="Open Gateway on port {GATEWAY_PORT}">{gateway_status}</a>
                 </div>
-                <div class="stat-label">Gateway <span id="gateway-last-update" style="font-size: 0.7rem; color: #666;"></span></div>
+                <div class="stat-label">Gateway <a href="http://localhost:{GATEWAY_PORT}" target="_blank" style="color: #2196F3; text-decoration: none;">:{GATEWAY_PORT}</a> <span id="gateway-last-update" style="font-size: 0.7rem; color: #666;"></span></div>
             </div>
             <div class="stat">
                 <div class="stat-value"><span class="{status_class}">{status_msg}</span></div>
@@ -985,7 +1048,7 @@ async def promote_ui(
                     {f'''<div style="margin-bottom: 1rem;">
                         <div style="background: #1a3a1a; border: 1px solid #4CAF50; border-radius: 4px; padding: 0.75rem; margin-bottom: 1rem;">
                             <strong style="color: #4CAF50;">🔌 Local Mode</strong>
-                            <span style="color: #888; margin-left: 0.5rem;">GitHub not configured</span>
+                            <span style="color: #888; margin-left: 0.5rem;"><a href="#settings" onclick="switchPage('settings')" style="color: #2196F3; text-decoration: none;">Connect GitHub</a></span>
                         </div>
                         <div style="margin-bottom: 0.5rem;">
                             <span style="color: #888;">Current commit:</span> <span class="sha">{current_sha[:8]}</span>
@@ -1038,7 +1101,7 @@ async def promote_ui(
 
         <!-- ==================== GATEWAY PAGE ==================== -->
         <div id="page-gateway" class="page">
-        <h1>Gateway</h1>
+        <h1>Gateway <a href="http://localhost:{GATEWAY_PORT}" target="_blank" style="color: #2196F3; font-size: 0.8rem; text-decoration: none;">:{GATEWAY_PORT}</a></h1>
 
         <h2>System Controls</h2>
         <div class="card">
@@ -1263,9 +1326,12 @@ async def promote_ui(
 
         <h2>Snapshots</h2>
         <div class="card">
-            <button onclick="createSnapshot()">Create Snapshot</button>
-            <button onclick="fetchSnapshots()" class="secondary">Refresh List</button>
-            <button onclick="deleteAllSnapshots()" class="danger" style="margin-left: 0.5rem;">Delete All</button>
+            <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                <input type="text" id="snapshot-name-input" placeholder="Name (optional)" style="width: 200px; padding: 0.3rem 0.5rem; background: #222; color: #eee; border: 1px solid #444; border-radius: 3px;">
+                <button onclick="createSnapshot()">Create Snapshot</button>
+                <button onclick="fetchSnapshots()" class="secondary">Refresh List</button>
+                <button onclick="deleteAllSnapshots()" class="danger">Delete All</button>
+            </div>
             <div id="snapshot-result" class="result"></div>
             <div id="snapshot-list" style="margin-top: 0.5rem;"></div>
             <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #333;">
@@ -1286,6 +1352,61 @@ async def promote_ui(
         </div>
 
         </div><!-- /page-snapshots -->
+
+        <!-- ==================== SETTINGS PAGE ==================== -->
+        <div id="page-settings" class="page">
+        <h1>Settings</h1>
+
+        <h2>GitHub Connection</h2>
+        <div class="card">
+            <div id="github-status" style="margin-bottom: 1rem;">
+                <span style="color: #888;">Loading...</span>
+            </div>
+            <div id="github-connect-form" style="display: none;">
+                <div style="display: flex; flex-direction: column; gap: 0.75rem; max-width: 500px;">
+                    <div>
+                        <label style="color: #888; font-size: 0.85rem; display: block; margin-bottom: 0.25rem;">GitHub PAT <span style="color: #666;">(repo scope)</span></label>
+                        <input type="password" id="gh-token" placeholder="ghp_... or github_pat_..." style="width: 100%; padding: 0.4rem 0.6rem; background: #222; color: #eee; border: 1px solid #444; border-radius: 3px; font-family: monospace;">
+                    </div>
+                    <div>
+                        <label style="color: #888; font-size: 0.85rem; display: block; margin-bottom: 0.25rem;">Repository</label>
+                        <input type="text" id="gh-repo" placeholder="owner/repo" style="width: 100%; padding: 0.4rem 0.6rem; background: #222; color: #eee; border: 1px solid #444; border-radius: 3px; font-family: monospace;">
+                    </div>
+                    <div>
+                        <label style="color: #888; font-size: 0.85rem; display: block; margin-bottom: 0.25rem;">Git User Name</label>
+                        <input type="text" id="gh-username" placeholder="Your Name" style="width: 100%; padding: 0.4rem 0.6rem; background: #222; color: #eee; border: 1px solid #444; border-radius: 3px;">
+                    </div>
+                    <div>
+                        <label style="color: #888; font-size: 0.85rem; display: block; margin-bottom: 0.25rem;">Git User Email</label>
+                        <input type="text" id="gh-email" placeholder="you@example.com" style="width: 100%; padding: 0.4rem 0.6rem; background: #222; color: #eee; border: 1px solid #444; border-radius: 3px;">
+                    </div>
+                    <div>
+                        <button onclick="connectGitHub()">Connect GitHub</button>
+                    </div>
+                </div>
+            </div>
+            <div id="github-connected-info" style="display: none;">
+                <div style="display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1rem;">
+                    <div><span style="color: #888;">Repo:</span> <span id="gh-current-repo" style="color: #4CAF50;"></span></div>
+                    <div><span style="color: #888;">Token:</span> <span id="gh-current-token" style="color: #666; font-family: monospace;"></span></div>
+                    <div><span style="color: #888;">User:</span> <span id="gh-current-user"></span></div>
+                    <div><span style="color: #888;">Email:</span> <span id="gh-current-email"></span></div>
+                </div>
+                <button onclick="disconnectGitHub()" class="danger">Disconnect GitHub</button>
+            </div>
+            <div id="github-settings-result" class="result"></div>
+        </div>
+
+        <h2>Instance Info</h2>
+        <div class="card">
+            <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                <div><span style="color: #888;">Instance:</span> <span style="color: #4CAF50;">{INSTANCE_NAME}</span></div>
+                <div><span style="color: #888;">Gateway Port:</span> <span>{GATEWAY_PORT}</span></div>
+                <div><span style="color: #888;">Mode:</span> <span style="color: #2196F3;">{"Lima" if IS_LIMA_MODE else "Docker"}</span></div>
+            </div>
+        </div>
+
+        </div><!-- /page-settings -->
 
         </main><!-- /content -->
 
@@ -1355,6 +1476,10 @@ async def promote_ui(
                 if (name === 'logs') {{
                     const activeSubTab = document.querySelector('.sub-tab.active');
                     if (activeSubTab && activeSubTab.textContent === 'Traffic') fetchTraffic();
+                }}
+                // Auto-load GitHub settings when switching to settings
+                if (name === 'settings') {{
+                    loadGitHubSettings();
                 }}
             }}
 
@@ -2239,14 +2364,21 @@ async def promote_ui(
                 result.style.display = 'block';
                 result.className = 'result';
                 result.textContent = 'Creating snapshot...';
+                const nameInput = document.getElementById('snapshot-name-input');
+                const snapshotName = nameInput ? nameInput.value.trim() : '';
                 try {{
-                    const resp = await fetch(basePath + '/snapshot', {{ method: 'POST' }});
+                    const resp = await fetch(basePath + '/snapshot', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ name: snapshotName }})
+                    }});
                     const data = await resp.json();
                     if (!resp.ok || data.error || data.detail) {{
                         result.className = 'result error';
                         result.textContent = data.error || data.detail || 'Unknown error';
                     }} else {{
                         result.textContent = 'Created: ' + data.name + ' (' + formatSize(data.size) + ')';
+                        if (nameInput) nameInput.value = '';
                         fetchSnapshots();
                     }}
                 }} catch(e) {{
@@ -2267,18 +2399,24 @@ async def promote_ui(
                         select.innerHTML = '<option value="latest">latest</option>';
                         return;
                     }}
-                    let html = '<div style="max-height: 200px; overflow-y: auto;">';
+                    let html = '<div style="max-height: 300px; overflow-y: auto;">';
                     let selectHtml = '<option value="latest">latest</option>';
                     data.snapshots.forEach(s => {{
                         const latest = s.latest ? ' <span style="color: #4CAF50;">(latest)</span>' : '';
-                        html += `<div style="padding: 0.3rem 0; border-bottom: 1px solid #333; font-size: 0.85rem; display: flex; justify-content: space-between; align-items: center;">
-                            <div>
-                                <code>${{s.name}}</code>${{latest}}<br>
-                                <small style="color: #888;">${{formatSize(s.size)}} · ${{s.created}}</small>
+                        const displayLabel = s.label || 'snapshot';
+                        const displayName = displayLabel === 'snapshot' ? '' : `<strong>${{displayLabel}}</strong> · `;
+                        html += `<div style="padding: 0.4rem 0; border-bottom: 1px solid #333; font-size: 0.85rem; display: flex; justify-content: space-between; align-items: center; gap: 0.5rem;">
+                            <div style="flex: 1; min-width: 0;">
+                                <div>${{displayName}}<small style="color: #888;">${{s.created}}</small>${{latest}}</div>
+                                <div><code style="font-size: 0.75rem; color: #666;">${{s.name}}</code> · <small style="color: #888;">${{formatSize(s.size)}}</small></div>
                             </div>
-                            <button onclick="deleteSnapshot('${{s.name}}')" style="background: #c62828; color: white; border: none; padding: 0.2rem 0.5rem; border-radius: 3px; cursor: pointer; font-size: 0.75rem;">Delete</button>
+                            <div style="display: flex; gap: 0.3rem; flex-shrink: 0;">
+                                <button onclick="renameSnapshot('${{s.name}}')" style="background: #555; color: white; border: none; padding: 0.2rem 0.5rem; border-radius: 3px; cursor: pointer; font-size: 0.75rem;">Rename</button>
+                                <button onclick="deleteSnapshot('${{s.name}}')" style="background: #c62828; color: white; border: none; padding: 0.2rem 0.5rem; border-radius: 3px; cursor: pointer; font-size: 0.75rem;">Delete</button>
+                            </div>
                         </div>`;
-                        selectHtml += `<option value="${{s.name}}">${{s.name}}</option>`;
+                        const selectLabel = displayLabel === 'snapshot' ? s.created : `${{displayLabel}} (${{s.created}})`;
+                        selectHtml += `<option value="${{s.name}}">${{selectLabel}}</option>`;
                     }});
                     html += '</div>';
                     list.innerHTML = html;
@@ -2368,6 +2506,33 @@ async def promote_ui(
                         result.textContent = 'Error: ' + (data.error || data.detail);
                     }} else {{
                         result.textContent = 'Deleted ' + data.deleted + ' snapshot(s)';
+                        fetchSnapshots();
+                    }}
+                }} catch(e) {{
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
+                }}
+            }}
+
+            async function renameSnapshot(name) {{
+                const newName = prompt('Enter new name for snapshot:', '');
+                if (newName === null || newName.trim() === '') return;
+                const result = document.getElementById('snapshot-result');
+                result.style.display = 'block';
+                result.className = 'result';
+                result.textContent = 'Renaming...';
+                try {{
+                    const resp = await fetch(basePath + '/snapshot/rename', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ snapshot: name, new_name: newName.trim() }})
+                    }});
+                    const data = await resp.json();
+                    if (data.error || data.detail) {{
+                        result.className = 'result error';
+                        result.textContent = 'Error: ' + (data.error || data.detail);
+                    }} else {{
+                        result.textContent = 'Renamed to: ' + data.new_name;
                         fetchSnapshots();
                     }}
                 }} catch(e) {{
@@ -3141,6 +3306,83 @@ async def promote_ui(
             setInterval(() => {{
                 checkProposedConfig();
             }}, POLL_INTERVAL_SLOW);
+
+            // ---- Settings: GitHub connection ----
+            async function loadGitHubSettings() {{
+                try {{
+                    const res = await fetch(basePath + '/settings/github', {{ credentials: 'include' }});
+                    const data = await res.json();
+                    const statusEl = document.getElementById('github-status');
+                    const formEl = document.getElementById('github-connect-form');
+                    const infoEl = document.getElementById('github-connected-info');
+                    if (data.connected) {{
+                        statusEl.innerHTML = '<span style="color: #4CAF50; font-weight: bold;">Connected</span>';
+                        formEl.style.display = 'none';
+                        infoEl.style.display = 'block';
+                        document.getElementById('gh-current-repo').textContent = data.repo;
+                        document.getElementById('gh-current-token').textContent = data.masked_token;
+                        document.getElementById('gh-current-user').textContent = data.username;
+                        document.getElementById('gh-current-email').textContent = data.email;
+                    }} else {{
+                        statusEl.innerHTML = '<span style="color: #ff9800; font-weight: bold;">Not configured</span>';
+                        formEl.style.display = 'block';
+                        infoEl.style.display = 'none';
+                    }}
+                }} catch (e) {{
+                    document.getElementById('github-status').innerHTML = '<span style="color: #ef9a9a;">Error loading settings</span>';
+                }}
+            }}
+
+            async function connectGitHub() {{
+                const token = document.getElementById('gh-token').value.trim();
+                const repo = document.getElementById('gh-repo').value.trim();
+                const username = document.getElementById('gh-username').value.trim();
+                const email = document.getElementById('gh-email').value.trim();
+                const resultEl = document.getElementById('github-settings-result');
+                if (!token || !repo) {{
+                    resultEl.innerHTML = '<span style="color: #ef9a9a;">Token and repo are required</span>';
+                    return;
+                }}
+                resultEl.innerHTML = '<span style="color: #888;">Saving...</span>';
+                try {{
+                    const res = await fetch(basePath + '/settings/github', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        credentials: 'include',
+                        body: JSON.stringify({{ token, repo, username, email }})
+                    }});
+                    const data = await res.json();
+                    if (data.ok) {{
+                        resultEl.innerHTML = '<span style="color: #4CAF50;">GitHub connected. Reloading...</span>';
+                        setTimeout(() => window.location.reload(), 1500);
+                    }} else {{
+                        resultEl.innerHTML = '<span style="color: #ef9a9a;">' + escHtml(data.error || 'Failed') + '</span>';
+                    }}
+                }} catch (e) {{
+                    resultEl.innerHTML = '<span style="color: #ef9a9a;">Error: ' + escHtml(e.message) + '</span>';
+                }}
+            }}
+
+            async function disconnectGitHub() {{
+                if (!confirm('Disconnect GitHub? The controller will switch to offline mode.')) return;
+                const resultEl = document.getElementById('github-settings-result');
+                resultEl.innerHTML = '<span style="color: #888;">Disconnecting...</span>';
+                try {{
+                    const res = await fetch(basePath + '/settings/github', {{
+                        method: 'DELETE',
+                        credentials: 'include'
+                    }});
+                    const data = await res.json();
+                    if (data.ok) {{
+                        resultEl.innerHTML = '<span style="color: #4CAF50;">Disconnected. Reloading...</span>';
+                        setTimeout(() => window.location.reload(), 1500);
+                    }} else {{
+                        resultEl.innerHTML = '<span style="color: #ef9a9a;">' + escHtml(data.error || 'Failed') + '</span>';
+                    }}
+                }} catch (e) {{
+                    resultEl.innerHTML = '<span style="color: #ef9a9a;">Error: ' + escHtml(e.message) + '</span>';
+                }}
+            }}
 
             console.log('ClawFactory UI loaded. Auto-polling enabled.');
         </script>
@@ -4093,7 +4335,18 @@ def ensure_snapshot_key() -> bool:
     return False
 
 
-def create_snapshot() -> dict:
+def sanitize_snapshot_name(name: str) -> str:
+    """Sanitize a snapshot name to alphanumeric, hyphens, underscores only."""
+    import re
+    # Replace spaces and non-allowed chars with hyphens
+    sanitized = re.sub(r'[^a-zA-Z0-9_-]', '-', name.strip())
+    # Collapse multiple hyphens
+    sanitized = re.sub(r'-+', '-', sanitized).strip('-')
+    # Max 50 chars
+    return sanitized[:50]
+
+
+def create_snapshot(name: str = "") -> dict:
     """Create an encrypted snapshot of bot state."""
     if not ensure_snapshot_key():
         return {"error": "No encryption key found and failed to generate one"}
@@ -4112,7 +4365,11 @@ def create_snapshot() -> dict:
     SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
-    snapshot_name = f"snapshot-{timestamp}.tar.age"
+    if name:
+        sanitized = sanitize_snapshot_name(name)
+        snapshot_name = f"{sanitized}--{timestamp}.tar.age"
+    else:
+        snapshot_name = f"snapshot--{timestamp}.tar.age"
     snapshot_path = SNAPSHOTS_DIR / snapshot_name
 
     # Create tarball of state (excluding installed packages and session logs)
@@ -4180,20 +4437,36 @@ def list_snapshots() -> list:
     if latest_link.is_symlink():
         latest_target = latest_link.resolve().name
 
-    for f in sorted(SNAPSHOTS_DIR.glob("snapshot-*.tar.age"), reverse=True):
+    for f in sorted(SNAPSHOTS_DIR.glob("*.tar.age"), reverse=True):
+        if f.name == "latest.tar.age":
+            continue
+        # Parse name--timestamp.tar.age format
+        stem = f.name.replace(".tar.age", "")
+        if "--" in stem:
+            label, timestamp = stem.rsplit("--", 1)
+        else:
+            # Legacy format: snapshot-timestamp.tar.age
+            label = "snapshot"
+            timestamp = stem.replace("snapshot-", "")
         snapshots.append({
             "name": f.name,
+            "label": label,
             "size": f.stat().st_size,
             "latest": f.name == latest_target,
-            "created": f.name.replace("snapshot-", "").replace(".tar.age", ""),
+            "created": timestamp,
         })
 
     return snapshots
 
 
+class SnapshotCreateRequest(BaseModel):
+    name: str = ""
+
+
 @app.post("/snapshot")
 @app.post("/controller/snapshot")
 async def snapshot_create(
+    request: Optional[SnapshotCreateRequest] = None,
     token: Optional[str] = Query(None),
     session: Optional[str] = Cookie(None, alias="clawfactory_session"),
     authorization: Optional[str] = Header(None),
@@ -4202,8 +4475,9 @@ async def snapshot_create(
     if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    audit_log("snapshot_requested", {})
-    result = create_snapshot()
+    snapshot_name = request.name if request else ""
+    audit_log("snapshot_requested", {"name": snapshot_name})
+    result = create_snapshot(name=snapshot_name)
 
     if "error" in result:
         raise HTTPException(status_code=500, detail=result["error"])
@@ -4243,9 +4517,14 @@ def delete_snapshot(snapshot_name: str) -> dict:
     if not snapshot_path.exists():
         return {"error": f"Snapshot not found: {snapshot_name}"}
 
+    if snapshot_path.is_symlink():
+        return {"error": "Cannot delete symlinks directly"}
+
     # Safety: only allow deleting files matching the snapshot pattern
-    if not snapshot_path.name.startswith("snapshot-") or not snapshot_path.name.endswith(".tar.age"):
-        return {"error": "Invalid snapshot filename"}
+    if not snapshot_path.name.endswith(".tar.age") or "--" not in snapshot_path.name.replace(".tar.age", ""):
+        # Also accept legacy snapshot-<timestamp>.tar.age format
+        if not snapshot_path.name.startswith("snapshot-") or not snapshot_path.name.endswith(".tar.age"):
+            return {"error": "Invalid snapshot filename"}
 
     # Check if this is the latest symlink target
     latest_link = SNAPSHOTS_DIR / "latest.tar.age"
@@ -4260,7 +4539,7 @@ def delete_snapshot(snapshot_name: str) -> dict:
     # If we deleted the latest target, point latest to the next most recent
     if update_latest:
         latest_link.unlink(missing_ok=True)
-        remaining = sorted(SNAPSHOTS_DIR.glob("snapshot-*.tar.age"), reverse=True)
+        remaining = sorted([f for f in SNAPSHOTS_DIR.glob("*.tar.age") if f.name != "latest.tar.age"], reverse=True)
         if remaining:
             latest_link.symlink_to(remaining[0].name)
             audit_log("snapshot_latest_updated", {"name": remaining[0].name})
@@ -4275,7 +4554,9 @@ def delete_all_snapshots() -> dict:
 
     count = 0
     total_size = 0
-    for f in SNAPSHOTS_DIR.glob("snapshot-*.tar.age"):
+    for f in SNAPSHOTS_DIR.glob("*.tar.age"):
+        if f.name == "latest.tar.age":
+            continue
         total_size += f.stat().st_size
         f.unlink()
         count += 1
@@ -4318,6 +4599,103 @@ async def snapshot_delete_endpoint(
         raise HTTPException(status_code=400, detail=result["error"])
 
     return result
+
+
+class SnapshotRenameRequest(BaseModel):
+    snapshot: str
+    new_name: str
+
+
+def rename_snapshot(old_filename: str, new_name: str) -> dict:
+    """Rename a snapshot, preserving the timestamp suffix."""
+    if not SNAPSHOTS_DIR.exists():
+        return {"error": "Snapshots directory does not exist"}
+
+    old_path = SNAPSHOTS_DIR / old_filename
+    if not old_path.exists():
+        return {"error": f"Snapshot not found: {old_filename}"}
+
+    if not old_path.name.endswith(".tar.age"):
+        return {"error": "Invalid snapshot filename"}
+
+    # Extract timestamp from old name
+    stem = old_path.name.replace(".tar.age", "")
+    if "--" in stem:
+        _, timestamp = stem.rsplit("--", 1)
+    else:
+        # Legacy format: snapshot-<timestamp>
+        timestamp = stem.replace("snapshot-", "")
+
+    sanitized = sanitize_snapshot_name(new_name)
+    if not sanitized:
+        return {"error": "Invalid name — must contain alphanumeric characters, hyphens, or underscores"}
+
+    new_filename = f"{sanitized}--{timestamp}.tar.age"
+    new_path = SNAPSHOTS_DIR / new_filename
+
+    if new_path.exists():
+        return {"error": f"A snapshot with that name already exists: {new_filename}"}
+
+    # Rename the file
+    old_path.rename(new_path)
+
+    # Update latest symlink if it pointed to the old file
+    latest_link = SNAPSHOTS_DIR / "latest.tar.age"
+    if latest_link.is_symlink() and latest_link.resolve().name == old_filename:
+        latest_link.unlink()
+        latest_link.symlink_to(new_filename)
+
+    audit_log("snapshot_renamed", {"old": old_filename, "new": new_filename})
+    return {"status": "renamed", "old_name": old_filename, "new_name": new_filename}
+
+
+@app.post("/snapshot/rename")
+@app.post("/controller/snapshot/rename")
+async def snapshot_rename_endpoint(
+    request: SnapshotRenameRequest,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Rename a snapshot."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    audit_log("snapshot_rename_requested", {"snapshot": request.snapshot, "new_name": request.new_name})
+    result = rename_snapshot(request.snapshot, request.new_name)
+
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+
+    return result
+
+
+def _migrate_docker_paths() -> bool:
+    """Fix Docker-era paths in restored openclaw.json so snapshots from Docker work in Lima."""
+    import re
+    config_path = OPENCLAW_HOME / "openclaw.json"
+    if not config_path.exists():
+        return False
+
+    content = config_path.read_text()
+    original = content
+
+    # /home/node/.openclaw/workspace → OPENCLAW_HOME/workspace
+    content = content.replace("/home/node/.openclaw/workspace", f"{OPENCLAW_HOME}/workspace")
+    # /home/node/.openclaw → OPENCLAW_HOME
+    content = content.replace("/home/node/.openclaw", str(OPENCLAW_HOME))
+    # /home/node → service user home
+    content = content.replace("/home/node", f"/home/openclaw-{INSTANCE_NAME}")
+    # host.docker.internal → 127.0.0.1
+    content = content.replace("host.docker.internal", "127.0.0.1")
+
+    if content != original:
+        config_path.write_text(content)
+        # Ensure workspace dir exists
+        (OPENCLAW_HOME / "workspace").mkdir(parents=True, exist_ok=True)
+        audit_log("snapshot_docker_paths_migrated", {"config": str(config_path)})
+        return True
+    return False
 
 
 def restore_snapshot(snapshot_name: str) -> dict:
@@ -4366,12 +4744,26 @@ def restore_snapshot(snapshot_name: str) -> dict:
                 shutil.move(str(backup_dir), str(OPENCLAW_HOME))
             return {"error": f"Restore failed: {result.stderr}"}
 
-        audit_log("snapshot_restored", {"snapshot": snapshot_name, "backup": str(backup_dir)})
-        return {
+        # Migrate Docker-era paths if present
+        migrated = _migrate_docker_paths()
+
+        # Fix ownership so the gateway user can read restored files
+        if IS_LIMA_MODE:
+            svc_user = f"openclaw-{INSTANCE_NAME}"
+            subprocess.run(
+                ["chown", "-R", f"{svc_user}:{svc_user}", str(OPENCLAW_HOME)],
+                capture_output=True, timeout=30
+            )
+
+        audit_log("snapshot_restored", {"snapshot": snapshot_name, "backup": str(backup_dir), "migrated": migrated})
+        result = {
             "status": "restored",
             "snapshot": snapshot_name,
             "backup": str(backup_dir),
         }
+        if migrated:
+            result["warning"] = "Migrated Docker-era paths in restored config"
+        return result
     except Exception as e:
         # Restore backup on failure
         if backup_dir.exists():
@@ -4401,9 +4793,7 @@ async def snapshot_restore_endpoint(
 
     # Stop gateway first
     try:
-        client = docker.from_env()
-        container = client.containers.get(GATEWAY_CONTAINER)
-        container.stop(timeout=30)
+        gateway_stop()
     except Exception as e:
         audit_log("snapshot_restore_error", {"error": f"Failed to stop gateway: {e}"})
         raise HTTPException(status_code=500, detail=f"Failed to stop gateway: {e}")
@@ -4413,7 +4803,7 @@ async def snapshot_restore_endpoint(
     if "error" in result:
         # Try to restart gateway even on failure
         try:
-            container.start()
+            gateway_start()
         except Exception:
             pass
         audit_log("snapshot_restore_error", result)
@@ -4421,7 +4811,7 @@ async def snapshot_restore_endpoint(
 
     # Restart gateway
     try:
-        container.start()
+        gateway_start()
     except Exception as e:
         result["warning"] = f"Gateway failed to restart: {e}"
 
@@ -4696,11 +5086,16 @@ MAX_REASON_LENGTH = 500
 @app.post("/controller/config/propose")
 async def propose_config(
     request: Request,
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
 ):
     """
     AI can propose a config change. Only one proposal stored at a time.
-    New proposals overwrite existing ones. No auth required for AI access.
+    New proposals overwrite existing ones. Requires gateway internal auth.
     """
+    if not check_internal_auth(token, authorization):
+        audit_log("internal_auth_rejected", {"endpoint": "/config/propose", "method": "POST"})
+        raise HTTPException(status_code=403, detail="Forbidden")
     # Check content length to prevent DoS
     content_length = request.headers.get("content-length")
     if content_length and int(content_length) > MAX_CONFIG_SIZE:
@@ -5238,14 +5633,163 @@ async def gateway_config_validate(
 
 
 # ============================================================
-# Internal Endpoints (no auth - Docker network only)
+# Internal Endpoints (gateway auth — GATEWAY_INTERNAL_TOKEN)
 # ============================================================
-# These endpoints are NOT exposed via the proxy, only accessible
-# from within the Docker network (gateway container).
+# These endpoints are for the gateway (bot) to call.
+# They only expose safe operations (create/list snapshots, push proposals).
+# ============================================================
+# Settings: GitHub connection
+# ============================================================
+
+def _read_env_file(path: Path) -> dict[str, str]:
+    """Read a key=value env file into a dict, preserving order."""
+    result: dict[str, str] = {}
+    if not path.exists():
+        return result
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            key, _, val = line.partition("=")
+            # Strip optional quotes
+            val = val.strip()
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+                val = val[1:-1]
+            result[key.strip()] = val
+    return result
+
+
+def _write_env_file(path: Path, env: dict[str, str]):
+    """Write a dict back to a key=value env file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for k, v in env.items():
+        # Quote values that contain spaces or special chars
+        if " " in v or "'" in v or '"' in v:
+            lines.append(f'{k}="{v}"')
+        else:
+            lines.append(f"{k}={v}")
+    path.write_text("\n".join(lines) + "\n")
+
+
+@app.get("/settings/github")
+@app.get("/controller/settings/github")
+async def settings_github_get(
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Get GitHub connection status."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    github_token = os.environ.get("GITHUB_TOKEN", "")
+    connected = bool(GITHUB_REPO and "/" in GITHUB_REPO and github_token)
+    masked = ""
+    if github_token:
+        masked = github_token[:4] + "..." + github_token[-4:] if len(github_token) > 8 else "***"
+    return {
+        "connected": connected,
+        "repo": GITHUB_REPO if connected else "",
+        "masked_token": masked,
+        "username": GIT_USER_NAME,
+        "email": GIT_USER_EMAIL,
+    }
+
+
+@app.post("/settings/github")
+@app.post("/controller/settings/github")
+async def settings_github_post(
+    request: Request,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Save GitHub connection settings."""
+    global GITHUB_REPO, OFFLINE_MODE, GIT_USER_NAME, GIT_USER_EMAIL
+
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    body = await request.json()
+    gh_token = body.get("token", "").strip()
+    repo = body.get("repo", "").strip()
+    username = body.get("username", "").strip() or "ClawFactory Controller"
+    email = body.get("email", "").strip() or "controller@clawfactory.local"
+
+    # Validate
+    if not gh_token:
+        return {"ok": False, "error": "GitHub token is required"}
+    if not (gh_token.startswith("ghp_") or gh_token.startswith("github_pat_")):
+        return {"ok": False, "error": "Token must start with ghp_ or github_pat_"}
+    if not repo or "/" not in repo:
+        return {"ok": False, "error": "Repo must be in owner/repo format"}
+
+    # Update controller.env on disk
+    env_path = SECRETS_DIR / "controller.env"
+    env = _read_env_file(env_path)
+    env["GITHUB_TOKEN"] = gh_token
+    env["GITHUB_REPO"] = repo
+    env["GIT_USER_NAME"] = username
+    env["GIT_USER_EMAIL"] = email
+    _write_env_file(env_path, env)
+
+    # Update in-memory state
+    os.environ["GITHUB_TOKEN"] = gh_token
+    os.environ["GITHUB_REPO"] = repo
+    GITHUB_REPO = repo
+    OFFLINE_MODE = not repo or "/" not in repo
+    GIT_USER_NAME = username
+    GIT_USER_EMAIL = email
+
+    audit_log("github_connected", {"repo": repo})
+    return {"ok": True}
+
+
+@app.delete("/settings/github")
+@app.delete("/controller/settings/github")
+async def settings_github_delete(
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Disconnect GitHub - remove settings and switch to offline mode."""
+    global GITHUB_REPO, OFFLINE_MODE, GIT_USER_NAME, GIT_USER_EMAIL
+
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Remove from controller.env
+    env_path = SECRETS_DIR / "controller.env"
+    env = _read_env_file(env_path)
+    for key in ("GITHUB_TOKEN", "GITHUB_REPO", "GIT_USER_NAME", "GIT_USER_EMAIL"):
+        env.pop(key, None)
+    _write_env_file(env_path, env)
+
+    # Update in-memory state
+    os.environ.pop("GITHUB_TOKEN", None)
+    os.environ.pop("GITHUB_REPO", None)
+    GITHUB_REPO = ""
+    OFFLINE_MODE = True
+    GIT_USER_NAME = "ClawFactory Controller"
+    GIT_USER_EMAIL = "controller@clawfactory.local"
+
+    audit_log("github_disconnected", {})
+    return {"ok": True}
+
+
+# Dangerous operations (restore, delete, rebuild) require CONTROLLER_API_TOKEN.
 
 @app.post("/internal/snapshot")
-async def internal_snapshot_create():
-    """Create snapshot - internal endpoint (no auth)."""
+async def internal_snapshot_create(
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    """Create snapshot - internal endpoint (gateway auth)."""
+    if not check_internal_auth(token, authorization):
+        audit_log("internal_auth_rejected", {"endpoint": "/internal/snapshot", "method": "POST"})
+        raise HTTPException(status_code=403, detail="Forbidden")
     audit_log("snapshot_requested", {"source": "internal"})
     result = create_snapshot()
     if "error" in result:
@@ -5254,8 +5798,14 @@ async def internal_snapshot_create():
 
 
 @app.get("/internal/snapshot")
-async def internal_snapshot_list():
-    """List snapshots - internal endpoint (no auth)."""
+async def internal_snapshot_list(
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    """List snapshots - internal endpoint (gateway auth)."""
+    if not check_internal_auth(token, authorization):
+        audit_log("internal_auth_rejected", {"endpoint": "/internal/snapshot", "method": "GET"})
+        raise HTTPException(status_code=403, detail="Forbidden")
     return {"snapshots": list_snapshots()}
 
 
@@ -5264,12 +5814,19 @@ class GitPushRequest(BaseModel):
 
 
 @app.post("/internal/git/push")
-async def internal_git_push(request: GitPushRequest):
-    """Push a branch to origin - internal endpoint (no auth).
+async def internal_git_push(
+    request: GitPushRequest,
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    """Push a branch to origin - internal endpoint (gateway auth).
 
     Only allows pushing proposal/* branches for security.
     The bot commits locally, then calls this to push.
     """
+    if not check_internal_auth(token, authorization):
+        audit_log("internal_auth_rejected", {"endpoint": "/internal/git/push", "method": "POST"})
+        raise HTTPException(status_code=403, detail="Forbidden")
     branch = request.branch
 
     # Security: Only allow proposal branches
@@ -5390,8 +5947,14 @@ async def internal_git_push(request: GitPushRequest):
 
 
 @app.get("/internal/git/status")
-async def internal_git_status():
-    """Get git status - internal endpoint (no auth)."""
+async def internal_git_status(
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    """Get git status - internal endpoint (gateway auth)."""
+    if not check_internal_auth(token, authorization):
+        audit_log("internal_auth_rejected", {"endpoint": "/internal/git/status", "method": "GET"})
+        raise HTTPException(status_code=403, detail="Forbidden")
     try:
         # Get current branch
         result = subprocess.run(
