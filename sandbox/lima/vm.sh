@@ -641,3 +641,61 @@ lima_stop() {
     "
     echo "Services stopped"
 }
+
+# ============================================================
+# lima_snapshot_autopull — Set up periodic snapshot sync to host
+# ============================================================
+_SNAPSHOT_AUTOPULL_LABEL="com.clawfactory.snapshot-sync"
+
+lima_snapshot_autopull() {
+    local action="${1:-status}"
+    local instance="${INSTANCE_NAME:-default}"
+    local plist_path="${HOME}/Library/LaunchAgents/${_SNAPSHOT_AUTOPULL_LABEL}.plist"
+
+    case "$action" in
+        enable)
+            mkdir -p "${HOME}/Library/LaunchAgents"
+            cat > "$plist_path" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${_SNAPSHOT_AUTOPULL_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${SCRIPT_DIR}/clawfactory.sh</string>
+        <string>-i</string>
+        <string>${instance}</string>
+        <string>snapshot</string>
+        <string>pull</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>StandardOutPath</key>
+    <string>/tmp/clawfactory-snapshot-sync.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/clawfactory-snapshot-sync.log</string>
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
+PLIST
+            launchctl load "$plist_path" 2>/dev/null || true
+            echo "[snapshots] Auto-pull enabled (every 5 minutes)"
+            ;;
+        disable)
+            launchctl unload "$plist_path" 2>/dev/null || true
+            rm -f "$plist_path"
+            echo "[snapshots] Auto-pull disabled"
+            ;;
+        status)
+            if launchctl list "$_SNAPSHOT_AUTOPULL_LABEL" &>/dev/null; then
+                echo "[snapshots] Auto-pull: enabled (every 5 minutes)"
+            else
+                echo "[snapshots] Auto-pull: disabled"
+                echo "  Enable: ./clawfactory.sh snapshot autopull enable"
+            fi
+            ;;
+    esac
+}

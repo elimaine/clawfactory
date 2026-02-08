@@ -360,6 +360,24 @@ case "${1:-help}" in
                         -H "Content-Type: application/json" \
                         -d '{"name": ""}' | jq '.'
                 fi
+                # Auto-pull to host after creation
+                if [[ "$SANDBOX_MODE" == "lima" ]]; then
+                    _lima_snapshot_pull "$INSTANCE_NAME"
+                fi
+                ;;
+            pull)
+                if [[ "$SANDBOX_MODE" != "lima" ]]; then
+                    echo "Snapshot pull is only available in Lima mode"
+                    exit 1
+                fi
+                _lima_snapshot_pull "$INSTANCE_NAME"
+                ;;
+            autopull)
+                if [[ "$SANDBOX_MODE" != "lima" ]]; then
+                    echo "Snapshot autopull is only available in Lima mode"
+                    exit 1
+                fi
+                lima_snapshot_autopull "${3:-status}"
                 ;;
             rename)
                 old_snap="${3:-}"
@@ -414,12 +432,14 @@ case "${1:-help}" in
             *)
                 echo "Snapshot commands:"
                 echo ""
-                echo "  ./clawfactory.sh snapshot list                       List snapshots"
-                echo "  ./clawfactory.sh snapshot create [name]              Create a snapshot (optionally named)"
-                echo "  ./clawfactory.sh snapshot rename <filename> <name>   Rename a snapshot"
-                echo "  ./clawfactory.sh snapshot delete <name>              Delete a snapshot"
-                echo "  ./clawfactory.sh snapshot delete all                 Delete all snapshots"
-                echo "  ./clawfactory.sh snapshot restore [name|latest]      Restore from a snapshot"
+                echo "  ./clawfactory.sh snapshot list                              List snapshots"
+                echo "  ./clawfactory.sh snapshot create [name]                     Create a snapshot (auto-syncs to host)"
+                echo "  ./clawfactory.sh snapshot pull                              Pull snapshots from VM to host"
+                echo "  ./clawfactory.sh snapshot autopull [enable|disable|status]  Auto-pull every 5 min (launchd)"
+                echo "  ./clawfactory.sh snapshot rename <filename> <name>          Rename a snapshot"
+                echo "  ./clawfactory.sh snapshot delete <name>                     Delete a snapshot"
+                echo "  ./clawfactory.sh snapshot delete all                        Delete all snapshots"
+                echo "  ./clawfactory.sh snapshot restore [name|latest]             Restore from a snapshot"
                 ;;
         esac
         ;;

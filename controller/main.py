@@ -11,6 +11,7 @@ Responsibilities:
 - Audit logging
 """
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -123,6 +124,21 @@ def log_startup():
 
 
 log_startup()
+
+
+def get_spice_mode() -> str:
+    """Read current spice mode from gateway config."""
+    try:
+        with open(OPENCLAW_HOME / "openclaw.json") as f:
+            config = json.load(f)
+        return config.get("env", {}).get("vars", {}).get("SPICYMODE", "nospice")
+    except Exception:
+        return "nospice"
+
+
+def is_spicy() -> bool:
+    """True when spice mode allows auto-accepting proposals."""
+    return get_spice_mode() != "nospice"
 
 
 # ============================================================
@@ -1182,7 +1198,7 @@ async def promote_ui(
         </div>
 
         <h2>Propose Changes</h2>
-        <div class="card">
+        <div id="propose-section"><div class="card">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
                 <p style="color: #888; font-size: 0.85rem; margin: 0;">Commit uncommitted changes to a new proposal branch and push.</p>
                 <button onclick="refreshLocalChanges()" class="secondary small">Refresh</button>
@@ -1210,7 +1226,7 @@ async def promote_ui(
                 </div>
             </div>
             <div id="propose-result" class="result" style="margin-top: 0.5rem;"></div>
-        </div>'''}
+        </div></div>'''}
         <div id="local-changes" style="display: none;"></div>
         </div><!-- /page-dashboard -->
 
@@ -2418,11 +2434,48 @@ async def promote_ui(
                 const cur = document.getElementById('spice-current');
                 if (cur) cur.textContent = 'Current: ' + (spiceLabels[mode] || mode);
             }}
+            window.currentSpiceMode = 'nospice';
+            function isSpicy() {{ return window.currentSpiceMode !== 'nospice'; }}
+
+            function updateSpiceUI() {{
+                const propose = document.getElementById('propose-section');
+                if (propose) {{
+                    const inputs = propose.querySelectorAll('input, button');
+                    const overlay = document.getElementById('propose-spice-overlay');
+                    if (isSpicy()) {{
+                        inputs.forEach(el => {{ el.style.opacity = '0.4'; el.style.pointerEvents = 'none'; }});
+                        if (!overlay) {{
+                            const ov = document.createElement('div');
+                            ov.id = 'propose-spice-overlay';
+                            ov.style.cssText = 'padding: 0.5rem; margin-top: 0.5rem; background: #2d2d1a; border: 1px solid #666; border-radius: 4px; font-size: 0.85rem; color: #ff9800;';
+                            ov.textContent = 'Auto-accept enabled (' + window.currentSpiceMode + ') — proposals are merged automatically.';
+                            propose.querySelector('.card').appendChild(ov);
+                        }}
+                    }} else {{
+                        inputs.forEach(el => {{ el.style.opacity = '1'; el.style.pointerEvents = 'auto'; }});
+                        if (overlay) overlay.remove();
+                    }}
+                }}
+                // Config proposal banner
+                const banner = document.getElementById('proposed-config-banner');
+                if (banner && banner.style.display !== 'none' && isSpicy()) {{
+                    const status = document.getElementById('proposed-config-status');
+                    if (status) {{
+                        status.style.display = 'block';
+                        status.innerHTML = '<span style="color: #ff9800;">Auto-accept enabled — will be applied automatically.</span>';
+                    }}
+                }}
+            }}
+
             async function loadSpiceMode() {{
                 try {{
                     const resp = await fetch(basePath + '/spice');
                     const data = await resp.json();
-                    if (data.mode) highlightSpice(data.mode);
+                    if (data.mode) {{
+                        window.currentSpiceMode = data.mode;
+                        highlightSpice(data.mode);
+                        updateSpiceUI();
+                    }}
                 }} catch(e) {{ /* ignore on load */ }}
             }}
             loadSpiceMode();
@@ -2441,7 +2494,9 @@ async def promote_ui(
                         result.className = 'result error';
                         result.textContent = data.error;
                     }} else {{
+                        window.currentSpiceMode = mode;
                         highlightSpice(mode);
+                        updateSpiceUI();
                         result.style.display = 'block';
                         result.className = 'result';
                         result.textContent = data.label;
@@ -2761,7 +2816,9 @@ async def promote_ui(
                         result.className = 'result error';
                         result.textContent = data.error || data.detail || 'Unknown error';
                     }} else {{
-                        result.textContent = 'Created: ' + data.name + ' (' + formatSize(data.size) + ')';
+                        result.innerHTML = 'Created: ' + escapeHtml(data.name) + ' (' + formatSize(data.size) + ') '
+                            + '<a href="' + basePath + '/snapshot/download/' + encodeURIComponent(data.name) + '" '
+                            + 'style="color: #2196F3; margin-left: 0.5rem;" download>Download</a>';
                         if (nameInput) nameInput.value = '';
                         fetchSnapshots();
                     }}
@@ -3081,7 +3138,13 @@ async def promote_ui(
                     const data = await resp.json();
                     if (!resp.ok || data.error || data.detail) {{
                         result.className = 'result error';
-                        result.textContent = data.error || data.detail || 'Unknown error';
+                        let errMsg = escapeHtml(data.error || data.detail || 'Unknown error');
+                        if (data.validation_errors && data.validation_errors.length) {{
+                            errMsg += '<br><ul style="margin: 0.3rem 0 0 1rem; padding: 0;">';
+                            data.validation_errors.forEach(e => {{ errMsg += '<li>' + escapeHtml(e) + '</li>'; }});
+                            errMsg += '</ul>';
+                        }}
+                        result.innerHTML = errMsg;
                     }} else {{
                         result.textContent = 'Config saved. Gateway restarting...';
                         // Check for backup after save
@@ -3271,7 +3334,13 @@ async def promote_ui(
                     }});
                     const data = await resp.json();
                     if (!resp.ok || data.error) {{
-                        status.innerHTML = '<span style="color: #ef5350;">Error: ' + escapeHtml(data.error || data.detail || 'Failed') + '</span>';
+                        let errMsg = escapeHtml(data.error || data.detail || 'Failed');
+                        if (data.validation_errors && data.validation_errors.length) {{
+                            errMsg += '<br><ul style="margin: 0.3rem 0 0 1rem; padding: 0; font-size: 0.8rem;">';
+                            data.validation_errors.forEach(e => {{ errMsg += '<li>' + escapeHtml(e) + '</li>'; }});
+                            errMsg += '</ul>';
+                        }}
+                        status.innerHTML = '<span style="color: #ef5350;">' + errMsg + '</span>';
                     }} else {{
                         status.innerHTML = '<span style="color: #4CAF50;">Applied and restarted gateway.</span>';
                         setTimeout(() => {{
@@ -4465,7 +4534,7 @@ async def get_spice(
         mode = config.get("env", {}).get("vars", {}).get("SPICYMODE", "medspice")
     except Exception:
         mode = "medspice"
-    return {"mode": mode, "label": SPICE_LABELS.get(mode, mode)}
+    return {"mode": mode, "label": SPICE_LABELS.get(mode, mode), "auto_accept": mode != "nospice"}
 
 
 @app.post("/spice")
@@ -4676,6 +4745,14 @@ async def propose_changes(
             return {"error": f"Push failed: {push_result.stderr.strip()}"}
 
         audit_log("propose_changes_success", {"branch": full_branch})
+
+        # Auto-merge when spicy
+        if is_spicy():
+            merge_result = _auto_merge_proposal_branches()
+            if merge_result.get("merged"):
+                audit_log("branch_auto_merged_on_propose", {"branch": full_branch, "spice": get_spice_mode()})
+                return {"message": f"Created, pushed, and auto-merged {full_branch} (spice mode)"}
+
         return {"message": f"Created and pushed {full_branch}"}
     except subprocess.TimeoutExpired:
         subprocess.run(["git", "checkout", "main"], cwd=APPROVED_DIR, capture_output=True)
@@ -5754,6 +5831,83 @@ PROPOSED_CONFIG_PATH = Path("/srv/audit/proposed_config.json")
 KNOWN_GOOD_CONFIG_PATH = Path("/srv/audit/known_good_config.json")
 
 
+def validate_gateway_config(config: dict) -> tuple[bool, list[str]]:
+    """Validate config by running the gateway in dry-run mode against a temp copy.
+
+    Returns (valid, errors) where errors is a list of validation error strings.
+    """
+    import tempfile, shutil
+    tmpdir = tempfile.mkdtemp(prefix="clawfactory-validate-")
+    try:
+        with open(os.path.join(tmpdir, "openclaw.json"), "w") as f:
+            json.dump(config, f, indent=2)
+
+        svc_user = f"openclaw-{INSTANCE_NAME}"
+        env = {
+            "OPENCLAW_STATE_DIR": tmpdir,
+            "HOME": f"/home/{svc_user}",
+            "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        }
+        # Load gateway env vars (API keys etc.) so config validation can resolve providers
+        gateway_env_file = SECRETS_DIR / "gateway.env"
+        if gateway_env_file.exists():
+            with open(gateway_env_file) as ef:
+                for line in ef:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        env[k] = v
+
+        if IS_LIMA_MODE:
+            cmd = [
+                "sudo", "-u", svc_user,
+                "env"] + [f"{k}={v}" for k, v in env.items()] + [
+                "node", "dist/index.js", "gateway", "run",
+                "--bind", "loopback", "--port", "19999",
+            ]
+        else:
+            cmd = [
+                "node", "dist/index.js", "gateway", "run",
+                "--bind", "loopback", "--port", "19999",
+            ]
+
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=str(APPROVED_DIR),
+                capture_output=True, text=True,
+                timeout=10,
+                env=env if not IS_LIMA_MODE else None,
+            )
+            output = result.stdout + "\n" + result.stderr
+        except subprocess.TimeoutExpired as e:
+            # Timeout = gateway started successfully (config is valid)
+            output = (e.stdout or b"").decode(errors="replace") + "\n" + (e.stderr or b"").decode(errors="replace")
+            if "Config invalid" not in output:
+                return True, []
+
+        # Parse validation errors from output
+        if "Config invalid" in output or "Unrecognized key" in output:
+            errors = []
+            for line in output.split("\n"):
+                line = line.strip().lstrip("- ")
+                if "Unrecognized key" in line or "Required" in line or "Expected" in line or "Invalid" in line:
+                    # Strip ANSI codes
+                    import re
+                    clean = re.sub(r'\x1b\[[0-9;]*m', '', line)
+                    if clean and clean not in errors:
+                        errors.append(clean)
+            return False, errors if errors else ["Config validation failed (unknown schema error)"]
+
+        return True, []
+    except Exception as e:
+        # If validation itself fails, log but allow (don't block on validation infra issues)
+        audit_log("config_validate_error", {"error": str(e)})
+        return True, []
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def fetch_ollama_models() -> list:
     """Fetch available models from Ollama with full details."""
     import urllib.request
@@ -5910,6 +6064,12 @@ async def gateway_config_save(
         config["meta"] = {}
     config["meta"]["lastTouchedAt"] = datetime.now(timezone.utc).isoformat()
 
+    # Validate before saving
+    valid, errors = validate_gateway_config(config)
+    if not valid:
+        audit_log("gateway_config_save_rejected", {"errors": errors})
+        return {"error": "Config validation failed", "validation_errors": errors}
+
     audit_log("gateway_config_save", {"keys": list(config.keys())})
 
     try:
@@ -6062,6 +6222,14 @@ async def propose_config(
                 "reason": reason,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }, f, indent=2)
+
+        # Auto-accept when spicy
+        if is_spicy():
+            result = _auto_apply_proposed_config()
+            if result.get("status") == "applied":
+                audit_log("config_auto_accepted", {"spice": get_spice_mode(), "keys": list(config.keys())})
+                return {"status": "auto_accepted", "message": f"Config auto-applied (spice mode: {get_spice_mode()})"}
+
         return {"status": "proposed", "message": "Config proposal saved for review"}
     except Exception as e:
         audit_log("config_propose_error", {"error": str(e)})
@@ -6160,6 +6328,12 @@ async def apply_proposed_config(
     merged = _deep_merge(current, proposed_config)
     merged.setdefault("meta", {})["lastTouchedAt"] = datetime.now(timezone.utc).isoformat()
 
+    # Validate merged config before applying
+    valid, errors = validate_gateway_config(merged)
+    if not valid:
+        audit_log("config_apply_proposed_rejected", {"errors": errors, "keys": list(proposed_config.keys())})
+        return {"error": "Config validation failed", "validation_errors": errors}
+
     changed_keys = list(proposed_config.keys())
     audit_log("config_apply_proposed", {"keys": changed_keys, "reason": proposal.get("reason", "")})
 
@@ -6188,6 +6362,169 @@ async def apply_proposed_config(
 
     audit_log("config_apply_proposed_success", {"keys": changed_keys})
     return {"status": "applied", "keys": changed_keys}
+
+
+# ============================================================
+# Spice Mode Auto-Accept
+# ============================================================
+
+def _auto_apply_proposed_config() -> dict:
+    """Apply a pending config proposal without auth (internal use for spice mode)."""
+    if not PROPOSED_CONFIG_PATH.exists():
+        return {"status": "no_proposal"}
+
+    try:
+        with open(PROPOSED_CONFIG_PATH) as f:
+            proposal = json.load(f)
+    except Exception as e:
+        return {"error": f"Failed to read proposal: {e}"}
+
+    proposed_config = proposal.get("config")
+    if not proposed_config or not isinstance(proposed_config, dict):
+        return {"error": "Invalid proposal"}
+
+    if not GATEWAY_CONFIG_PATH.exists():
+        return {"error": "Gateway config not found"}
+
+    try:
+        with open(GATEWAY_CONFIG_PATH) as f:
+            current = json.load(f)
+    except Exception as e:
+        return {"error": f"Failed to read config: {e}"}
+
+    def _deep_merge(base: dict, patch: dict) -> dict:
+        out = {**base}
+        for k, v in patch.items():
+            if isinstance(v, dict) and isinstance(out.get(k), dict):
+                out[k] = _deep_merge(out[k], v)
+            else:
+                out[k] = v
+        return out
+
+    merged = _deep_merge(current, proposed_config)
+    merged.setdefault("meta", {})["lastTouchedAt"] = datetime.now(timezone.utc).isoformat()
+
+    valid, errors = validate_gateway_config(merged)
+    if not valid:
+        audit_log("config_auto_accept_rejected", {"errors": errors})
+        return {"error": "Validation failed", "validation_errors": errors}
+
+    try:
+        if GATEWAY_CONFIG_PATH.exists():
+            KNOWN_GOOD_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(GATEWAY_CONFIG_PATH, KNOWN_GOOD_CONFIG_PATH)
+
+        gateway_stop()
+        with open(GATEWAY_CONFIG_PATH, "w") as f:
+            json.dump(merged, f, indent=2)
+        gateway_start()
+    except Exception as e:
+        audit_log("config_auto_accept_error", {"error": str(e)})
+        return {"error": str(e)}
+
+    try:
+        PROPOSED_CONFIG_PATH.unlink()
+    except Exception:
+        pass
+
+    return {"status": "applied", "keys": list(proposed_config.keys())}
+
+
+def _auto_merge_proposal_branches() -> dict:
+    """Merge all proposal/* branches without auth (internal use for spice mode)."""
+    try:
+        subprocess.run(["git", "fetch", "--prune", "origin"], cwd=APPROVED_DIR,
+                       capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            ["git", "branch", "-r", "--list", "origin/proposal/*"],
+            cwd=APPROVED_DIR, capture_output=True, text=True,
+        )
+        branches = [b.strip() for b in result.stdout.strip().split("\n") if b.strip()]
+        if not branches:
+            return {"status": "no_branches"}
+
+        merged = []
+        failed = []
+        original_url = git_setup_auth()
+        try:
+            for remote_branch in branches:
+                branch_name = remote_branch.replace("origin/", "", 1)
+                try:
+                    # Check for conflicts first
+                    check = subprocess.run(
+                        ["git", "merge-tree", "--write-tree", "origin/main", remote_branch],
+                        cwd=APPROVED_DIR, capture_output=True, text=True,
+                    )
+                    if check.returncode != 0:
+                        failed.append({"branch": branch_name, "reason": "conflict"})
+                        continue
+
+                    subprocess.run(["git", "checkout", "main"], cwd=APPROVED_DIR, capture_output=True)
+                    merge_result = subprocess.run(
+                        ["git", "merge", "--squash", remote_branch],
+                        cwd=APPROVED_DIR, capture_output=True, text=True,
+                    )
+                    if merge_result.returncode != 0:
+                        subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=APPROVED_DIR, capture_output=True)
+                        failed.append({"branch": branch_name, "reason": "merge_failed"})
+                        continue
+
+                    commit_result = subprocess.run(
+                        ["git", "commit", "-m", f"Auto-merge {branch_name} (spice mode)"],
+                        cwd=APPROVED_DIR, capture_output=True, text=True,
+                    )
+                    if commit_result.returncode != 0:
+                        subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=APPROVED_DIR, capture_output=True)
+                        failed.append({"branch": branch_name, "reason": "commit_failed"})
+                        continue
+
+                    # Push main and delete the proposal branch
+                    subprocess.run(["git", "push", "origin", "main"], cwd=APPROVED_DIR,
+                                   capture_output=True, text=True, timeout=30)
+                    subprocess.run(["git", "push", "origin", "--delete", branch_name], cwd=APPROVED_DIR,
+                                   capture_output=True, text=True, timeout=30)
+
+                    merged.append(branch_name)
+                    audit_log("branch_auto_merged", {"branch": branch_name, "spice": get_spice_mode()})
+                except Exception as e:
+                    subprocess.run(["git", "checkout", "main"], cwd=APPROVED_DIR, capture_output=True)
+                    subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=APPROVED_DIR, capture_output=True)
+                    failed.append({"branch": branch_name, "reason": str(e)})
+        finally:
+            subprocess.run(["git", "checkout", "main"], cwd=APPROVED_DIR, capture_output=True)
+            git_restore_url(original_url)
+
+        return {"status": "done", "merged": merged, "failed": failed}
+    except Exception as e:
+        audit_log("auto_merge_error", {"error": str(e)})
+        return {"error": str(e)}
+
+
+async def _spice_auto_accept_loop():
+    """Background loop: check for pending proposals every 60 seconds when spicy."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            if not is_spicy():
+                continue
+
+            # Auto-apply pending config proposals
+            if PROPOSED_CONFIG_PATH.exists():
+                result = _auto_apply_proposed_config()
+                if result.get("status") == "applied":
+                    audit_log("config_auto_accepted_periodic", {"keys": result.get("keys", [])})
+
+            # Auto-merge pending branch proposals
+            result = _auto_merge_proposal_branches()
+            if result.get("merged"):
+                audit_log("branches_auto_merged_periodic", {"merged": result["merged"]})
+        except Exception as e:
+            audit_log("spice_auto_accept_error", {"error": str(e)})
+
+
+@app.on_event("startup")
+async def start_spice_loop():
+    asyncio.create_task(_spice_auto_accept_loop())
 
 
 # ============================================================
