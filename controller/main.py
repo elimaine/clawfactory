@@ -1067,15 +1067,21 @@ async def promote_ui(
             </div>
         </div>
 
-        <div id="proposed-config-banner" style="display: none; background: #9c27b0; color: white; padding: 0.75rem 1rem; border-radius: 4px; margin-bottom: 1rem; display: flex; justify-content: space-between; align-items: center;">
-            <div>
-                <strong>AI Config Proposal</strong>
-                <span id="proposed-config-reason" style="margin-left: 0.5rem; opacity: 0.9;"></span>
+        <div id="proposed-config-banner" style="display: none; background: #2d1f3d; border: 1px solid #9c27b0; padding: 0.75rem 1rem; border-radius: 4px; margin-bottom: 1rem;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    <strong style="color: #ce93d8;">AI Config Proposal</strong>
+                    <span id="proposed-config-reason" style="margin-left: 0.5rem; color: #ccc;"></span>
+                </div>
+                <div style="display: flex; gap: 0.5rem;">
+                    <button onclick="applyProposedConfig()" style="background: #9c27b0; color: white; border: none; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; font-family: monospace;">Apply & Restart</button>
+                    <button onclick="reviewProposedConfig()" style="background: transparent; color: #ce93d8; border: 1px solid #9c27b0; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; font-family: monospace;">Review</button>
+                    <button onclick="dismissProposal()" style="background: transparent; color: #888; border: 1px solid #555; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; font-family: monospace;">Dismiss</button>
+                </div>
             </div>
-            <div>
-                <button onclick="switchPage('gateway'); scrollToConfig()" style="background: white; color: #9c27b0; border: none; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; font-family: monospace;">View & Load</button>
-                <button onclick="dismissProposal()" style="background: transparent; color: white; border: 1px solid white; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; margin-left: 0.5rem; font-family: monospace;">Dismiss</button>
-            </div>
+            <div id="proposed-config-keys" style="margin-top: 0.5rem; font-size: 0.8rem; color: #888;"></div>
+            <div id="proposed-config-preview" style="display: none; margin-top: 0.5rem;"></div>
+            <div id="proposed-config-status" style="display: none; margin-top: 0.5rem; font-size: 0.85rem;"></div>
         </div>
 
         <div class="grid">
@@ -1142,31 +1148,6 @@ async def promote_ui(
                     </div>'''}
                 </div>
 
-                {"" if OFFLINE_MODE else '''<h2>Branches</h2>
-                <div class="card">
-                    <button onclick="fetchBranches()">Refresh Branches</button>
-                    <div id="branches-list" style="margin-top: 0.5rem; max-height: 300px; overflow-y: auto;"></div>
-                    <div id="branch-diff-view" style="display: none; margin-top: 1rem; border-top: 1px solid #333; padding-top: 1rem;">
-                        <h3 style="color: #2196F3; margin: 0 0 0.5rem 0;">Branch: <span id="branch-diff-name"></span></h3>
-                        <div id="branch-diff-content"></div>
-                    </div>
-                </div>
-
-                <h2>Propose Changes</h2>
-                <div class="card">
-                    <p style="color: #888; font-size: 0.85rem; margin: 0 0 0.75rem 0;">Commit uncommitted changes to a new proposal branch and push.</p>
-                    <div style="display: flex; flex-direction: column; gap: 0.5rem;">
-                        <input type="text" id="propose-branch-name" placeholder="Branch name (e.g. fix-typo)" style="width: 100%; box-sizing: border-box;">
-                        <input type="text" id="propose-commit-msg" placeholder="Commit message" style="width: 100%; box-sizing: border-box;">
-                        <div style="display: flex; gap: 0.5rem;">
-                            <button onclick="proposeChanges()" class="secondary">Create Proposal Branch</button>
-                            <button onclick="viewLocalChanges()" class="secondary small" style="align-self: center;">Preview Changes</button>
-                        </div>
-                    </div>
-                    <div id="local-changes" style="margin-top: 0.5rem;"></div>
-                    <div id="propose-result" class="result" style="margin-top: 0.5rem;"></div>
-                </div>'''}
-
                 <h2>Recent Commits</h2>
                 <pre>{commits}</pre>
             </div>
@@ -1189,6 +1170,48 @@ async def promote_ui(
                 </div>
             </div>
         </div>
+
+        {"" if OFFLINE_MODE else '''<h2>Branches</h2>
+        <div class="card">
+            <button onclick="fetchBranches()">Refresh Branches</button>
+            <div id="branches-list" style="margin-top: 0.5rem; max-height: 400px; overflow-y: auto;"></div>
+            <div id="branch-diff-view" style="display: none; margin-top: 1rem; border-top: 1px solid #333; padding-top: 1rem;">
+                <h3 style="color: #2196F3; margin: 0 0 0.5rem 0;">Branch: <span id="branch-diff-name"></span></h3>
+                <div id="branch-diff-content"></div>
+            </div>
+        </div>
+
+        <h2>Propose Changes</h2>
+        <div class="card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+                <p style="color: #888; font-size: 0.85rem; margin: 0;">Commit uncommitted changes to a new proposal branch and push.</p>
+                <button onclick="refreshLocalChanges()" class="secondary small">Refresh</button>
+            </div>
+
+            <div id="local-changes-viewer">
+                <div id="local-changes-summary" style="margin-bottom: 0.75rem;">
+                    <span style="color: #888;">Click Refresh to scan for uncommitted changes.</span>
+                </div>
+                <div id="local-changes-files" style="display: none; margin-bottom: 0.75rem;">
+                    <strong style="color: #4CAF50; font-size: 0.85rem;">Changed Files</strong>
+                    <div id="local-changes-file-list" style="margin-top: 0.25rem; font-family: monospace; font-size: 0.8rem; background: #1a1a1a; border-radius: 4px; padding: 0.5rem; max-height: 200px; overflow-y: auto;"></div>
+                </div>
+                <details id="local-changes-diff-details" style="display: none; margin-bottom: 0.75rem;">
+                    <summary style="cursor: pointer; color: #9c27b0; font-size: 0.85rem;">View Full Diff</summary>
+                    <pre id="local-changes-diff" class="diff-view" style="margin: 0.5rem 0 0 0; background: #1e1e1e; padding: 0.5rem; border-radius: 3px; overflow-x: auto; max-height: 400px; overflow-y: auto; font-size: 0.75rem;"></pre>
+                </details>
+            </div>
+
+            <div style="display: flex; flex-direction: column; gap: 0.5rem; border-top: 1px solid #333; padding-top: 0.75rem;">
+                <input type="text" id="propose-branch-name" placeholder="Branch name (e.g. fix-typo)" style="width: 100%; box-sizing: border-box;">
+                <input type="text" id="propose-commit-msg" placeholder="Commit message" style="width: 100%; box-sizing: border-box;">
+                <div style="display: flex; gap: 0.5rem;">
+                    <button onclick="proposeChanges()" class="secondary">Create Proposal Branch</button>
+                </div>
+            </div>
+            <div id="propose-result" class="result" style="margin-top: 0.5rem;"></div>
+        </div>'''}
+        <div id="local-changes" style="display: none;"></div>
         </div><!-- /page-dashboard -->
 
         <!-- ==================== GATEWAY PAGE ==================== -->
@@ -1215,13 +1238,7 @@ async def promote_ui(
             <button onclick="saveConfig()" class="danger">Save &amp; Restart</button>
             <button onclick="formatConfig()" class="secondary">Format JSON</button>
             <button id="revert-config-btn" onclick="revertConfig()" class="secondary" style="display: none;">Revert to Backup</button>
-            <button id="load-proposed-btn" onclick="loadProposedConfig()" style="display: none; background: #9c27b0;">Load Proposed</button>
             <div id="config-result" class="result"></div>
-            <div id="proposed-config-info" style="display: none; margin-top: 0.5rem; padding: 0.5rem; background: #2d1f3d; border: 1px solid #9c27b0; border-radius: 4px;">
-                <strong style="color: #9c27b0;">Proposed by AI:</strong>
-                <span id="proposed-reason-inline" style="color: #ccc;"></span>
-                <span id="proposed-time-inline" style="color: #888; font-size: 0.8rem; margin-left: 0.5rem;"></span>
-            </div>
             <div id="ollama-models" style="margin-top: 0.5rem;"></div>
             <div style="display: flex; justify-content: space-between; margin-top: 0.5rem; font-size: 0.75rem; color: #888;">
                 <span id="cursor-pos">Line 1, Col 1</span>
@@ -2504,24 +2521,74 @@ async def promote_ui(
                 }}
             }}
 
-            // Offline mode: View local uncommitted changes
-            async function viewLocalChanges() {{
-                const container = document.getElementById('local-changes');
-                container.innerHTML = '<span style="color: #888;">Loading...</span>';
+            // View local uncommitted changes (structured viewer)
+            async function refreshLocalChanges() {{
+                const summary = document.getElementById('local-changes-summary');
+                const filesSection = document.getElementById('local-changes-files');
+                const fileList = document.getElementById('local-changes-file-list');
+                const diffDetails = document.getElementById('local-changes-diff-details');
+                const diffPre = document.getElementById('local-changes-diff');
+                summary.innerHTML = '<span style="color: #888;">Scanning...</span>';
+                filesSection.style.display = 'none';
+                diffDetails.style.display = 'none';
                 try {{
                     const resp = await fetch(basePath + '/local-changes');
                     const data = await resp.json();
                     if (!resp.ok || data.error || data.detail) {{
-                        container.innerHTML = '<span style="color: #ef9a9a;">Error: ' + (data.error || data.detail || 'Unknown error') + '</span>';
-                    }} else if (!data.changes || data.changes.trim() === '') {{
-                        container.innerHTML = '<span style="color: #4CAF50;">No uncommitted changes</span>';
-                    }} else {{
-                        container.innerHTML = '<pre style="max-height: 300px; overflow: auto; font-size: 0.8rem;">' + data.changes + '</pre>';
+                        summary.innerHTML = '<span style="color: #ef9a9a;">Error: ' + (data.error || data.detail || 'Unknown') + '</span>';
+                        return;
+                    }}
+                    const count = data.file_count || 0;
+                    if (count === 0) {{
+                        summary.innerHTML = '<span style="color: #4CAF50;">No uncommitted changes</span>';
+                        return;
+                    }}
+                    summary.innerHTML = '<span style="color: #ff9800;">' + count + ' file' + (count !== 1 ? 's' : '') + ' changed</span>' +
+                        (data.diff_stat ? '<pre style="margin: 0.25rem 0 0 0; font-size: 0.75rem; color: #888;">' + escapeHtml(data.diff_stat) + '</pre>' : '');
+                    // File list
+                    if (data.files && data.files.length) {{
+                        filesSection.style.display = 'block';
+                        fileList.innerHTML = data.files.map(f => {{
+                            const status = f.substring(0, 2);
+                            const name = f.substring(3);
+                            let color = '#ccc';
+                            if (status.includes('M')) color = '#ff9800';
+                            else if (status.includes('A') || status.includes('?')) color = '#4CAF50';
+                            else if (status.includes('D')) color = '#ef5350';
+                            else if (status.includes('R')) color = '#2196F3';
+                            return '<div style="padding: 2px 0;"><span style="color: #666; display: inline-block; width: 24px;">' + escapeHtml(status) + '</span><span style="color: ' + color + ';">' + escapeHtml(name) + '</span></div>';
+                        }}).join('');
+                    }}
+                    // Diff
+                    const diff = data.diff || data.diff_cached || '';
+                    if (diff) {{
+                        diffDetails.style.display = 'block';
+                        diffPre.innerHTML = formatDiffHtml(diff);
                     }}
                 }} catch(e) {{
-                    container.innerHTML = '<span style="color: #ef9a9a;">Error: ' + e.message + '</span>';
+                    summary.innerHTML = '<span style="color: #ef9a9a;">Error: ' + e.message + '</span>';
                 }}
             }}
+
+            function escapeHtml(text) {{
+                const div = document.createElement('div');
+                div.textContent = text;
+                return div.innerHTML;
+            }}
+
+            function formatDiffHtml(diff) {{
+                return diff.split('\\n').map(line => {{
+                    if (line.startsWith('+++') || line.startsWith('---')) return '<span style="color: #888;">' + escapeHtml(line) + '</span>';
+                    if (line.startsWith('+')) return '<span style="color: #4CAF50;">' + escapeHtml(line) + '</span>';
+                    if (line.startsWith('-')) return '<span style="color: #ef5350;">' + escapeHtml(line) + '</span>';
+                    if (line.startsWith('@@')) return '<span style="color: #2196F3;">' + escapeHtml(line) + '</span>';
+                    if (line.startsWith('diff ')) return '<span style="color: #ff9800; font-weight: bold;">' + escapeHtml(line) + '</span>';
+                    return escapeHtml(line);
+                }}).join('\\n');
+            }}
+
+            // Backward compat alias
+            function viewLocalChanges() {{ refreshLocalChanges(); }}
 
             // Propose Changes: commit uncommitted changes to a new proposal branch and push
             async function proposeChanges() {{
@@ -2552,6 +2619,7 @@ async def promote_ui(
                         nameInput.value = '';
                         msgInput.value = '';
                         fetchBranches();
+                        refreshLocalChanges();
                     }}
                 }} catch(e) {{
                     result.className = 'result error';
@@ -3157,29 +3225,17 @@ async def promote_ui(
                 try {{
                     const resp = await fetch(basePath + '/config/proposed');
                     const data = await resp.json();
-
                     const banner = document.getElementById('proposed-config-banner');
-                    const btn = document.getElementById('load-proposed-btn');
-                    const info = document.getElementById('proposed-config-info');
-                    const reasonSpan = document.getElementById('proposed-config-reason');
-                    const reasonInline = document.getElementById('proposed-reason-inline');
-                    const timeInline = document.getElementById('proposed-time-inline');
 
                     if (data.has_proposal) {{
-                        banner.style.display = 'flex';
-                        btn.style.display = 'inline-block';
-                        info.style.display = 'block';
-                        reasonSpan.textContent = data.reason || '';
-                        reasonInline.textContent = data.reason || '';
-                        if (data.timestamp) {{
-                            const date = new Date(data.timestamp);
-                            timeInline.textContent = date.toLocaleString();
-                        }}
+                        banner.style.display = 'block';
+                        document.getElementById('proposed-config-reason').textContent = data.reason || '';
+                        const keys = Object.keys(data.config || {{}});
+                        document.getElementById('proposed-config-keys').textContent = 'Changes: ' + keys.join(', ');
                         window.proposedConfig = data.config;
+                        window.proposedReason = data.reason;
                     }} else {{
                         banner.style.display = 'none';
-                        btn.style.display = 'none';
-                        info.style.display = 'none';
                         window.proposedConfig = null;
                     }}
                 }} catch(e) {{
@@ -3187,54 +3243,66 @@ async def promote_ui(
                 }}
             }}
 
-            async function loadProposedConfig() {{
-                if (!window.proposedConfig) {{
-                    alert('No proposed config available');
-                    return;
+            function deepMerge(target, source) {{
+                const out = {{ ...target }};
+                for (const key of Object.keys(source)) {{
+                    if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])
+                        && target[key] && typeof target[key] === 'object' && !Array.isArray(target[key])) {{
+                        out[key] = deepMerge(target[key], source[key]);
+                    }} else {{
+                        out[key] = source[key];
+                    }}
                 }}
-
-                if (!confirm('Load the AI-proposed config into the editor? You can review and save it after.')) return;
-
-                setEditorValue(JSON.stringify(window.proposedConfig, null, 2));
-
-                const result = document.getElementById('config-result');
-                result.style.display = 'block';
-                result.className = 'result';
-                result.innerHTML = '<span style="color: #9c27b0;">Loaded proposed config. Review and Save & Restart to apply.</span>';
-
-                // Delete the proposal after loading
-                try {{
-                    await fetch(basePath + '/config/proposed', {{ method: 'DELETE' }});
-                    document.getElementById('proposed-config-banner').style.display = 'none';
-                    document.getElementById('load-proposed-btn').style.display = 'none';
-                    document.getElementById('proposed-config-info').style.display = 'none';
-                    window.proposedConfig = null;
-                }} catch(e) {{
-                    console.error('Error deleting proposal:', e);
-                }}
-
-                // Validate the loaded config
-                validateConfig();
+                return out;
             }}
 
-            function scrollToConfig() {{
-                switchPage('gateway');
-                setTimeout(() => {{
-                    const configSection = document.getElementById('config-editor-wrapper');
-                    if (configSection) configSection.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
-                }}, 100);
+            async function applyProposedConfig() {{
+                if (!window.proposedConfig) return;
+                if (!confirm('Apply the AI-proposed config changes and restart the gateway?')) return;
+
+                const status = document.getElementById('proposed-config-status');
+                status.style.display = 'block';
+                status.innerHTML = '<span style="color: #ff9800;">Applying changes...</span>';
+
+                try {{
+                    const resp = await fetch(basePath + '/config/apply-proposed', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                    }});
+                    const data = await resp.json();
+                    if (!resp.ok || data.error) {{
+                        status.innerHTML = '<span style="color: #ef5350;">Error: ' + escapeHtml(data.error || data.detail || 'Failed') + '</span>';
+                    }} else {{
+                        status.innerHTML = '<span style="color: #4CAF50;">Applied and restarted gateway.</span>';
+                        setTimeout(() => {{
+                            document.getElementById('proposed-config-banner').style.display = 'none';
+                            window.proposedConfig = null;
+                        }}, 2000);
+                    }}
+                }} catch(e) {{
+                    status.innerHTML = '<span style="color: #ef5350;">Error: ' + escapeHtml(e.message) + '</span>';
+                }}
+            }}
+
+            function reviewProposedConfig() {{
+                const preview = document.getElementById('proposed-config-preview');
+                if (preview.style.display === 'block') {{
+                    preview.style.display = 'none';
+                    return;
+                }}
+                if (!window.proposedConfig) return;
+                preview.style.display = 'block';
+                preview.innerHTML = '<pre style="background: #1a1a1a; padding: 0.5rem; border-radius: 4px; max-height: 300px; overflow: auto; font-size: 0.8rem; color: #ccc;">' + escapeHtml(JSON.stringify(window.proposedConfig, null, 2)) + '</pre>';
             }}
 
             async function dismissProposal() {{
-                if (!confirm('Dismiss the AI config proposal? It will be deleted.')) return;
+                if (!confirm('Dismiss this config proposal?')) return;
                 try {{
                     await fetch(basePath + '/config/proposed', {{ method: 'DELETE' }});
                     document.getElementById('proposed-config-banner').style.display = 'none';
-                    document.getElementById('load-proposed-btn').style.display = 'none';
-                    document.getElementById('proposed-config-info').style.display = 'none';
                     window.proposedConfig = null;
                 }} catch(e) {{
-                    alert('Error dismissing proposal: ' + e.message);
+                    alert('Error: ' + e.message);
                 }}
             }}
 
@@ -6045,6 +6113,83 @@ async def delete_proposed_config(
     return {"status": "no_proposal"}
 
 
+@app.post("/config/apply-proposed")
+@app.post("/controller/config/apply-proposed")
+async def apply_proposed_config(
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Deep-merge the pending proposal into the current config, save, restart gateway, then delete the proposal."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if not PROPOSED_CONFIG_PATH.exists():
+        return {"error": "No pending proposal"}
+
+    try:
+        with open(PROPOSED_CONFIG_PATH) as f:
+            proposal = json.load(f)
+    except Exception as e:
+        return {"error": f"Failed to read proposal: {e}"}
+
+    proposed_config = proposal.get("config")
+    if not proposed_config or not isinstance(proposed_config, dict):
+        return {"error": "Invalid proposal (no config)"}
+
+    # Read current config
+    if not GATEWAY_CONFIG_PATH.exists():
+        return {"error": "Gateway config not found"}
+
+    try:
+        with open(GATEWAY_CONFIG_PATH) as f:
+            current = json.load(f)
+    except Exception as e:
+        return {"error": f"Failed to read current config: {e}"}
+
+    # Deep merge
+    def _deep_merge(base: dict, patch: dict) -> dict:
+        out = {**base}
+        for k, v in patch.items():
+            if isinstance(v, dict) and isinstance(out.get(k), dict):
+                out[k] = _deep_merge(out[k], v)
+            else:
+                out[k] = v
+        return out
+
+    merged = _deep_merge(current, proposed_config)
+    merged.setdefault("meta", {})["lastTouchedAt"] = datetime.now(timezone.utc).isoformat()
+
+    changed_keys = list(proposed_config.keys())
+    audit_log("config_apply_proposed", {"keys": changed_keys, "reason": proposal.get("reason", "")})
+
+    # Save backup, stop gateway, write config, start gateway
+    try:
+        import shutil
+        if GATEWAY_CONFIG_PATH.exists():
+            KNOWN_GOOD_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(GATEWAY_CONFIG_PATH, KNOWN_GOOD_CONFIG_PATH)
+
+        gateway_stop()
+
+        with open(GATEWAY_CONFIG_PATH, "w") as f:
+            json.dump(merged, f, indent=2)
+
+        gateway_start()
+    except Exception as e:
+        audit_log("config_apply_proposed_error", {"error": str(e)})
+        return {"error": f"Failed to apply: {e}"}
+
+    # Only delete proposal after successful save + restart
+    try:
+        PROPOSED_CONFIG_PATH.unlink()
+    except Exception:
+        pass
+
+    audit_log("config_apply_proposed_success", {"keys": changed_keys})
+    return {"status": "applied", "keys": changed_keys}
+
+
 # ============================================================
 # Gateway Pairing (Device + DM)
 # ============================================================
@@ -6240,35 +6385,55 @@ async def local_changes_endpoint(
     session: Optional[str] = Cookie(None, alias="clawfactory_session"),
     authorization: Optional[str] = Header(None),
 ):
-    """Get uncommitted changes in approved directory (offline mode)."""
+    """Get uncommitted changes in approved directory."""
     if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     try:
-        # Get git status and diff
+        # Get git status (porcelain for parsing)
         status_result = subprocess.run(
             ["git", "status", "--short"],
             cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-            timeout=30
+            capture_output=True, text=True, timeout=30,
         )
+        files = [l for l in status_result.stdout.strip().split("\n") if l.strip()] if status_result.stdout.strip() else []
 
-        diff_result = subprocess.run(
+        # Get diff stat
+        stat_result = subprocess.run(
             ["git", "diff", "--stat"],
             cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-            timeout=30
+            capture_output=True, text=True, timeout=30,
         )
 
+        # Get full diff
+        diff_result = subprocess.run(
+            ["git", "diff"],
+            cwd=APPROVED_DIR,
+            capture_output=True, text=True, timeout=30,
+        )
+
+        # Also include untracked file contents (new files not yet in git)
+        untracked_result = subprocess.run(
+            ["git", "diff", "--cached"],
+            cwd=APPROVED_DIR,
+            capture_output=True, text=True, timeout=30,
+        )
+
+        # Build combined changes string for backward compat
         changes = ""
         if status_result.stdout:
             changes += "=== Status ===\n" + status_result.stdout + "\n"
-        if diff_result.stdout:
-            changes += "=== Changes ===\n" + diff_result.stdout
+        if stat_result.stdout:
+            changes += "=== Changes ===\n" + stat_result.stdout
 
-        return {"changes": changes.strip()}
+        return {
+            "changes": changes.strip(),
+            "files": files,
+            "diff_stat": stat_result.stdout.strip(),
+            "diff": diff_result.stdout,
+            "diff_cached": untracked_result.stdout,
+            "file_count": len(files),
+        }
     except subprocess.TimeoutExpired:
         return {"error": "Operation timed out"}
     except Exception as e:
