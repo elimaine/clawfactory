@@ -1115,12 +1115,38 @@ async def promote_ui(
                         <h3 style="color: #2196F3; margin: 0 0 0.5rem 0;">Branch: <span id="branch-diff-name"></span></h3>
                         <div id="branch-diff-content"></div>
                     </div>
+                </div>
+
+                <h2>Propose Changes</h2>
+                <div class="card">
+                    <p style="color: #888; font-size: 0.85rem; margin: 0 0 0.75rem 0;">Commit uncommitted changes to a new proposal branch and push.</p>
+                    <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                        <input type="text" id="propose-branch-name" placeholder="Branch name (e.g. fix-typo)" style="width: 100%; box-sizing: border-box;">
+                        <input type="text" id="propose-commit-msg" placeholder="Commit message" style="width: 100%; box-sizing: border-box;">
+                        <div style="display: flex; gap: 0.5rem;">
+                            <button onclick="proposeChanges()" class="secondary">Create Proposal Branch</button>
+                            <button onclick="viewLocalChanges()" class="secondary small" style="align-self: center;">Preview Changes</button>
+                        </div>
+                    </div>
+                    <div id="local-changes" style="margin-top: 0.5rem;"></div>
+                    <div id="propose-result" class="result" style="margin-top: 0.5rem;"></div>
                 </div>'''}
 
                 <h2>Recent Commits</h2>
                 <pre>{commits}</pre>
             </div>
             <div>
+                <h2>Spice Mode <span style="font-size: 1.2rem;">&#127798;</span></h2>
+                <div class="card">
+                    <div style="display: flex; gap: 0.5rem;">
+                        <button id="spice-nospice" onclick="setSpiceMode('nospice')" class="secondary" style="flex: 1; font-size: 0.85rem;">&#129482; no spice</button>
+                        <button id="spice-medspice" onclick="setSpiceMode('medspice')" class="secondary" style="flex: 1; font-size: 0.85rem;">&#127798; med spice</button>
+                        <button id="spice-veryspice" onclick="setSpiceMode('veryspice')" class="secondary" style="flex: 1; font-size: 0.85rem;">&#128293; very spice</button>
+                    </div>
+                    <div id="spice-current" style="margin-top: 0.5rem; font-size: 0.85rem; color: #aaa;"></div>
+                    <div id="spice-result" class="result" style="margin-top: 0.5rem;"></div>
+                </div>
+
                 <h2>Quick Actions</h2>
                 <div class="card">
                     <button onclick="restartGateway()" class="danger">Restart Gateway</button>
@@ -1255,7 +1281,8 @@ async def promote_ui(
             </div>
             <div style="display: flex; align-items: center; gap: 0.5rem;">
                 <span id="capture-status-dot" style="width: 8px; height: 8px; border-radius: 50%; background: #666; display: inline-block;"></span>
-                <span id="capture-status-text" style="font-size: 0.8rem; color: #888;">Capture: --</span>
+                <span id="capture-status-text" style="font-size: 0.8rem; color: #888;">MITM Capture: --</span>
+                <span id="capture-entry-count" style="font-size: 0.75rem; color: #666;"></span>
                 <button id="capture-toggle-btn" onclick="toggleCapture()" class="small" style="font-size: 0.75rem;">--</button>
             </div>
         </div>
@@ -1265,17 +1292,16 @@ async def promote_ui(
             <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin-bottom: 1rem;">
                 <select id="traffic-provider-filter" style="padding: 0.4rem; background: #2d2d2d; border: 1px solid #444; color: #e0e0e0; border-radius: 4px;">
                     <option value="">All Providers</option>
-                    <option value="anthropic">Anthropic</option>
-                    <option value="openai">OpenAI</option>
-                    <option value="gemini">Gemini</option>
                 </select>
                 <input type="text" id="traffic-search" placeholder="Search..." style="width: 200px; padding: 0.4rem;">
                 <button onclick="fetchTraffic()" class="secondary small">Search</button>
+                <button onclick="decryptTraffic()" class="small" style="background: #1565C0;">Decrypt &amp; View</button>
                 <button onclick="fetchTrafficStats()" class="secondary small">Stats</button>
+                <button onclick="deleteTrafficLogs()" class="small danger">Delete Logs</button>
             </div>
             <div id="traffic-stats" style="display: none; margin-bottom: 1rem;"></div>
             <div id="traffic-table-container">
-                <p style="color: #888;">Click Search to load traffic data.</p>
+                <p style="color: #888;">Click Search to load proxy traffic, or Decrypt &amp; View for MITM-captured traffic.</p>
             </div>
             <div id="traffic-detail" style="display: none;"></div>
         </div>
@@ -1360,6 +1386,7 @@ async def promote_ui(
             <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
                 <input type="text" id="snapshot-name-input" placeholder="Name (optional)" style="width: 200px; padding: 0.3rem 0.5rem; background: #222; color: #eee; border: 1px solid #444; border-radius: 3px;">
                 <button onclick="createSnapshot()">Create Snapshot</button>
+                <button onclick="syncSnapshots()" class="secondary">Sync to Host</button>
                 <button onclick="fetchSnapshots()" class="secondary">Refresh List</button>
                 <button onclick="deleteAllSnapshots()" class="danger">Delete All</button>
             </div>
@@ -1490,6 +1517,7 @@ async def promote_ui(
             }}
 
             // ---- Sidebar navigation ----
+            let configEditor;
             function switchPage(name) {{
                 document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
                 document.querySelectorAll('#sidebar a').forEach(a => a.classList.remove('active'));
@@ -1535,6 +1563,23 @@ async def promote_ui(
             // ---- Traffic functions ----
             let trafficPage = 0;
 
+            async function loadTrafficProviders() {{
+                try {{
+                    const resp = await fetch(basePath + '/traffic/providers');
+                    const data = await resp.json();
+                    const select = document.getElementById('traffic-provider-filter');
+                    if (select && data.providers) {{
+                        data.providers.forEach(p => {{
+                            const opt = document.createElement('option');
+                            opt.value = p;
+                            opt.textContent = p;
+                            select.appendChild(opt);
+                        }});
+                    }}
+                }} catch(e) {{ /* ignore */ }}
+            }}
+            loadTrafficProviders();
+
             async function fetchTraffic(page = 0) {{
                 trafficPage = page;
                 const container = document.getElementById('traffic-table-container');
@@ -1553,13 +1598,20 @@ async def promote_ui(
                 }}
             }}
 
-            function renderTrafficTable(entries) {{
+            let lastTrafficDecrypted = false;
+
+            function renderTrafficTable(entries, isDecrypted = false) {{
+                lastTrafficDecrypted = isDecrypted;
                 const container = document.getElementById('traffic-table-container');
                 if (!entries || entries.length === 0) {{
                     container.innerHTML = '<p style="color: #888;">No traffic entries found.</p>';
                     return;
                 }}
-                let html = '<table class="traffic-table"><thead><tr>';
+                let html = '';
+                if (isDecrypted) {{
+                    html += '<div style="margin-bottom: 0.5rem; font-size: 0.75rem; color: #1565C0; background: #0d2137; padding: 0.3rem 0.6rem; border-radius: 4px; display: inline-block;">Showing decrypted MITM traffic (not written to disk)</div>';
+                }}
+                html += '<table class="traffic-table"><thead><tr>';
                 html += '<th>Time</th><th>Provider</th><th>Method</th><th>Path</th><th>Status</th><th>Duration</th><th>Tokens</th><th></th>';
                 html += '</tr></thead><tbody>';
                 entries.forEach(e => {{
@@ -1570,24 +1622,27 @@ async def promote_ui(
                     const tokenStr = tokens > 0 ? tokens.toLocaleString() : '--';
                     const duration = e.duration_ms ? Math.round(e.duration_ms) + 'ms' : '--';
                     const streamBadge = e.streaming ? ' <span style="color: #888; font-size: 0.7rem;">SSE</span>' : '';
+                    const llmBadge = e.is_llm ? ' <span style="color: #ff9800; font-size: 0.7rem;">LLM</span>' : '';
                     const safeId = escHtml(e.id);
-                    html += `<tr style="cursor: pointer;" onclick="viewTrafficDetail('${{safeId}}')">`;
+                    const detailFn = isDecrypted ? 'viewDecryptedDetail' : 'viewTrafficDetail';
+                    html += `<tr style="cursor: pointer;" onclick="${{detailFn}}('${{safeId}}')">`;
                     html += `<td style="color: #888;">${{ts}}</td>`;
                     html += `<td class="provider ${{provClass}}">${{escHtml(e.provider || '?')}}</td>`;
                     html += `<td>${{escHtml(e.method || '?')}}</td>`;
-                    html += `<td style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${{escHtml(e.path || '?')}}${{streamBadge}}</td>`;
+                    html += `<td style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${{escHtml(e.path || e.url || '?')}}${{streamBadge}}${{llmBadge}}</td>`;
                     html += `<td style="color: ${{statusColor}};">${{escHtml(e.response_status || '?')}}</td>`;
                     html += `<td>${{duration}}</td>`;
                     html += `<td>${{tokenStr}}</td>`;
-                    html += `<td><button class="small secondary" onclick="event.stopPropagation(); viewTrafficDetail('${{safeId}}')">Detail</button></td>`;
+                    html += `<td><button class="small secondary" onclick="event.stopPropagation(); ${{detailFn}}('${{safeId}}')">Detail</button></td>`;
                     html += '</tr>';
                 }});
                 html += '</tbody></table>';
 
                 // Pagination
+                const pageFn = isDecrypted ? 'decryptTraffic' : 'fetchTraffic';
                 html += '<div style="margin-top: 0.5rem; display: flex; gap: 0.5rem;">';
-                if (trafficPage > 0) html += `<button class="small secondary" onclick="fetchTraffic(${{trafficPage - 1}})">Previous</button>`;
-                if (entries.length === 50) html += `<button class="small secondary" onclick="fetchTraffic(${{trafficPage + 1}})">Next</button>`;
+                if (trafficPage > 0) html += `<button class="small secondary" onclick="${{pageFn}}(${{trafficPage - 1}})">Previous</button>`;
+                if (entries.length === 50) html += `<button class="small secondary" onclick="${{pageFn}}(${{trafficPage + 1}})">Next</button>`;
                 html += '</div>';
 
                 container.innerHTML = html;
@@ -1646,6 +1701,58 @@ async def promote_ui(
                 }}
             }}
 
+            async function viewDecryptedDetail(id) {{
+                // Same as viewTrafficDetail but uses decrypt endpoint
+                const detail = document.getElementById('llm-session-detail');
+                detail.innerHTML = '<p style="color: #888;">Decrypting entry...</p>';
+
+                document.querySelectorAll('.sub-content').forEach(c => c.classList.remove('active'));
+                document.querySelectorAll('.sub-tab').forEach(t => t.classList.remove('active'));
+                document.getElementById('sub-llm-sessions').classList.add('active');
+                document.querySelectorAll('.sub-tab').forEach(t => {{
+                    if (t.textContent === 'LLM Sessions') t.classList.add('active');
+                }});
+
+                try {{
+                    const resp = await fetch(basePath + '/traffic/decrypt/' + id);
+                    const data = await resp.json();
+
+                    let html = '<div class="traffic-detail">';
+                    html += `<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">`;
+                    html += `<h3 style="margin: 0; color: #1565C0;">Decrypted Request Detail</h3>`;
+                    html += `<button class="small secondary" onclick="document.querySelectorAll('.sub-content').forEach(c=>c.classList.remove('active'));document.getElementById('sub-traffic').classList.add('active');document.querySelectorAll('.sub-tab').forEach(t=>{{t.classList.remove('active');if(t.textContent==='Traffic')t.classList.add('active');}});">Back to Traffic</button>`;
+                    html += `</div>`;
+                    html += `<div style="margin-bottom: 0.5rem; font-size: 0.75rem; color: #1565C0; background: #0d2137; padding: 0.3rem 0.6rem; border-radius: 4px; display: inline-block;">Decrypted in memory only</div>`;
+
+                    html += `<div class="stats">`;
+                    html += `<div class="stat"><div class="stat-value provider-${{escHtml(data.provider || '')}}">${{escHtml(data.provider || '?')}}</div><div class="stat-label">Provider</div></div>`;
+                    html += `<div class="stat"><div class="stat-value">${{escHtml(data.response_status || '?')}}</div><div class="stat-label">Status</div></div>`;
+                    html += `<div class="stat"><div class="stat-value">${{Math.round(data.duration_ms || 0)}}ms</div><div class="stat-label">Duration</div></div>`;
+                    html += `<div class="stat"><div class="stat-value">${{(data.tokens_in || 0).toLocaleString()}}</div><div class="stat-label">Tokens In</div></div>`;
+                    html += `<div class="stat"><div class="stat-value">${{(data.tokens_out || 0).toLocaleString()}}</div><div class="stat-label">Tokens Out</div></div>`;
+                    html += `</div>`;
+
+                    html += `<p style="color: #888; font-size: 0.85rem;"><strong>ID:</strong> ${{escHtml(data.id)}} | <strong>Time:</strong> ${{escHtml(data.timestamp)}} | <strong>Host:</strong> ${{escHtml(data.host || '?')}} | <strong>Method:</strong> ${{escHtml(data.method)}} <strong>URL:</strong> ${{escHtml(data.url || data.path)}}${{data.streaming ? ' | <span style="color: #ff9800;">Streaming</span>' : ''}}${{data.is_llm ? ' | <span style="color: #ff9800;">LLM</span>' : ''}}</p>`;
+
+                    html += `<details style="margin-top: 1rem;"><summary style="cursor: pointer; color: #2196F3;">Request Headers</summary>`;
+                    html += `<pre style="margin-top: 0.5rem;">${{escHtml(JSON.stringify(data.request_headers || {{}}, null, 2))}}</pre></details>`;
+
+                    html += `<details open style="margin-top: 0.5rem;"><summary style="cursor: pointer; color: #4CAF50;">Request Body</summary>`;
+                    html += `<pre style="margin-top: 0.5rem;">${{escHtml(JSON.stringify(data.request_body || null, null, 2))}}</pre></details>`;
+
+                    html += `<details style="margin-top: 0.5rem;"><summary style="cursor: pointer; color: #2196F3;">Response Headers</summary>`;
+                    html += `<pre style="margin-top: 0.5rem;">${{escHtml(JSON.stringify(data.response_headers || {{}}, null, 2))}}</pre></details>`;
+
+                    html += `<details open style="margin-top: 0.5rem;"><summary style="cursor: pointer; color: #ff9800;">Response Body</summary>`;
+                    html += `<pre style="margin-top: 0.5rem;">${{escHtml(JSON.stringify(data.response_body || null, null, 2))}}</pre></details>`;
+
+                    html += '</div>';
+                    detail.innerHTML = html;
+                }} catch(e) {{
+                    detail.innerHTML = '<p style="color: #ef9a9a;">Error decrypting entry: ' + escHtml(e.message) + '</p>';
+                }}
+            }}
+
             async function fetchTrafficStats() {{
                 const container = document.getElementById('traffic-stats');
                 container.style.display = 'block';
@@ -1673,17 +1780,19 @@ async def promote_ui(
                 }}
             }}
 
-            // ---- Capture toggle ----
+            // ---- MITM Capture toggle ----
             let captureEnabled = null;
+            let captureEntryCount = 0;
 
             async function fetchCaptureStatus() {{
                 try {{
                     const resp = await fetch(basePath + '/capture');
                     const data = await resp.json();
                     captureEnabled = data.enabled;
+                    captureEntryCount = data.entry_count || 0;
                     updateCaptureUI();
                 }} catch(e) {{
-                    document.getElementById('capture-status-text').textContent = 'Capture: error';
+                    document.getElementById('capture-status-text').textContent = 'MITM Capture: error';
                 }}
             }}
 
@@ -1691,28 +1800,38 @@ async def promote_ui(
                 const dot = document.getElementById('capture-status-dot');
                 const text = document.getElementById('capture-status-text');
                 const btn = document.getElementById('capture-toggle-btn');
+                const countEl = document.getElementById('capture-entry-count');
                 if (captureEnabled) {{
                     dot.style.background = '#4CAF50';
                     dot.style.boxShadow = '0 0 6px #4CAF50';
-                    text.textContent = 'Capture: ON';
+                    text.textContent = 'MITM Capture: ON';
                     text.style.color = '#4CAF50';
                     btn.textContent = 'Disable';
                     btn.className = 'small danger';
                 }} else {{
                     dot.style.background = '#888';
                     dot.style.boxShadow = 'none';
-                    text.textContent = 'Capture: OFF';
+                    text.textContent = 'MITM Capture: OFF';
                     text.style.color = '#888';
                     btn.textContent = 'Enable';
                     btn.className = 'small';
+                }}
+                if (countEl) {{
+                    countEl.textContent = captureEntryCount > 0 ? `(${{captureEntryCount}} entries)` : '';
                 }}
             }}
 
             async function toggleCapture() {{
                 const newState = !captureEnabled;
                 const action = newState ? 'enable' : 'disable';
-                if (!confirm(`${{action.charAt(0).toUpperCase() + action.slice(1)}} traffic capture?`)) return;
+                const msg = newState
+                    ? 'Enable MITM capture?\\n\\nThis will:\\n- Start mitmproxy transparent proxy\\n- Redirect all gateway HTTPS traffic through it\\n- Log encrypted traffic entries'
+                    : 'Disable MITM capture?\\n\\nThis will:\\n- Remove traffic redirect rules\\n- Stop mitmproxy';
+                if (!confirm(msg)) return;
                 try {{
+                    btn = document.getElementById('capture-toggle-btn');
+                    btn.textContent = '...';
+                    btn.disabled = true;
                     const resp = await fetch(basePath + '/capture', {{
                         method: 'POST',
                         headers: {{ 'Content-Type': 'application/json' }},
@@ -1721,8 +1840,55 @@ async def promote_ui(
                     const data = await resp.json();
                     captureEnabled = data.enabled;
                     updateCaptureUI();
+                    btn.disabled = false;
                 }} catch(e) {{
                     alert('Error toggling capture: ' + e.message);
+                    document.getElementById('capture-toggle-btn').disabled = false;
+                }}
+            }}
+
+            // ---- Decrypt & View (MITM encrypted traffic) ----
+            async function decryptTraffic(page = 0) {{
+                trafficPage = page;
+                const container = document.getElementById('traffic-table-container');
+                const provider = document.getElementById('traffic-provider-filter').value;
+                const search = document.getElementById('traffic-search').value;
+                container.innerHTML = '<p style="color: #888;">Decrypting traffic...</p>';
+                try {{
+                    let url = basePath + '/traffic/decrypt?limit=50&offset=' + (page * 50);
+                    if (provider) url += '&provider=' + provider;
+                    if (search) url += '&search=' + encodeURIComponent(search);
+                    const resp = await fetch(url);
+                    if (!resp.ok) {{
+                        const err = await resp.json();
+                        container.innerHTML = '<p style="color: #ef9a9a;">' + escHtml(err.detail || 'Decryption failed') + '</p>';
+                        return;
+                    }}
+                    const data = await resp.json();
+                    renderTrafficTable(data.entries || [], true);
+                }} catch(e) {{
+                    container.innerHTML = '<p style="color: #ef9a9a;">Error: ' + escHtml(e.message) + '</p>';
+                }}
+            }}
+
+            // ---- Delete encrypted traffic logs ----
+            async function deleteTrafficLogs() {{
+                const deleteKey = confirm('Also delete the encryption key?\\n\\nOK = Delete logs + key (old logs become unreadable)\\nCancel = Delete logs only (key preserved for new captures)');
+                if (!confirm('Delete all captured traffic logs?\\n\\nThis cannot be undone.')) return;
+                try {{
+                    const resp = await fetch(basePath + '/traffic/delete', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ delete_key: deleteKey }})
+                    }});
+                    const data = await resp.json();
+                    let msg = 'Logs deleted.';
+                    if (data.deleted_key) msg += ' Encryption key also deleted.';
+                    alert(msg);
+                    document.getElementById('traffic-table-container').innerHTML = '<p style="color: #888;">Logs deleted.</p>';
+                    fetchCaptureStatus();
+                }} catch(e) {{
+                    alert('Error deleting logs: ' + e.message);
                 }}
             }}
 
@@ -1848,7 +2014,6 @@ async def promote_ui(
             }}
 
             // Initialize CodeMirror editor
-            let configEditor;
             document.addEventListener('DOMContentLoaded', function() {{
                 configEditor = CodeMirror(document.getElementById('config-editor-wrapper'), {{
                     mode: {{ name: 'javascript', json: true }},
@@ -2187,7 +2352,56 @@ async def promote_ui(
                 }}
             }}
 
-            // Gateway restart
+            // Spice Mode (temperature control)
+            const spiceLabels = {{
+                'nospice': 'No spice - strictly business',
+                'medspice': 'Med spice - balanced heat',
+                'veryspice': 'Very spice - full send',
+            }};
+            function highlightSpice(mode) {{
+                ['nospice', 'medspice', 'veryspice'].forEach(m => {{
+                    const btn = document.getElementById('spice-' + m);
+                    if (btn) btn.style.borderColor = m === mode ? '#ff5722' : '#444';
+                }});
+                const cur = document.getElementById('spice-current');
+                if (cur) cur.textContent = 'Current: ' + (spiceLabels[mode] || mode);
+            }}
+            async function loadSpiceMode() {{
+                try {{
+                    const resp = await fetch(basePath + '/spice');
+                    const data = await resp.json();
+                    if (data.mode) highlightSpice(data.mode);
+                }} catch(e) {{ /* ignore on load */ }}
+            }}
+            loadSpiceMode();
+
+            async function setSpiceMode(mode) {{
+                const result = document.getElementById('spice-result');
+                try {{
+                    const resp = await fetch(basePath + '/spice', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ mode: mode }})
+                    }});
+                    const data = await resp.json();
+                    if (data.error) {{
+                        result.style.display = 'block';
+                        result.className = 'result error';
+                        result.textContent = data.error;
+                    }} else {{
+                        highlightSpice(mode);
+                        result.style.display = 'block';
+                        result.className = 'result';
+                        result.textContent = data.label;
+                        setTimeout(() => result.style.display = 'none', 2000);
+                    }}
+                }} catch(e) {{
+                    result.style.display = 'block';
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
+                }}
+            }}
+
             async function restartGateway() {{
                 if (!confirm('Restart the gateway? This will briefly interrupt the bot.')) return;
                 const result = document.getElementById('gateway-system-result') || document.getElementById('status-result') || document.getElementById('promote-result');
@@ -2271,6 +2485,42 @@ async def promote_ui(
                     }}
                 }} catch(e) {{
                     container.innerHTML = '<span style="color: #ef9a9a;">Error: ' + e.message + '</span>';
+                }}
+            }}
+
+            // Propose Changes: commit uncommitted changes to a new proposal branch and push
+            async function proposeChanges() {{
+                const nameInput = document.getElementById('propose-branch-name');
+                const msgInput = document.getElementById('propose-commit-msg');
+                const result = document.getElementById('propose-result');
+                const branchName = (nameInput.value || '').trim();
+                const commitMsg = (msgInput.value || '').trim();
+                if (!branchName) {{ alert('Enter a branch name'); return; }}
+                if (!commitMsg) {{ alert('Enter a commit message'); return; }}
+                if (!confirm(`Create proposal/${{branchName}} with uncommitted changes?`)) return;
+                result.style.display = 'block';
+                result.className = 'result';
+                result.textContent = 'Creating proposal branch...';
+                try {{
+                    const resp = await fetch(basePath + '/branches/propose', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ branch: branchName, message: commitMsg }})
+                    }});
+                    const data = await resp.json();
+                    if (!resp.ok || data.error) {{
+                        result.className = 'result error';
+                        result.textContent = data.error || data.detail || 'Failed';
+                    }} else {{
+                        result.className = 'result';
+                        result.innerHTML = '<span style="color: #4CAF50;">' + (data.message || 'Proposal branch created') + '</span>';
+                        nameInput.value = '';
+                        msgInput.value = '';
+                        fetchBranches();
+                    }}
+                }} catch(e) {{
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
                 }}
             }}
 
@@ -2411,6 +2661,26 @@ async def promote_ui(
                         result.textContent = 'Created: ' + data.name + ' (' + formatSize(data.size) + ')';
                         if (nameInput) nameInput.value = '';
                         fetchSnapshots();
+                    }}
+                }} catch(e) {{
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
+                }}
+            }}
+
+            async function syncSnapshots() {{
+                const result = document.getElementById('snapshot-result');
+                result.style.display = 'block';
+                result.className = 'result';
+                result.textContent = 'Syncing snapshots to host...';
+                try {{
+                    const resp = await fetch(basePath + '/snapshot/sync', {{ method: 'POST' }});
+                    const data = await resp.json();
+                    if (!resp.ok || data.error || data.detail) {{
+                        result.className = 'result error';
+                        result.textContent = data.error || data.detail || 'Sync failed';
+                    }} else {{
+                        result.textContent = 'Synced ' + (data.count || 0) + ' snapshot(s) to host';
                     }}
                 }} catch(e) {{
                     result.className = 'result error';
@@ -3605,6 +3875,35 @@ async def get_traffic_stats(
     return traffic_log.get_traffic_stats()
 
 
+@app.get("/traffic/providers")
+@app.get("/controller/traffic/providers")
+async def get_traffic_providers(
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """List known providers from gateway config and traffic logs."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    providers = set()
+    # From gateway config
+    try:
+        with open(GATEWAY_CONFIG_PATH) as f:
+            config = json.load(f)
+        for name in config.get("models", {}).get("providers", {}):
+            providers.add(name)
+    except Exception:
+        pass
+    # From traffic log stats
+    try:
+        stats = traffic_log.get_traffic_stats()
+        for name in stats.get("by_provider", {}):
+            providers.add(name)
+    except Exception:
+        pass
+    return {"providers": sorted(providers)}
+
+
 @app.get("/traffic/inbound")
 @app.get("/controller/traffic/inbound")
 async def get_inbound_traffic(
@@ -3710,6 +4009,113 @@ async def test_scrub_rule(
 
 CAPTURE_STATE_FILE = Path(os.environ.get("CAPTURE_STATE_FILE", "/srv/audit/capture_enabled"))
 LLM_PROXY_URL = os.environ.get("LLM_PROXY_URL", "http://llm-proxy:9090")
+ENCRYPTED_TRAFFIC_LOG = Path(os.environ.get("ENCRYPTED_TRAFFIC_LOG", "/srv/clawfactory/audit/traffic.enc.jsonl"))
+FERNET_KEY_FILE = Path(os.environ.get("FERNET_KEY_FILE", "/srv/clawfactory/audit/traffic.fernet.key"))
+FERNET_KEY_AGE = Path(os.environ.get("FERNET_KEY_AGE", "/srv/clawfactory/audit/traffic.fernet.key.age"))
+MITM_CA_DIR = Path(os.environ.get("MITM_CA_DIR", "/srv/clawfactory/mitm-ca"))
+
+
+def _ensure_fernet_key() -> bytes | None:
+    """Generate Fernet key, encrypt with age, return raw key bytes."""
+    from cryptography.fernet import Fernet as _Fernet
+
+    # If age-encrypted key already exists, we can regenerate plaintext from it
+    if FERNET_KEY_AGE.exists() and AGE_KEY.exists():
+        try:
+            result = subprocess.run(
+                ["age", "--decrypt", "-i", str(AGE_KEY), str(FERNET_KEY_AGE)],
+                capture_output=True,
+            )
+            if result.returncode == 0:
+                key = result.stdout.strip()
+                FERNET_KEY_FILE.write_bytes(key)
+                FERNET_KEY_FILE.chmod(0o600)
+                return key
+        except Exception:
+            pass
+
+    # Generate new key
+    key = _Fernet.generate_key()
+    FERNET_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    FERNET_KEY_FILE.write_bytes(key)
+    FERNET_KEY_FILE.chmod(0o600)
+
+    # Encrypt with age public key
+    if AGE_KEY.exists():
+        pub_path = AGE_KEY.with_suffix(".pub")
+        if pub_path.exists():
+            try:
+                pub_key = pub_path.read_text().strip().split("\n")[-1].strip()
+                result = subprocess.run(
+                    ["age", "-r", pub_key, "-o", str(FERNET_KEY_AGE)],
+                    input=key,
+                    capture_output=True,
+                )
+                if result.returncode == 0:
+                    FERNET_KEY_AGE.chmod(0o600)
+            except Exception:
+                pass
+
+    return key
+
+
+def _decrypt_fernet_key() -> bytes | None:
+    """Decrypt the Fernet key using the age private key."""
+    if not FERNET_KEY_AGE.exists() or not AGE_KEY.exists():
+        return None
+    try:
+        result = subprocess.run(
+            ["age", "--decrypt", "-i", str(AGE_KEY), str(FERNET_KEY_AGE)],
+            capture_output=True,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def _mitm_iptables(action: str):
+    """Add or remove iptables REDIRECT rules for MITM capture.
+
+    action: '-A' to add, '-D' to delete
+    """
+    svc_user = f"openclaw-{INSTANCE_NAME}"
+    for dport in ("443", "80"):
+        # Always delete first to prevent duplicate rules
+        subprocess.run(
+            [
+                "iptables", "-t", "nat", "-D", "OUTPUT",
+                "-m", "owner", "--uid-owner", svc_user,
+                "-p", "tcp", "--dport", dport,
+                "-j", "REDIRECT", "--to-port", "8888",
+            ],
+            capture_output=True,
+        )
+        if action == "-A":
+            subprocess.run(
+                [
+                    "iptables", "-t", "nat", "-A", "OUTPUT",
+                    "-m", "owner", "--uid-owner", svc_user,
+                    "-p", "tcp", "--dport", dport,
+                    "-j", "REDIRECT", "--to-port", "8888",
+                ],
+                capture_output=True,
+            )
+
+
+def _install_mitm_ca():
+    """Install mitmproxy CA into system trust store if available."""
+    ca_cert = MITM_CA_DIR / "mitmproxy-ca-cert.pem"
+    if ca_cert.exists():
+        try:
+            subprocess.run(
+                ["cp", str(ca_cert), "/usr/local/share/ca-certificates/mitmproxy-ca.crt"],
+                capture_output=True,
+            )
+            subprocess.run(["update-ca-certificates"], capture_output=True)
+        except Exception:
+            pass
 
 
 @app.get("/capture")
@@ -3719,17 +4125,36 @@ async def get_capture(
     session: Optional[str] = Cookie(None, alias="clawfactory_session"),
     authorization: Optional[str] = Header(None),
 ):
-    """Get capture enabled state."""
+    """Get capture enabled state with MITM status."""
     if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
         raise HTTPException(status_code=401, detail="Unauthorized")
-    # Read from state file directly (works for both Docker and Lima)
-    enabled = True
+    enabled = False
     if CAPTURE_STATE_FILE.exists():
         try:
             enabled = CAPTURE_STATE_FILE.read_text().strip() == "1"
         except Exception:
             pass
-    return {"enabled": enabled}
+
+    # Count encrypted entries without decrypting
+    entry_count = traffic_log.count_encrypted_entries(ENCRYPTED_TRAFFIC_LOG)
+
+    # Check mitmproxy service status
+    mitm_active = False
+    if IS_LIMA_MODE:
+        try:
+            result = subprocess.run(
+                ["systemctl", "is-active", "clawfactory-mitm"],
+                capture_output=True, text=True,
+            )
+            mitm_active = result.stdout.strip() == "active"
+        except Exception:
+            pass
+
+    return {
+        "enabled": enabled,
+        "mitm_active": mitm_active,
+        "entry_count": entry_count,
+    }
 
 
 @app.post("/capture")
@@ -3740,16 +4165,235 @@ async def set_capture(
     session: Optional[str] = Cookie(None, alias="clawfactory_session"),
     authorization: Optional[str] = Header(None),
 ):
-    """Toggle capture on/off."""
+    """Toggle MITM capture on/off."""
     if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
         raise HTTPException(status_code=401, detail="Unauthorized")
     data = await request.json()
     enabled = bool(data.get("enabled", True))
-    # Write state file directly
+
     CAPTURE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    CAPTURE_STATE_FILE.write_text("1" if enabled else "0")
-    audit_log("capture_toggled", {"enabled": enabled})
+
+    if enabled:
+        # Ensure snapshot key exists (needed for age encryption of Fernet key)
+        ensure_snapshot_key()
+
+        # Generate or recover Fernet key
+        key = _ensure_fernet_key()
+        if not key:
+            raise HTTPException(status_code=500, detail="Failed to generate encryption key")
+
+        # Start mitmproxy service
+        if IS_LIMA_MODE:
+            subprocess.run(
+                ["systemctl", "start", "clawfactory-mitm"],
+                capture_output=True,
+            )
+            # Wait briefly for CA to be generated, then install it
+            import asyncio
+            await asyncio.sleep(2)
+            _install_mitm_ca()
+
+        # Add iptables redirect rules
+        _mitm_iptables("-A")
+
+        # Write state
+        CAPTURE_STATE_FILE.write_text("1")
+
+        # Delete plaintext Fernet key (age-encrypted copy persists)
+        if FERNET_KEY_AGE.exists():
+            FERNET_KEY_FILE.unlink(missing_ok=True)
+
+    else:
+        # Remove iptables redirect rules
+        _mitm_iptables("-D")
+
+        # Stop mitmproxy service
+        if IS_LIMA_MODE:
+            subprocess.run(
+                ["systemctl", "stop", "clawfactory-mitm"],
+                capture_output=True,
+            )
+
+        # Write state
+        CAPTURE_STATE_FILE.write_text("0")
+
+        # Clean up plaintext Fernet key
+        FERNET_KEY_FILE.unlink(missing_ok=True)
+
+    audit_log("capture_toggled", {"enabled": enabled, "mitm": True})
     return {"enabled": enabled}
+
+
+@app.get("/traffic/decrypt")
+@app.get("/controller/traffic/decrypt")
+async def decrypt_traffic(
+    limit: int = 50,
+    offset: int = 0,
+    provider: Optional[str] = None,
+    status: Optional[int] = None,
+    search: Optional[str] = None,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Decrypt and return encrypted traffic log entries. Never writes plaintext to disk."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    fernet_key = _decrypt_fernet_key()
+    if not fernet_key:
+        raise HTTPException(status_code=404, detail="No encryption key found. Has capture been enabled?")
+
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+
+    entries = traffic_log.read_encrypted_traffic_log(
+        fernet_key=fernet_key,
+        limit=limit,
+        offset=offset,
+        provider=provider,
+        status=status,
+        search=search,
+        log_path=ENCRYPTED_TRAFFIC_LOG,
+    )
+    return {"entries": entries}
+
+
+@app.get("/traffic/decrypt/stats")
+@app.get("/controller/traffic/decrypt/stats")
+async def decrypt_traffic_stats(
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Aggregate stats from encrypted traffic log."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    fernet_key = _decrypt_fernet_key()
+    if not fernet_key:
+        raise HTTPException(status_code=404, detail="No encryption key found")
+
+    return traffic_log.get_encrypted_traffic_stats(fernet_key, ENCRYPTED_TRAFFIC_LOG)
+
+
+@app.get("/traffic/decrypt/{request_id}")
+@app.get("/controller/traffic/decrypt/{request_id}")
+async def decrypt_traffic_detail(
+    request_id: str,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Single decrypted traffic entry detail."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    fernet_key = _decrypt_fernet_key()
+    if not fernet_key:
+        raise HTTPException(status_code=404, detail="No encryption key found")
+
+    entry = traffic_log.get_encrypted_entry(fernet_key, request_id, ENCRYPTED_TRAFFIC_LOG)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Traffic entry not found")
+    return entry
+
+
+@app.post("/traffic/delete")
+@app.post("/controller/traffic/delete")
+async def delete_traffic_logs(
+    request: Request,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Delete encrypted traffic logs and optionally the encryption key."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    data = await request.json()
+    delete_key = bool(data.get("delete_key", False))
+
+    deleted_log = False
+    deleted_key = False
+
+    if ENCRYPTED_TRAFFIC_LOG.exists():
+        ENCRYPTED_TRAFFIC_LOG.unlink()
+        deleted_log = True
+
+    if delete_key:
+        FERNET_KEY_FILE.unlink(missing_ok=True)
+        FERNET_KEY_AGE.unlink(missing_ok=True)
+        deleted_key = True
+
+    audit_log("traffic_logs_deleted", {
+        "deleted_log": deleted_log,
+        "deleted_key": deleted_key,
+    })
+
+    return {"deleted_log": deleted_log, "deleted_key": deleted_key}
+
+
+# ============================================================
+# Spice Mode (LLM Temperature)
+# ============================================================
+
+SPICYMODES = {"nospice", "medspice", "veryspice"}
+SPICE_LABELS = {
+    "nospice":   "No spice - strictly business",
+    "medspice":  "Med spice - balanced heat",
+    "veryspice": "Very spice - full send",
+}
+
+
+@app.get("/spice")
+@app.get("/controller/spice")
+async def get_spice(
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Get current spice mode from env.vars.SPICYMODE."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        with open(GATEWAY_CONFIG_PATH) as f:
+            config = json.load(f)
+        mode = config.get("env", {}).get("vars", {}).get("SPICYMODE", "medspice")
+    except Exception:
+        mode = "medspice"
+    return {"mode": mode, "label": SPICE_LABELS.get(mode, mode)}
+
+
+@app.post("/spice")
+@app.post("/controller/spice")
+async def set_spice(
+    request: Request,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Set spice mode in env.vars.SPICYMODE."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    data = await request.json()
+    mode = data.get("mode", "medspice")
+    if mode not in SPICYMODES:
+        return {"error": f"Unknown mode: {mode}"}
+    try:
+        with open(GATEWAY_CONFIG_PATH) as f:
+            config = json.load(f)
+        if "env" not in config:
+            config["env"] = {}
+        if "vars" not in config["env"]:
+            config["env"]["vars"] = {}
+        config["env"]["vars"]["SPICYMODE"] = mode
+        with open(GATEWAY_CONFIG_PATH, "w") as f:
+            json.dump(config, f, indent=2)
+        audit_log("spice_mode_set", {"mode": mode})
+        return {"mode": mode, "label": SPICE_LABELS.get(mode, mode)}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # ============================================================
@@ -3854,6 +4498,91 @@ def git_restore_url(original_url: Optional[str]):
             cwd=APPROVED_DIR,
             capture_output=True,
         )
+
+
+@app.post("/branches/propose")
+@app.post("/controller/branches/propose")
+async def propose_changes(
+    request: Request,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Commit uncommitted changes to a new proposal/* branch and push."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    import re
+    body = await request.json()
+    branch_name = (body.get("branch") or "").strip()
+    commit_msg = (body.get("message") or "").strip()
+
+    if not branch_name:
+        return {"error": "Branch name is required"}
+    if not commit_msg:
+        return {"error": "Commit message is required"}
+    if not re.match(r'^[a-zA-Z0-9_\-]+$', branch_name):
+        return {"error": "Invalid branch name (use alphanumeric, hyphens, underscores)"}
+
+    full_branch = f"proposal/{branch_name}"
+    audit_log("propose_changes", {"branch": full_branch, "message": commit_msg})
+
+    # Check for uncommitted changes
+    status_result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=APPROVED_DIR, capture_output=True, text=True,
+    )
+    if not status_result.stdout.strip():
+        return {"error": "No uncommitted changes to propose"}
+
+    original_url = git_setup_auth()
+    try:
+        # Make sure we're on main
+        subprocess.run(["git", "checkout", "main"], cwd=APPROVED_DIR, capture_output=True, text=True)
+
+        # Create and switch to proposal branch
+        result = subprocess.run(
+            ["git", "checkout", "-b", full_branch],
+            cwd=APPROVED_DIR, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            return {"error": f"Failed to create branch: {result.stderr.strip()}"}
+
+        # Stage all changes and commit
+        subprocess.run(["git", "add", "-A"], cwd=APPROVED_DIR, capture_output=True, text=True)
+        result = subprocess.run(
+            ["git", "commit", "-m", commit_msg],
+            cwd=APPROVED_DIR, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            # Rollback: switch back to main and delete the branch
+            subprocess.run(["git", "checkout", "main"], cwd=APPROVED_DIR, capture_output=True)
+            subprocess.run(["git", "branch", "-D", full_branch], cwd=APPROVED_DIR, capture_output=True)
+            return {"error": f"Commit failed: {result.stderr.strip()}"}
+
+        # Push to origin
+        push_result = subprocess.run(
+            ["git", "push", "-u", "origin", full_branch],
+            cwd=APPROVED_DIR, capture_output=True, text=True, timeout=60,
+        )
+
+        # Switch back to main regardless of push result
+        subprocess.run(["git", "checkout", "main"], cwd=APPROVED_DIR, capture_output=True)
+
+        if push_result.returncode != 0:
+            return {"error": f"Push failed: {push_result.stderr.strip()}"}
+
+        audit_log("propose_changes_success", {"branch": full_branch})
+        return {"message": f"Created and pushed {full_branch}"}
+    except subprocess.TimeoutExpired:
+        subprocess.run(["git", "checkout", "main"], cwd=APPROVED_DIR, capture_output=True)
+        return {"error": "Push timed out"}
+    except Exception as e:
+        subprocess.run(["git", "checkout", "main"], cwd=APPROVED_DIR, capture_output=True)
+        audit_log("propose_changes_error", {"branch": full_branch, "error": str(e)})
+        return {"error": str(e)}
+    finally:
+        git_restore_url(original_url)
 
 
 @app.post("/branches/merge-all")
@@ -4415,6 +5144,10 @@ def create_snapshot(name: str = "") -> dict:
                 "--exclude=agents/*/sessions/*.jsonl",
                 "--exclude=installed",
                 "--exclude=installed/*",
+                "--exclude=workspace/*/.git",
+                "--exclude=sandboxes",
+                "--exclude=subagents",
+                "--exclude=media",
                 "."
             ],
             capture_output=True,
@@ -4512,6 +5245,68 @@ async def snapshot_create(
         raise HTTPException(status_code=500, detail=result["error"])
 
     return result
+
+
+@app.post("/snapshot/sync")
+@app.post("/controller/snapshot/sync")
+async def snapshot_sync(
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Sync snapshots to host via rsync (Lima mode only)."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if not IS_LIMA_MODE:
+        return {"error": "Snapshot sync is only available in Lima mode"}
+
+    if not SNAPSHOTS_DIR.exists():
+        return {"count": 0, "message": "No snapshots directory"}
+
+    snapshots = [f for f in SNAPSHOTS_DIR.glob("*.tar.age") if f.name != "latest.tar.age"]
+    if not snapshots:
+        return {"count": 0, "message": "No snapshots to sync"}
+
+    # Copy snapshots to a well-known pickup location that lima_sync can reach
+    pickup_dir = Path("/tmp/clawfactory-snapshot-sync")
+    pickup_dir.mkdir(parents=True, exist_ok=True)
+    import shutil
+    count = 0
+    for snap in snapshots:
+        dest = pickup_dir / snap.name
+        if not dest.exists() or dest.stat().st_mtime < snap.stat().st_mtime:
+            shutil.copy2(snap, dest)
+            count += 1
+
+    audit_log("snapshot_sync", {"count": count, "total": len(snapshots)})
+    return {"count": len(snapshots), "synced": count, "pickup": str(pickup_dir)}
+
+
+@app.get("/snapshot/download/{name}")
+@app.get("/controller/snapshot/download/{name}")
+async def snapshot_download(
+    name: str,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Download a snapshot file."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    snapshot_path = SNAPSHOTS_DIR / name
+    if not snapshot_path.exists():
+        snapshot_path = SNAPSHOTS_DIR / f"{name}.tar.age"
+    if not snapshot_path.exists():
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+
+    from starlette.responses import FileResponse
+    return FileResponse(
+        str(snapshot_path),
+        media_type="application/octet-stream",
+        filename=snapshot_path.name,
+    )
 
 
 @app.get("/snapshot")
@@ -5675,12 +6470,13 @@ async def gateway_config_validate(
     # Check for common invalid keys at root level
     valid_root_keys = {
         "meta", "wizard", "models", "agents", "channels", "gateway", "plugins",
-        "messages", "commands", "tools", "session", "hooks", "cron", "skills"
+        "messages", "commands", "tools", "session", "hooks", "cron", "skills",
+        "env", "auth", "talk",
     }
     for key in config.keys():
         if key not in valid_root_keys:
             issues.append({
-                "severity": "error",
+                "severity": "warn",
                 "message": f"Unknown config key: {key}",
                 "key": key,
             })

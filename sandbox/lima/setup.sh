@@ -211,7 +211,8 @@ install_dependencies() {
         apt-get install -y -qq python3 python3-pip python3-venv >/dev/null 2>&1
         pip3 install --break-system-packages --ignore-installed -q \
             fastapi uvicorn python-multipart httpx \
-            PyGithub pyyaml docker python-jose 2>/dev/null
+            PyGithub pyyaml docker python-jose \
+            mitmproxy cryptography 2>/dev/null
     "
     echo "done"
 
@@ -290,6 +291,23 @@ After=network.target
 Type=simple
 WorkingDirectory=/srv/clawfactory/controller
 ExecStart=/usr/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port 8080
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SVC
+
+        # ---- Systemd unit: MITM TLS Proxy ----
+        cat > /etc/systemd/system/clawfactory-mitm.service <<'SVC'
+[Unit]
+Description=ClawFactory MITM TLS Proxy
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/clawfactory/controller
+ExecStart=/usr/local/bin/mitmdump --mode transparent --listen-port 8888 -s /srv/clawfactory/controller/mitm_capture.py --set confdir=/srv/clawfactory/mitm-ca
 Restart=on-failure
 RestartSec=5
 

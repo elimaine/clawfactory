@@ -90,7 +90,6 @@ lima_sync() {
         _lima_exec mkdir -p "${staging}/bot_repos/${instance}/approved"
 
         rsync -a --delete \
-            --exclude '.git' \
             --exclude 'node_modules' \
             --exclude '.DS_Store' \
             -e "$rsh" \
@@ -282,6 +281,11 @@ lima_services() {
         chown -R ${svc_user}:${svc_user} ${LIMA_SRV}/bot_repos/${instance}/
         chmod 700 ${LIMA_SRV}/bot_repos/${instance}/
 
+        # Lock down default state dir in user home
+        mkdir -p /home/${svc_user}/.openclaw
+        chown ${svc_user}:${svc_user} /home/${svc_user}/.openclaw
+        chmod 700 /home/${svc_user}/.openclaw
+
         # Secrets: split permissions so gateway can't read admin token
         if [ -d ${LIMA_SRV}/secrets/${instance} ]; then
             chown root:${svc_user} ${LIMA_SRV}/secrets/${instance}/
@@ -320,7 +324,26 @@ lima_services() {
         # Shared audit log — append-only for gateway users
         touch ${LIMA_SRV}/audit/audit.jsonl
         chmod 662 ${LIMA_SRV}/audit/audit.jsonl
+
+        # MITM CA directory — root only
+        mkdir -p ${LIMA_SRV}/mitm-ca
+        chmod 700 ${LIMA_SRV}/mitm-ca
+
+        # Encrypted traffic log — root only
+        touch ${LIMA_SRV}/audit/traffic.enc.jsonl
+        chown root:root ${LIMA_SRV}/audit/traffic.enc.jsonl
+        chmod 600 ${LIMA_SRV}/audit/traffic.enc.jsonl
+
+        # Install MITM CA into system trust store (if it exists)
+        if [ -f ${LIMA_SRV}/mitm-ca/mitmproxy-ca-cert.pem ]; then
+            cp ${LIMA_SRV}/mitm-ca/mitmproxy-ca-cert.pem /usr/local/share/ca-certificates/mitmproxy-ca.crt
+            update-ca-certificates >/dev/null 2>&1 || true
+        fi
     "
+
+    # Detect GITHUB_REPO from git remote (if available)
+    local github_repo=""
+    github_repo=$(_lima_root "cd ${LIMA_SRV}/bot_repos/${instance}/approved 2>/dev/null && git config --get remote.origin.url 2>/dev/null | sed -E 's|.*github.com[:/]||; s|\.git$||'" 2>/dev/null || true)
 
     # Create instance-specific systemd overrides
     _lima_root "
@@ -332,7 +355,6 @@ User=${svc_user}
 Group=${svc_user}
 Environment=INSTANCE_NAME=${instance}
 Environment=OPENCLAW_GATEWAY_MODE=local
-Environment=OPENCLAW_GATEWAY_AUTH=none
 Environment=OPENCLAW_STATE_DIR=${LIMA_SRV}/bot_repos/${instance}/state
 Environment=HOME=/home/${svc_user}
 ExecStart=
@@ -347,6 +369,13 @@ Environment=OPENAI_BASE_URL=http://127.0.0.1:9090/openai
 Environment=GEMINI_API_BASE=http://127.0.0.1:9090/gemini
 EOF
 
+        # Only add MITM CA trust if the cert exists (mitmproxy has been started at least once)
+        if [ -f ${LIMA_SRV}/mitm-ca/mitmproxy-ca-cert.pem ]; then
+            cat >> /etc/systemd/system/openclaw-gateway@${instance}.service.d/override.conf <<EOF
+Environment=NODE_EXTRA_CA_CERTS=${LIMA_SRV}/mitm-ca/mitmproxy-ca-cert.pem
+EOF
+        fi
+
         # Controller override
         mkdir -p /etc/systemd/system/clawfactory-controller.service.d
         cat > /etc/systemd/system/clawfactory-controller.service.d/override.conf <<EOF
@@ -357,6 +386,7 @@ Environment=APPROVED_DIR=${LIMA_SRV}/bot_repos/${instance}/approved
 Environment=OPENCLAW_HOME=${LIMA_SRV}/bot_repos/${instance}/state
 Environment=AUDIT_LOG=${LIMA_SRV}/audit/audit.jsonl
 Environment=INSTANCE_NAME=${instance}
+Environment=GITHUB_REPO=${github_repo}
 Environment=GATEWAY_CONTAINER=local
 Environment=SNAPSHOTS_DIR=${LIMA_SRV}/snapshots/${instance}
 Environment=AGE_KEY=${LIMA_SRV}/secrets/${instance}/snapshot.key
@@ -364,8 +394,23 @@ Environment=TRAFFIC_LOG=${LIMA_SRV}/audit/traffic.jsonl
 Environment=SCRUB_RULES_PATH=${LIMA_SRV}/audit/scrub_rules.json
 Environment=CAPTURE_STATE_FILE=${LIMA_SRV}/audit/capture_enabled
 Environment=NGINX_LOG=/var/log/nginx/access.json
+Environment=ENCRYPTED_TRAFFIC_LOG=${LIMA_SRV}/audit/traffic.enc.jsonl
+Environment=FERNET_KEY_FILE=${LIMA_SRV}/audit/traffic.fernet.key
+Environment=FERNET_KEY_AGE=${LIMA_SRV}/audit/traffic.fernet.key.age
+Environment=MITM_CA_DIR=${LIMA_SRV}/mitm-ca
 ExecStart=
 ExecStart=/usr/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port ${CONTROLLER_PORT:-8080}
+EOF
+
+        # MITM proxy override
+        mkdir -p /etc/systemd/system/clawfactory-mitm.service.d
+        cat > /etc/systemd/system/clawfactory-mitm.service.d/override.conf <<EOF
+[Service]
+Environment=TRAFFIC_LOG=${LIMA_SRV}/audit/traffic.enc.jsonl
+Environment=FERNET_KEY_FILE=${LIMA_SRV}/audit/traffic.fernet.key
+Environment=FERNET_KEY_AGE=${LIMA_SRV}/audit/traffic.fernet.key.age
+Environment=AGE_KEY=${LIMA_SRV}/secrets/${instance}/snapshot.key
+Environment=CAPTURE_STATE_FILE=${LIMA_SRV}/audit/capture_enabled
 EOF
 
         # LLM Proxy override
@@ -378,6 +423,19 @@ Environment=CAPTURE_STATE_FILE=${LIMA_SRV}/audit/capture_enabled
 EOF
 
         systemctl daemon-reload
+    "
+
+    # Clean up stale MITM iptables rules if capture is not enabled
+    _lima_root "
+        capture_on=false
+        if [ -f ${LIMA_SRV}/audit/capture_enabled ] && [ \"\$(cat ${LIMA_SRV}/audit/capture_enabled)\" = '1' ]; then
+            capture_on=true
+        fi
+        if [ \"\$capture_on\" = false ]; then
+            iptables -t nat -D OUTPUT -m owner --uid-owner ${svc_user} -p tcp --dport 443 -j REDIRECT --to-port 8888 2>/dev/null || true
+            iptables -t nat -D OUTPUT -m owner --uid-owner ${svc_user} -p tcp --dport 80 -j REDIRECT --to-port 8888 2>/dev/null || true
+            systemctl stop clawfactory-mitm 2>/dev/null || true
+        fi
     "
 
     case "$action" in
