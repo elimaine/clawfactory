@@ -16,6 +16,7 @@ import hmac
 import json
 import os
 import secrets
+import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -6955,6 +6956,20 @@ async def agent_write_file(
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(body)
+
+        # Fix ownership so the gateway user can stage/commit these files
+        svc_user = f"openclaw-{INSTANCE_NAME}"
+        try:
+            shutil.chown(str(target), user=svc_user, group=svc_user)
+            # Also fix any newly-created parent dirs between APPROVED_DIR and target
+            p = target.parent
+            approved_resolved = APPROVED_DIR.resolve()
+            while p.resolve() != approved_resolved and str(p.resolve()).startswith(str(approved_resolved)):
+                shutil.chown(str(p), user=svc_user, group=svc_user)
+                p = p.parent
+        except (LookupError, OSError):
+            pass  # non-Lima or user doesn't exist — skip silently
+
         audit_log("agent_file_written", {"path": filepath, "size": len(body)})
         return {"status": "written", "path": filepath, "size": len(body)}
     except Exception as e:

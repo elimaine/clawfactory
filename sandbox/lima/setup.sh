@@ -179,6 +179,8 @@ install_dependencies() {
             ca-certificates curl gnupg lsb-release \
             iproute2 iptables \
             git rsync >/dev/null 2>&1
+        # Allow controller (root) to run git in repos owned by service users
+        git config --system --add safe.directory '*'
     "
     echo "done"
 
