@@ -890,6 +890,30 @@ ENVEOF
                 ;;
         esac
         ;;
+    sync)
+        if [[ "$SANDBOX_MODE" == "lima" ]]; then
+            lima_ensure
+            case "${2:-once}" in
+                once)
+                    lima_sync
+                    echo "Restarting controller + gateway..."
+                    _lima_root "systemctl restart clawfactory-controller openclaw-gateway@${INSTANCE_NAME:-default}"
+                    echo "Done"
+                    ;;
+                watch|--watch)
+                    lima_sync_watch
+                    ;;
+                *)
+                    echo "Usage: ./clawfactory.sh [-i <instance>] sync [watch]"
+                    echo ""
+                    echo "  sync           One-time sync + restart controller"
+                    echo "  sync watch     Watch for changes and auto-sync (fswatch)"
+                    ;;
+            esac
+        else
+            echo "Sync is only available in Lima sandbox mode"
+        fi
+        ;;
     *)
         echo "ClawFactory - Agent Runtime"
         echo ""
@@ -915,6 +939,7 @@ ENVEOF
         echo "  info            Show instance info and tokens"
         echo "  remote [fix]    Show/fix git remote URL"
         echo "  bots            List all saved bots"
+        echo "  sync [watch]    Sync files to VM (watch: auto-sync on changes)"
         echo "  lima            Lima sandbox management"
         echo ""
         echo "Sandbox mode: ${SANDBOX_MODE}"

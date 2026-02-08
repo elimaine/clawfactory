@@ -126,19 +126,63 @@ def log_startup():
 log_startup()
 
 
-def get_spice_mode() -> str:
-    """Read current spice mode from gateway config."""
+SPICE_PRESETS = {
+    "nospice":   {"auto_config": False, "auto_merge": False, "auto_deploy": False, "auto_pull": False},
+    "medspice":  {"auto_config": True,  "auto_merge": False, "auto_deploy": False, "auto_pull": False},
+    "veryspice": {"auto_config": True,  "auto_merge": True,  "auto_deploy": True,  "auto_pull": False},
+}
+
+SPICE_FLAG_KEYS = ("auto_config", "auto_merge", "auto_deploy", "auto_pull")
+SPICE_VAR_PREFIX = "SPICE_AUTO_"
+
+
+def _read_config_vars() -> dict:
+    """Read env.vars from gateway config."""
     try:
         with open(OPENCLAW_HOME / "openclaw.json") as f:
             config = json.load(f)
-        return config.get("env", {}).get("vars", {}).get("SPICYMODE", "nospice")
+        return config.get("env", {}).get("vars", {})
     except Exception:
-        return "nospice"
+        return {}
+
+
+def get_spice_mode() -> str:
+    """Read current spice mode preset from gateway config."""
+    return _read_config_vars().get("SPICYMODE", "nospice")
+
+
+def get_spice_flags() -> dict:
+    """Return individual spice flags as {auto_config, auto_merge, auto_deploy, auto_pull}."""
+    v = _read_config_vars()
+    # If granular keys exist, use them; otherwise derive from legacy preset
+    if "SPICE_AUTO_CONFIG" in v:
+        return {k: v.get(f"SPICE_AUTO_{k.split('_', 1)[1].upper()}", "false").lower() == "true" for k in SPICE_FLAG_KEYS}
+    return dict(SPICE_PRESETS.get(v.get("SPICYMODE", "nospice"), SPICE_PRESETS["nospice"]))
+
+
+def _flags_to_preset(flags: dict) -> str:
+    """Compute preset name from flags, or 'custom' if no preset matches."""
+    for name, preset in SPICE_PRESETS.items():
+        if all(flags.get(k) == preset[k] for k in SPICE_FLAG_KEYS):
+            return name
+    return "custom"
+
+
+def spice_auto_config() -> bool:
+    return get_spice_flags().get("auto_config", False)
+
+
+def spice_auto_merge() -> bool:
+    return get_spice_flags().get("auto_merge", False)
+
+
+def spice_auto_deploy() -> bool:
+    return get_spice_flags().get("auto_deploy", False)
 
 
 def is_spicy() -> bool:
-    """True when spice mode allows auto-accepting proposals."""
-    return get_spice_mode() != "nospice"
+    """True when any spice flag is on (backward compat)."""
+    return any(get_spice_flags().values())
 
 
 # ============================================================
@@ -1090,7 +1134,7 @@ async def promote_ui(
                     <span id="proposed-config-reason" style="margin-left: 0.5rem; color: #ccc;"></span>
                 </div>
                 <div style="display: flex; gap: 0.5rem;">
-                    <button onclick="applyProposedConfig()" style="background: #9c27b0; color: white; border: none; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; font-family: monospace;">Apply & Restart</button>
+                    <button id="config-apply-btn" onclick="applyProposedConfig()" style="background: #9c27b0; color: white; border: none; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; font-family: monospace;">Apply & Restart</button>
                     <button onclick="reviewProposedConfig()" style="background: transparent; color: #ce93d8; border: 1px solid #9c27b0; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; font-family: monospace;">Review</button>
                     <button onclick="dismissProposal()" style="background: transparent; color: #888; border: 1px solid #555; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; font-family: monospace;">Dismiss</button>
                 </div>
@@ -1151,9 +1195,9 @@ async def promote_ui(
 
                     <h3 style="margin-top: 1.5rem; font-size: 0.9rem; color: #888;">Local Changes</h3>
                     <button onclick="viewLocalChanges()" class="secondary small">View Uncommitted Changes</button>
-                    <div id="local-changes" style="margin-top: 0.5rem;"></div>''' if OFFLINE_MODE else f'''<div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
-                        <button onclick="mergeAllAndDeploy()" {"style='background: #ff9800; border-color: #ff9800; animation: pulse 2s infinite;'" if needs_update else ""}>Merge All & Deploy</button>
-                        <button onclick="promoteMain()" class="secondary">Deploy Main Only</button>
+                    <div id="local-changes" style="margin-top: 0.5rem;"></div>''' if OFFLINE_MODE else f'''<div id="deploy-section" style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                        <button id="merge-deploy-btn" onclick="mergeAllAndDeploy()" {"style='background: #ff9800; border-color: #ff9800; animation: pulse 2s infinite;'" if needs_update else ""}>Merge All & Deploy</button>
+                        <button id="deploy-main-btn" onclick="promoteMain()" class="secondary">Deploy Main Only</button>
                     </div>
                     <div id="promote-result" class="result"></div>
 
@@ -1171,9 +1215,25 @@ async def promote_ui(
                 <h2>Spice Mode <span style="font-size: 1.2rem;">&#127798;</span></h2>
                 <div class="card">
                     <div style="display: flex; gap: 0.5rem;">
-                        <button id="spice-nospice" onclick="setSpiceMode('nospice')" class="secondary" style="flex: 1; font-size: 0.85rem;">&#129482; no spice</button>
-                        <button id="spice-medspice" onclick="setSpiceMode('medspice')" class="secondary" style="flex: 1; font-size: 0.85rem;">&#127798; med spice</button>
-                        <button id="spice-veryspice" onclick="setSpiceMode('veryspice')" class="secondary" style="flex: 1; font-size: 0.85rem;">&#128293; very spice</button>
+                        <button id="spice-nospice" onclick="setSpicePreset('nospice')" class="secondary" style="flex: 1; font-size: 0.85rem;">&#129482; no spice</button>
+                        <button id="spice-medspice" onclick="setSpicePreset('medspice')" class="secondary" style="flex: 1; font-size: 0.85rem;">&#127798; med spice</button>
+                        <button id="spice-veryspice" onclick="setSpicePreset('veryspice')" class="secondary" style="flex: 1; font-size: 0.85rem;">&#128293; very spice</button>
+                    </div>
+                    <div style="border-top: 1px solid #333; margin-top: 0.75rem; padding-top: 0.75rem;">
+                        <div style="display: flex; flex-direction: column; gap: 0.4rem;">
+                            <label style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: #ccc; cursor: pointer;">
+                                <input type="checkbox" id="spice-flag-auto-config" onchange="onSpiceFlagChange()"> Auto-accept config proposals
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: #ccc; cursor: pointer;">
+                                <input type="checkbox" id="spice-flag-auto-merge" onchange="onSpiceFlagChange()"> Auto-merge branch proposals
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: #ccc; cursor: pointer;">
+                                <input type="checkbox" id="spice-flag-auto-deploy" onchange="onSpiceFlagChange()"> Auto-deploy after merge
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: #ccc; cursor: pointer;">
+                                <input type="checkbox" id="spice-flag-auto-pull" onchange="onSpiceFlagChange()"> Auto-pull upstream
+                            </label>
+                        </div>
                     </div>
                     <div id="spice-current" style="margin-top: 0.5rem; font-size: 0.85rem; color: #aaa;"></div>
                     <div id="spice-result" class="result" style="margin-top: 0.5rem;"></div>
@@ -1219,8 +1279,8 @@ async def promote_ui(
             </div>
 
             <div style="display: flex; flex-direction: column; gap: 0.5rem; border-top: 1px solid #333; padding-top: 0.75rem;">
-                <input type="text" id="propose-branch-name" placeholder="Branch name (e.g. fix-typo)" style="width: 100%; box-sizing: border-box;">
-                <input type="text" id="propose-commit-msg" placeholder="Commit message" style="width: 100%; box-sizing: border-box;">
+                <input type="text" id="propose-branch-name" placeholder="Branch name (e.g. fix-typo)" value="patch-{datetime.now().strftime('%Y%m%d-%H%M')}" style="width: 100%; box-sizing: border-box;">
+                <input type="text" id="propose-commit-msg" placeholder="Commit message" value="apply local changes" style="width: 100%; box-sizing: border-box;">
                 <div style="display: flex; gap: 0.5rem;">
                     <button onclick="proposeChanges()" class="secondary">Create Proposal Branch</button>
                 </div>
@@ -2420,12 +2480,29 @@ async def promote_ui(
                 }}
             }}
 
-            // Spice Mode (temperature control)
+            // Spice Mode — granular flag-based controls
+            const spicePresets = {{
+                nospice:   {{ auto_config: false, auto_merge: false, auto_deploy: false, auto_pull: false }},
+                medspice:  {{ auto_config: true,  auto_merge: false, auto_deploy: false, auto_pull: false }},
+                veryspice: {{ auto_config: true,  auto_merge: true,  auto_deploy: true,  auto_pull: false }},
+            }};
             const spiceLabels = {{
                 'nospice': 'No spice - strictly business',
                 'medspice': 'Med spice - balanced heat',
                 'veryspice': 'Very spice - full send',
+                'custom': 'Custom spice blend',
             }};
+            window.spiceFlags = {{ auto_config: false, auto_merge: false, auto_deploy: false, auto_pull: false }};
+            window.currentSpiceMode = 'nospice';
+            function isSpicy() {{ return Object.values(window.spiceFlags).some(v => v); }}
+
+            function flagsToPreset(flags) {{
+                for (const [name, preset] of Object.entries(spicePresets)) {{
+                    if (Object.keys(preset).every(k => !!flags[k] === !!preset[k])) return name;
+                }}
+                return 'custom';
+            }}
+
             function highlightSpice(mode) {{
                 ['nospice', 'medspice', 'veryspice'].forEach(m => {{
                     const btn = document.getElementById('spice-' + m);
@@ -2434,31 +2511,74 @@ async def promote_ui(
                 const cur = document.getElementById('spice-current');
                 if (cur) cur.textContent = 'Current: ' + (spiceLabels[mode] || mode);
             }}
-            window.currentSpiceMode = 'nospice';
-            function isSpicy() {{ return window.currentSpiceMode !== 'nospice'; }}
+
+            function syncCheckboxes(flags) {{
+                const ids = {{ auto_config: 'spice-flag-auto-config', auto_merge: 'spice-flag-auto-merge', auto_deploy: 'spice-flag-auto-deploy', auto_pull: 'spice-flag-auto-pull' }};
+                for (const [key, id] of Object.entries(ids)) {{
+                    const cb = document.getElementById(id);
+                    if (cb) cb.checked = !!flags[key];
+                }}
+            }}
+
+            function readCheckboxes() {{
+                return {{
+                    auto_config: !!document.getElementById('spice-flag-auto-config')?.checked,
+                    auto_merge: !!document.getElementById('spice-flag-auto-merge')?.checked,
+                    auto_deploy: !!document.getElementById('spice-flag-auto-deploy')?.checked,
+                    auto_pull: !!document.getElementById('spice-flag-auto-pull')?.checked,
+                }};
+            }}
+
+            function _greySection(el, grey, msg) {{
+                if (!el) return;
+                const inputs = el.querySelectorAll('input, button');
+                const ovId = el.id + '-spice-overlay';
+                if (grey) {{
+                    inputs.forEach(i => {{ i.style.opacity = '0.4'; i.style.pointerEvents = 'none'; }});
+                    if (!document.getElementById(ovId)) {{
+                        const ov = document.createElement('div');
+                        ov.id = ovId;
+                        ov.style.cssText = 'padding: 0.5rem; margin-top: 0.5rem; background: #2d2d1a; border: 1px solid #666; border-radius: 4px; font-size: 0.85rem; color: #ff9800;';
+                        ov.textContent = msg;
+                        el.appendChild(ov);
+                    }}
+                }} else {{
+                    inputs.forEach(i => {{ i.style.opacity = '1'; i.style.pointerEvents = 'auto'; }});
+                    const ov = document.getElementById(ovId);
+                    if (ov) ov.remove();
+                }}
+            }}
 
             function updateSpiceUI() {{
-                const propose = document.getElementById('propose-section');
-                if (propose) {{
-                    const inputs = propose.querySelectorAll('input, button');
-                    const overlay = document.getElementById('propose-spice-overlay');
-                    if (isSpicy()) {{
-                        inputs.forEach(el => {{ el.style.opacity = '0.4'; el.style.pointerEvents = 'none'; }});
-                        if (!overlay) {{
-                            const ov = document.createElement('div');
-                            ov.id = 'propose-spice-overlay';
-                            ov.style.cssText = 'padding: 0.5rem; margin-top: 0.5rem; background: #2d2d1a; border: 1px solid #666; border-radius: 4px; font-size: 0.85rem; color: #ff9800;';
-                            ov.textContent = 'Auto-accept enabled (' + window.currentSpiceMode + ') — proposals are merged automatically.';
-                            propose.querySelector('.card').appendChild(ov);
-                        }}
-                    }} else {{
-                        inputs.forEach(el => {{ el.style.opacity = '1'; el.style.pointerEvents = 'auto'; }});
-                        if (overlay) overlay.remove();
-                    }}
+                const f = window.spiceFlags;
+
+                // Deploy section — greyed when auto_deploy
+                const deploy = document.getElementById('deploy-section');
+                _greySection(deploy, f.auto_deploy, 'Auto-deploy enabled — deploys happen automatically after merge.');
+
+                // Merge-all button — greyed when auto_merge + auto_deploy
+                const mergeBtn = document.getElementById('merge-deploy-btn');
+                if (mergeBtn) {{
+                    const grey = f.auto_merge && f.auto_deploy;
+                    mergeBtn.style.opacity = grey ? '0.4' : '1';
+                    mergeBtn.style.pointerEvents = grey ? 'none' : 'auto';
                 }}
-                // Config proposal banner
+
+                // Deploy main button — greyed when auto_deploy
+                const deployBtn = document.getElementById('deploy-main-btn');
+                if (deployBtn) {{
+                    deployBtn.style.opacity = f.auto_deploy ? '0.4' : '1';
+                    deployBtn.style.pointerEvents = f.auto_deploy ? 'none' : 'auto';
+                }}
+
+                // Config proposal banner Apply button — greyed when auto_config
+                const applyBtn = document.getElementById('config-apply-btn');
+                if (applyBtn) {{
+                    applyBtn.style.opacity = f.auto_config ? '0.4' : '1';
+                    applyBtn.style.pointerEvents = f.auto_config ? 'none' : 'auto';
+                }}
                 const banner = document.getElementById('proposed-config-banner');
-                if (banner && banner.style.display !== 'none' && isSpicy()) {{
+                if (banner && banner.style.display !== 'none' && f.auto_config) {{
                     const status = document.getElementById('proposed-config-status');
                     if (status) {{
                         status.style.display = 'block';
@@ -2471,22 +2591,24 @@ async def promote_ui(
                 try {{
                     const resp = await fetch(basePath + '/spice');
                     const data = await resp.json();
-                    if (data.mode) {{
-                        window.currentSpiceMode = data.mode;
-                        highlightSpice(data.mode);
-                        updateSpiceUI();
+                    if (data.flags) {{
+                        window.spiceFlags = data.flags;
+                        syncCheckboxes(data.flags);
                     }}
+                    window.currentSpiceMode = data.mode || 'nospice';
+                    highlightSpice(window.currentSpiceMode);
+                    updateSpiceUI();
                 }} catch(e) {{ /* ignore on load */ }}
             }}
             loadSpiceMode();
 
-            async function setSpiceMode(mode) {{
+            async function _sendSpiceFlags(flags) {{
                 const result = document.getElementById('spice-result');
                 try {{
                     const resp = await fetch(basePath + '/spice', {{
                         method: 'POST',
                         headers: {{ 'Content-Type': 'application/json' }},
-                        body: JSON.stringify({{ mode: mode }})
+                        body: JSON.stringify({{ flags: flags }})
                     }});
                     const data = await resp.json();
                     if (data.error) {{
@@ -2494,8 +2616,10 @@ async def promote_ui(
                         result.className = 'result error';
                         result.textContent = data.error;
                     }} else {{
-                        window.currentSpiceMode = mode;
-                        highlightSpice(mode);
+                        window.spiceFlags = data.flags || flags;
+                        window.currentSpiceMode = data.mode || flagsToPreset(flags);
+                        syncCheckboxes(window.spiceFlags);
+                        highlightSpice(window.currentSpiceMode);
                         updateSpiceUI();
                         result.style.display = 'block';
                         result.className = 'result';
@@ -2508,6 +2632,21 @@ async def promote_ui(
                     result.textContent = 'Error: ' + e.message;
                 }}
             }}
+
+            function setSpicePreset(name) {{
+                const preset = spicePresets[name];
+                if (!preset) return;
+                syncCheckboxes(preset);
+                _sendSpiceFlags(preset);
+            }}
+
+            function onSpiceFlagChange() {{
+                const flags = readCheckboxes();
+                _sendSpiceFlags(flags);
+            }}
+
+            // Keep old name for backward compat
+            function setSpiceMode(mode) {{ setSpicePreset(mode); }}
 
             async function restartGateway() {{
                 if (!confirm('Restart the gateway? This will briefly interrupt the bot.')) return;
@@ -4510,12 +4649,31 @@ async def delete_traffic_logs(
 # Spice Mode (LLM Temperature)
 # ============================================================
 
-SPICYMODES = {"nospice", "medspice", "veryspice"}
+SPICYMODES = {"nospice", "medspice", "veryspice", "custom"}
 SPICE_LABELS = {
     "nospice":   "No spice - strictly business",
     "medspice":  "Med spice - balanced heat",
     "veryspice": "Very spice - full send",
+    "custom":    "Custom spice blend",
 }
+
+
+def _write_spice_to_config(flags: dict, preset: str) -> dict:
+    """Write spice flags and preset to gateway config. Returns the config dict."""
+    with open(GATEWAY_CONFIG_PATH) as f:
+        config = json.load(f)
+    if "env" not in config:
+        config["env"] = {}
+    if "vars" not in config["env"]:
+        config["env"]["vars"] = {}
+    config["env"]["vars"]["SPICYMODE"] = preset
+    config["env"]["vars"]["SPICE_AUTO_CONFIG"] = str(flags.get("auto_config", False)).lower()
+    config["env"]["vars"]["SPICE_AUTO_MERGE"] = str(flags.get("auto_merge", False)).lower()
+    config["env"]["vars"]["SPICE_AUTO_DEPLOY"] = str(flags.get("auto_deploy", False)).lower()
+    config["env"]["vars"]["SPICE_AUTO_PULL"] = str(flags.get("auto_pull", False)).lower()
+    with open(GATEWAY_CONFIG_PATH, "w") as f:
+        json.dump(config, f, indent=2)
+    return config
 
 
 @app.get("/spice")
@@ -4525,16 +4683,17 @@ async def get_spice(
     session: Optional[str] = Cookie(None, alias="clawfactory_session"),
     authorization: Optional[str] = Header(None),
 ):
-    """Get current spice mode from env.vars.SPICYMODE."""
+    """Get current spice mode and granular flags."""
     if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
         raise HTTPException(status_code=401, detail="Unauthorized")
-    try:
-        with open(GATEWAY_CONFIG_PATH) as f:
-            config = json.load(f)
-        mode = config.get("env", {}).get("vars", {}).get("SPICYMODE", "medspice")
-    except Exception:
-        mode = "medspice"
-    return {"mode": mode, "label": SPICE_LABELS.get(mode, mode), "auto_accept": mode != "nospice"}
+    flags = get_spice_flags()
+    preset = _flags_to_preset(flags)
+    return {
+        "mode": preset,
+        "label": SPICE_LABELS.get(preset, preset),
+        "auto_accept": any(flags.values()),
+        "flags": flags,
+    }
 
 
 @app.post("/spice")
@@ -4545,25 +4704,23 @@ async def set_spice(
     session: Optional[str] = Cookie(None, alias="clawfactory_session"),
     authorization: Optional[str] = Header(None),
 ):
-    """Set spice mode in env.vars.SPICYMODE."""
+    """Set spice mode — accepts {mode: preset} or {flags: {...}}."""
     if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
         raise HTTPException(status_code=401, detail="Unauthorized")
     data = await request.json()
-    mode = data.get("mode", "medspice")
-    if mode not in SPICYMODES:
-        return {"error": f"Unknown mode: {mode}"}
     try:
-        with open(GATEWAY_CONFIG_PATH) as f:
-            config = json.load(f)
-        if "env" not in config:
-            config["env"] = {}
-        if "vars" not in config["env"]:
-            config["env"]["vars"] = {}
-        config["env"]["vars"]["SPICYMODE"] = mode
-        with open(GATEWAY_CONFIG_PATH, "w") as f:
-            json.dump(config, f, indent=2)
-        audit_log("spice_mode_set", {"mode": mode})
-        return {"mode": mode, "label": SPICE_LABELS.get(mode, mode)}
+        if "flags" in data:
+            flags = {k: bool(data["flags"].get(k, False)) for k in SPICE_FLAG_KEYS}
+            preset = _flags_to_preset(flags)
+        else:
+            mode = data.get("mode", "medspice")
+            if mode not in SPICE_PRESETS:
+                return {"error": f"Unknown preset: {mode}"}
+            flags = dict(SPICE_PRESETS[mode])
+            preset = mode
+        _write_spice_to_config(flags, preset)
+        audit_log("spice_mode_set", {"preset": preset, "flags": flags})
+        return {"mode": preset, "label": SPICE_LABELS.get(preset, preset), "flags": flags}
     except Exception as e:
         return {"error": str(e)}
 
@@ -4746,12 +4903,21 @@ async def propose_changes(
 
         audit_log("propose_changes_success", {"branch": full_branch})
 
-        # Auto-merge when spicy
-        if is_spicy():
+        # Auto-merge when spice flag set
+        if spice_auto_merge():
             merge_result = _auto_merge_proposal_branches()
             if merge_result.get("merged"):
-                audit_log("branch_auto_merged_on_propose", {"branch": full_branch, "spice": get_spice_mode()})
-                return {"message": f"Created, pushed, and auto-merged {full_branch} (spice mode)"}
+                audit_log("branch_auto_merged_on_propose", {"branch": full_branch, "flags": get_spice_flags()})
+                msg = f"Created, pushed, and auto-merged {full_branch} (spice mode)"
+                # Auto-deploy after merge
+                if spice_auto_deploy():
+                    if restart_gateway():
+                        audit_log("auto_deploy_on_propose", {"branch": full_branch})
+                        msg += " — gateway restarted"
+                    else:
+                        audit_log("auto_deploy_failed_on_propose", {"branch": full_branch})
+                        msg += " — auto-deploy failed"
+                return {"message": msg}
 
         return {"message": f"Created and pushed {full_branch}"}
     except subprocess.TimeoutExpired:
@@ -6223,12 +6389,12 @@ async def propose_config(
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }, f, indent=2)
 
-        # Auto-accept when spicy
-        if is_spicy():
+        # Auto-accept when auto_config flag set
+        if spice_auto_config():
             result = _auto_apply_proposed_config()
             if result.get("status") == "applied":
-                audit_log("config_auto_accepted", {"spice": get_spice_mode(), "keys": list(config.keys())})
-                return {"status": "auto_accepted", "message": f"Config auto-applied (spice mode: {get_spice_mode()})"}
+                audit_log("config_auto_accepted", {"flags": get_spice_flags(), "keys": list(config.keys())})
+                return {"status": "auto_accepted", "message": "Config auto-applied (spice: auto_config)"}
 
         return {"status": "proposed", "message": "Config proposal saved for review"}
     except Exception as e:
@@ -6501,23 +6667,31 @@ def _auto_merge_proposal_branches() -> dict:
 
 
 async def _spice_auto_accept_loop():
-    """Background loop: check for pending proposals every 60 seconds when spicy."""
+    """Background loop: check for pending proposals every 60 seconds per spice flags."""
     while True:
         await asyncio.sleep(60)
         try:
-            if not is_spicy():
+            flags = get_spice_flags()
+            if not any(flags.values()):
                 continue
 
             # Auto-apply pending config proposals
-            if PROPOSED_CONFIG_PATH.exists():
+            if flags["auto_config"] and PROPOSED_CONFIG_PATH.exists():
                 result = _auto_apply_proposed_config()
                 if result.get("status") == "applied":
                     audit_log("config_auto_accepted_periodic", {"keys": result.get("keys", [])})
 
             # Auto-merge pending branch proposals
-            result = _auto_merge_proposal_branches()
-            if result.get("merged"):
-                audit_log("branches_auto_merged_periodic", {"merged": result["merged"]})
+            if flags["auto_merge"]:
+                result = _auto_merge_proposal_branches()
+                if result.get("merged"):
+                    audit_log("branches_auto_merged_periodic", {"merged": result["merged"]})
+                    # Auto-deploy after merge
+                    if flags["auto_deploy"]:
+                        if restart_gateway():
+                            audit_log("auto_deploy_periodic", {"merged": result["merged"]})
+                        else:
+                            audit_log("auto_deploy_failed_periodic", {"merged": result["merged"]})
         except Exception as e:
             audit_log("spice_auto_accept_error", {"error": str(e)})
 

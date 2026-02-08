@@ -8,8 +8,8 @@
 # Services run directly in the Lima VM as systemd units.
 # No Firecracker, no TAP networking — fast VZ networking.
 #
-# Provides: lima_ensure, lima_sync, lima_build, lima_services,
-#           lima_openclaw, lima_status, lima_shell
+# Provides: lima_ensure, lima_sync, lima_sync_watch, lima_build,
+#           lima_services, lima_openclaw, lima_status, lima_shell
 
 # --- Configuration ---
 LIMA_VM_NAME="clawfactory"
@@ -76,12 +76,12 @@ lima_sync() {
     _lima_exec mkdir -p "${staging}/controller" "${staging}/proxy"
 
     # Sync controller (host → VM over SSH)
-    rsync -a --delete --exclude '__pycache__' \
+    rsync -av --delete --exclude '__pycache__' \
         -e "$rsh" \
         "${cf_root}/controller/" "${LIMA_SSH_HOST}:${staging}/controller/"
 
     # Sync proxy config
-    rsync -a --delete \
+    rsync -av --delete \
         -e "$rsh" \
         "${cf_root}/proxy/" "${LIMA_SSH_HOST}:${staging}/proxy/"
 
@@ -93,7 +93,7 @@ lima_sync() {
         git -C "${cf_root}/bot_repos/${instance}/approved" rev-parse HEAD \
             > "${cf_root}/bot_repos/${instance}/approved/.git-sha" 2>/dev/null || true
 
-        rsync -a --delete \
+        rsync -av --delete \
             --exclude 'node_modules' \
             --exclude '.DS_Store' \
             -e "$rsh" \
@@ -108,18 +108,28 @@ lima_sync() {
     # Sync secrets for this instance (restricted permissions)
     if [[ -d "${cf_root}/secrets/${instance}" ]]; then
         _lima_exec mkdir -p "${staging}/secrets/${instance}"
-        rsync -a \
+        rsync -av \
             -e "$rsh" \
             "${cf_root}/secrets/${instance}/" \
             "${LIMA_SSH_HOST}:${staging}/secrets/${instance}/"
     fi
 
     # Deploy from staging to /srv/clawfactory (runs inside VM)
+    # Excludes protect VM-only dirs from --delete:
+    #   state/     — bot runtime state (source of truth: snapshots)
+    #   dist/      — build output (rebuilt by lima_build)
+    #   snapshots/ — encrypted snapshots
+    #   audit/     — traffic logs
+    #   mitm-ca/   — mitmproxy CA certs
     _lima_root "
-        rsync -a --delete \
+        rsync -av --delete \
             --exclude 'node_modules' \
             --exclude '.pnpm-lock-hash' \
             --exclude 'snapshots' \
+            --exclude 'bot_repos/*/state' \
+            --exclude 'bot_repos/*/approved/dist' \
+            --exclude 'audit' \
+            --exclude 'mitm-ca' \
             ${staging}/ ${LIMA_SRV}/
 
         # Ensure directory structure
@@ -138,6 +148,60 @@ lima_sync() {
     _lima_fix_docker_paths "$instance"
 
     echo "Files synced"
+}
+
+# ============================================================
+# lima_sync_watch — Watch for file changes and auto-sync
+# ============================================================
+lima_sync_watch() {
+    local instance="${INSTANCE_NAME:-default}"
+
+    if ! command -v fswatch &>/dev/null; then
+        echo "Error: fswatch not found. Install: brew install fswatch" >&2
+        return 1
+    fi
+
+    local watch_dirs=("${SCRIPT_DIR}/controller" "${SCRIPT_DIR}/proxy")
+    if [[ -d "${SCRIPT_DIR}/bot_repos/${instance}/approved" ]]; then
+        watch_dirs+=("${SCRIPT_DIR}/bot_repos/${instance}/approved")
+    fi
+
+    echo "[sync] Watching for changes (instance: ${instance})..."
+    echo "[sync] Dirs: ${watch_dirs[*]}"
+    echo "[sync] Press Ctrl+C to stop"
+
+    fswatch --recursive --latency 2 \
+        --exclude '__pycache__' --exclude '.DS_Store' --exclude 'node_modules' \
+        "${watch_dirs[@]}" | while read -r changed; do
+        # Drain remaining buffered lines to avoid redundant syncs
+        local files=("$(basename "$changed")")
+        local security_flag=false
+        _lima_sync_watch_check_security "$changed" && security_flag=true
+        while read -r -t 0.1 extra; do
+            files+=("$(basename "$extra")")
+            _lima_sync_watch_check_security "$extra" && security_flag=true
+        done
+
+        echo ""
+        echo "[sync] $(date +%H:%M:%S) ${#files[@]} file(s) changed: ${files[*]}"
+        if [[ "$security_flag" == true ]]; then
+            echo "[sync] *** SECURITY-SENSITIVE file changed — review before deploy ***"
+        fi
+        lima_sync
+        _lima_root "systemctl restart clawfactory-controller openclaw-gateway@${instance}"
+        echo "[sync] Controller + gateway restarted"
+    done
+}
+
+# Check if a path is security-sensitive (secrets, env, keys, auth code)
+_lima_sync_watch_check_security() {
+    local path="$1"
+    case "$path" in
+        */secrets/*|*.env|*.key|*.pem|*.age|*token*|*auth*|*credential*|*scrub*)
+            return 0 ;;
+        *)
+            return 1 ;;
+    esac
 }
 
 # ============================================================
