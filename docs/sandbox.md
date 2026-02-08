@@ -54,6 +54,11 @@ The heavy-duty option. The entire agent stack runs as systemd services inside a 
 │  │                │  :8080       │         ▼                │  │
 │  │                └──────────────┘   /srv/clawfactory/      │  │
 │  │                                  audit/traffic.jsonl     │  │
+│  │                ┌──────────────┐                          │  │
+│  │                │  MITM Proxy │  (opt-in, off by default) │  │
+│  │                │  mitmproxy  │  iptables REDIRECT        │  │
+│  │                │  :8888      │──► audit/traffic.enc.jsonl │  │
+│  │                └──────────────┘  (Fernet encrypted)      │  │
 │  │  dockerd (tool sandbox only)                             │  │
 │  └───────────────────────────────────────────────────────────┘  │
 │                                                                 │

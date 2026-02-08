@@ -41,6 +41,7 @@ GATEWAY_PORT = os.environ.get("GATEWAY_PORT", "18789")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "")
 CONTROLLER_API_TOKEN = os.environ.get("CONTROLLER_API_TOKEN", "")
 GATEWAY_INTERNAL_TOKEN = os.environ.get("GATEWAY_INTERNAL_TOKEN", "")
+AGENT_API_TOKEN = os.environ.get("AGENT_API_TOKEN", "")
 SNAPSHOTS_DIR = Path(os.environ.get("SNAPSHOTS_DIR", "/srv/snapshots"))
 AGE_KEY = Path(os.environ.get("AGE_KEY", "/srv/secrets/snapshot.key"))
 SECRETS_DIR = Path(os.environ.get("SECRETS_DIR", f"/srv/clawfactory/secrets/{INSTANCE_NAME}"))
@@ -212,6 +213,32 @@ def check_internal_auth(
     return False
 
 
+def check_agent_auth(
+    token: Optional[str] = None,
+    auth_header: Optional[str] = None,
+) -> bool:
+    """
+    Check if request has a valid agent API token.
+
+    Agent endpoints accept only AGENT_API_TOKEN — a scoped token that
+    gives the sandboxed agent access to gateway proxy endpoints without
+    holding the real gateway token.
+    """
+    if not AGENT_API_TOKEN:
+        return False  # No agent token configured = deny
+
+    actual_token = None
+    if token:
+        actual_token = token
+    elif auth_header and auth_header.startswith("Bearer "):
+        actual_token = auth_header[7:]
+
+    if not actual_token:
+        return False
+
+    return secrets.compare_digest(actual_token, AGENT_API_TOKEN)
+
+
 # ============================================================
 # Audit Logging
 # ============================================================
@@ -250,7 +277,7 @@ def git_fetch_main() -> bool:
 
 
 def git_get_main_sha() -> Optional[str]:
-    """Get the SHA of main branch."""
+    """Get the SHA of main branch (git repo or .git-sha marker from sync)."""
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -260,6 +287,13 @@ def git_get_main_sha() -> Optional[str]:
         )
         if result.returncode == 0:
             return result.stdout.strip()
+    except Exception:
+        pass
+    # Fall back to .git-sha marker written during lima_sync
+    sha_file = APPROVED_DIR / ".git-sha"
+    try:
+        if sha_file.exists():
+            return sha_file.read_text().strip()
     except Exception:
         pass
     return None
@@ -4509,7 +4543,7 @@ async def propose_changes(
     authorization: Optional[str] = Header(None),
 ):
     """Commit uncommitted changes to a new proposal/* branch and push."""
-    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+    if not (check_auth(token, session, authorization) or check_agent_auth(token, authorization)):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     import re
@@ -5909,16 +5943,11 @@ MAX_REASON_LENGTH = 500
 @app.post("/controller/config/propose")
 async def propose_config(
     request: Request,
-    token: Optional[str] = Query(None),
-    authorization: Optional[str] = Header(None),
 ):
     """
     AI can propose a config change. Only one proposal stored at a time.
-    New proposals overwrite existing ones. Requires gateway internal auth.
+    New proposals overwrite existing ones. No auth required (localhost only).
     """
-    if not check_internal_auth(token, authorization):
-        audit_log("internal_auth_rejected", {"endpoint": "/config/propose", "method": "POST"})
-        raise HTTPException(status_code=403, detail="Forbidden")
     # Check content length to prevent DoS
     content_length = request.headers.get("content-length")
     if content_length and int(content_length) > MAX_CONFIG_SIZE:
@@ -6675,14 +6704,8 @@ async def settings_github_delete(
 # Dangerous operations (restore, delete, rebuild) require CONTROLLER_API_TOKEN.
 
 @app.post("/internal/snapshot")
-async def internal_snapshot_create(
-    token: Optional[str] = Query(None),
-    authorization: Optional[str] = Header(None),
-):
-    """Create snapshot - internal endpoint (gateway auth)."""
-    if not check_internal_auth(token, authorization):
-        audit_log("internal_auth_rejected", {"endpoint": "/internal/snapshot", "method": "POST"})
-        raise HTTPException(status_code=403, detail="Forbidden")
+async def internal_snapshot_create():
+    """Create snapshot - internal endpoint (no auth, localhost only)."""
     audit_log("snapshot_requested", {"source": "internal"})
     result = create_snapshot()
     if "error" in result:
@@ -6691,14 +6714,8 @@ async def internal_snapshot_create(
 
 
 @app.get("/internal/snapshot")
-async def internal_snapshot_list(
-    token: Optional[str] = Query(None),
-    authorization: Optional[str] = Header(None),
-):
-    """List snapshots - internal endpoint (gateway auth)."""
-    if not check_internal_auth(token, authorization):
-        audit_log("internal_auth_rejected", {"endpoint": "/internal/snapshot", "method": "GET"})
-        raise HTTPException(status_code=403, detail="Forbidden")
+async def internal_snapshot_list():
+    """List snapshots - internal endpoint (no auth, localhost only)."""
     return {"snapshots": list_snapshots()}
 
 
@@ -6709,17 +6726,12 @@ class GitPushRequest(BaseModel):
 @app.post("/internal/git/push")
 async def internal_git_push(
     request: GitPushRequest,
-    token: Optional[str] = Query(None),
-    authorization: Optional[str] = Header(None),
 ):
-    """Push a branch to origin - internal endpoint (gateway auth).
+    """Push a branch to origin - internal endpoint (no auth, localhost only).
 
     Only allows pushing proposal/* branches for security.
     The bot commits locally, then calls this to push.
     """
-    if not check_internal_auth(token, authorization):
-        audit_log("internal_auth_rejected", {"endpoint": "/internal/git/push", "method": "POST"})
-        raise HTTPException(status_code=403, detail="Forbidden")
     branch = request.branch
 
     # Security: Only allow proposal branches
@@ -6840,14 +6852,8 @@ async def internal_git_push(
 
 
 @app.get("/internal/git/status")
-async def internal_git_status(
-    token: Optional[str] = Query(None),
-    authorization: Optional[str] = Header(None),
-):
-    """Get git status - internal endpoint (gateway auth)."""
-    if not check_internal_auth(token, authorization):
-        audit_log("internal_auth_rejected", {"endpoint": "/internal/git/status", "method": "GET"})
-        raise HTTPException(status_code=403, detail="Forbidden")
+async def internal_git_status():
+    """Get git status - internal endpoint (no auth, localhost only)."""
     try:
         # Get current branch
         result = subprocess.run(
@@ -6882,5 +6888,191 @@ async def internal_git_status(
             "branches": branches,
             "approved_dir": str(APPROVED_DIR),
         }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ============================================================
+# Agent API
+# ============================================================
+# Scoped endpoints for the sandboxed agent. Authenticated with
+# AGENT_API_TOKEN so the agent never holds the real gateway token.
+
+
+@app.put("/agent/files/{filepath:path}")
+async def agent_write_file(
+    filepath: str,
+    request: Request,
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    """Write a file to the approved dir — agent-scoped (requires AGENT_API_TOKEN).
+
+    Path is relative to APPROVED_DIR. Only allows writing inside it.
+    """
+    if not check_agent_auth(token, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Security: block null bytes
+    if "\x00" in filepath:
+        raise HTTPException(status_code=400, detail="Invalid path")
+
+    # Security: block path traversal
+    if ".." in filepath or filepath.startswith("/"):
+        audit_log("agent_file_rejected", {"path": filepath, "reason": "path_traversal"})
+        raise HTTPException(status_code=400, detail="Invalid path (no .. or absolute paths)")
+
+    # Security: block dangerous directories
+    path_lower = filepath.lower()
+    blocked_prefixes = (".git/", "node_modules/", ".github/workflows/")
+    if any(path_lower.startswith(p) or f"/{p}" in path_lower for p in blocked_prefixes):
+        audit_log("agent_file_rejected", {"path": filepath, "reason": "blocked_directory"})
+        raise HTTPException(status_code=400, detail="Cannot write to protected directories (.git, node_modules, .github/workflows)")
+
+    # Block writing outside approved dir (resolve follows symlinks)
+    target = (APPROVED_DIR / filepath).resolve()
+    if not str(target).startswith(str(APPROVED_DIR.resolve())):
+        audit_log("agent_file_rejected", {"path": filepath, "reason": "outside_approved_dir"})
+        raise HTTPException(status_code=400, detail="Path resolves outside approved directory")
+
+    # Block sensitive files
+    basename = target.name.lower()
+    blocked_names = {".env", ".env.local", ".env.production", "credentials.json",
+                     "secrets.json", ".git-credentials", ".npmrc", ".netrc"}
+    if basename in blocked_names:
+        audit_log("agent_file_rejected", {"path": filepath, "reason": "sensitive_file"})
+        raise HTTPException(status_code=400, detail="Cannot write sensitive files")
+
+    # Size limit: 1MB
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > 1_048_576:
+        raise HTTPException(status_code=413, detail="File too large (max 1MB)")
+
+    body = await request.body()
+    if len(body) > 1_048_576:
+        raise HTTPException(status_code=413, detail="File too large (max 1MB)")
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(body)
+        audit_log("agent_file_written", {"path": filepath, "size": len(body)})
+        return {"status": "written", "path": filepath, "size": len(body)}
+    except Exception as e:
+        audit_log("agent_file_error", {"path": filepath, "error": str(e)})
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/agent/files/{filepath:path}")
+async def agent_read_file(
+    filepath: str,
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    """Read a file from the approved dir — agent-scoped (requires AGENT_API_TOKEN)."""
+    if not check_agent_auth(token, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if ".." in filepath or filepath.startswith("/"):
+        raise HTTPException(status_code=400, detail="Invalid path")
+
+    target = (APPROVED_DIR / filepath).resolve()
+    if not str(target).startswith(str(APPROVED_DIR.resolve())):
+        raise HTTPException(status_code=400, detail="Path resolves outside approved directory")
+
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail="Not a file")
+
+    # Size limit for reads: 2MB
+    if target.stat().st_size > 2_097_152:
+        raise HTTPException(status_code=413, detail="File too large to read (max 2MB)")
+
+    try:
+        from fastapi.responses import Response
+        content = target.read_bytes()
+        return Response(content=content, media_type="application/octet-stream")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/agent/gateway/status")
+async def agent_gateway_status(
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    """Gateway status — agent-scoped (requires AGENT_API_TOKEN)."""
+    if not check_agent_auth(token, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    status = get_gateway_status()
+    return {"gateway": status, "port": GATEWAY_PORT, "instance": INSTANCE_NAME}
+
+
+@app.get("/agent/gateway/channels")
+async def agent_gateway_channels(
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    """Channel connection status — agent-scoped (requires AGENT_API_TOKEN)."""
+    if not check_agent_auth(token, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    success, output = run_gateway_command(
+        ["node", "dist/index.js", "channels", "status", "--json"], timeout=15
+    )
+    if not success:
+        return {"error": f"Failed to get channel status: {output}"}
+
+    try:
+        return json.loads(output)
+    except json.JSONDecodeError:
+        return {"raw": output}
+
+
+@app.post("/agent/gateway/restart")
+async def agent_gateway_restart(
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    """Restart the gateway — agent-scoped (requires AGENT_API_TOKEN)."""
+    if not check_agent_auth(token, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    audit_log("gateway_restart_requested", {"source": "agent"})
+
+    if not restart_gateway():
+        raise HTTPException(status_code=500, detail="Failed to restart gateway")
+
+    return {"status": "restarted"}
+
+
+@app.get("/agent/gateway/config")
+async def agent_gateway_config(
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    """Read current openclaw.json config — agent-scoped (requires AGENT_API_TOKEN)."""
+    if not check_agent_auth(token, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    config_path = OPENCLAW_HOME / "openclaw.json"
+    try:
+        with open(config_path) as f:
+            config = json.load(f)
+        # Strip secrets before returning to agent
+        safe = {k: v for k, v in config.items() if k not in ("talk",)}
+        if "gateway" in safe and "auth" in safe["gateway"]:
+            safe["gateway"]["auth"] = {"mode": safe["gateway"]["auth"].get("mode", "unknown")}
+        if "env" in safe and "vars" in safe["env"]:
+            safe["env"]["vars"] = {k: "***" for k in safe["env"]["vars"]}
+        for pname, pconf in safe.get("models", {}).get("providers", {}).items():
+            if "apiKey" in pconf:
+                pconf["apiKey"] = "***"
+            if "headers" in pconf:
+                pconf["headers"] = {k: "***" for k in pconf["headers"]}
+        return safe
+    except FileNotFoundError:
+        return {"error": "Config file not found"}
     except Exception as e:
         return {"error": str(e)}

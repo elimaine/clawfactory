@@ -89,6 +89,10 @@ lima_sync() {
     if [[ -d "${cf_root}/bot_repos/${instance}" ]]; then
         _lima_exec mkdir -p "${staging}/bot_repos/${instance}/approved"
 
+        # Write git SHA marker so the controller can show the active commit
+        git -C "${cf_root}/bot_repos/${instance}/approved" rev-parse HEAD \
+            > "${cf_root}/bot_repos/${instance}/approved/.git-sha" 2>/dev/null || true
+
         rsync -a --delete \
             --exclude 'node_modules' \
             --exclude '.DS_Store' \
@@ -96,23 +100,9 @@ lima_sync() {
             "${cf_root}/bot_repos/${instance}/approved/" \
             "${LIMA_SSH_HOST}:${staging}/bot_repos/${instance}/approved/"
 
-        # Sync state directory (OpenClaw config, credentials, identity)
-        # Uses --update so VM-side changes aren't overwritten by stale host files
-        if [[ -d "${cf_root}/bot_repos/${instance}/state" ]]; then
-            _lima_exec mkdir -p "${staging}/bot_repos/${instance}/state"
-            rsync -a --update \
-                --exclude '.DS_Store' \
-                --exclude '.obsidian' \
-                --exclude 'installed' \
-                --exclude 'sandboxes' \
-                --exclude 'subagents' \
-                --exclude 'workspace' \
-                --exclude 'media' \
-                --exclude 'update-check.json' \
-                -e "$rsh" \
-                "${cf_root}/bot_repos/${instance}/state/" \
-                "${LIMA_SSH_HOST}:${staging}/bot_repos/${instance}/state/"
-        fi
+        # State directory is NOT synced from host.
+        # Snapshots are the source of truth for bot state.
+        # State is restored from snapshots via _lima_restore_snapshot.
     fi
 
     # Sync secrets for this instance (restricted permissions)
@@ -253,6 +243,13 @@ lima_build() {
         fi
     "
 
+    # Fix ownership so the gateway user can access built files and state
+    local svc_user="openclaw-${instance}"
+    _lima_root "
+        chown -R ${svc_user}:${svc_user} ${LIMA_SRV}/bot_repos/${instance}/
+        chmod 700 ${LIMA_SRV}/bot_repos/${instance}/
+    "
+
     # Clean up staging
     _lima_exec rm -rf "$staging"
 
@@ -315,6 +312,13 @@ lima_services() {
                 echo \"GATEWAY_INTERNAL_TOKEN=\${itok}\" >> ${LIMA_SRV}/secrets/${instance}/gateway.env
                 echo '[services] Generated GATEWAY_INTERNAL_TOKEN'
             fi
+
+            # Generate AGENT_API_TOKEN if missing (scoped token for sandboxed agent)
+            if ! grep -q 'AGENT_API_TOKEN' ${LIMA_SRV}/secrets/${instance}/gateway.env 2>/dev/null; then
+                atok=\$(head -c 32 /dev/urandom | xxd -p)
+                echo \"AGENT_API_TOKEN=\${atok}\" >> ${LIMA_SRV}/secrets/${instance}/gateway.env
+                echo '[services] Generated AGENT_API_TOKEN'
+            fi
         fi
 
         # Snapshots owned by instance user
@@ -361,20 +365,13 @@ ExecStart=
 ExecStart=/usr/bin/node dist/index.js gateway --port ${gw_port} --bind lan
 EOF
 
-        # Gateway override — load gateway secrets + LLM proxy env vars
+        # Gateway override — load gateway secrets
         cat >> /etc/systemd/system/openclaw-gateway@${instance}.service.d/override.conf <<EOF
 EnvironmentFile=${LIMA_SRV}/secrets/${instance}/gateway.env
-Environment=ANTHROPIC_BASE_URL=http://127.0.0.1:9090/anthropic
-Environment=OPENAI_BASE_URL=http://127.0.0.1:9090/openai
-Environment=GEMINI_API_BASE=http://127.0.0.1:9090/gemini
 EOF
-
-        # Only add MITM CA trust if the cert exists (mitmproxy has been started at least once)
-        if [ -f ${LIMA_SRV}/mitm-ca/mitmproxy-ca-cert.pem ]; then
-            cat >> /etc/systemd/system/openclaw-gateway@${instance}.service.d/override.conf <<EOF
-Environment=NODE_EXTRA_CA_CERTS=${LIMA_SRV}/mitm-ca/mitmproxy-ca-cert.pem
-EOF
-        fi
+        # NOTE: LLM proxy intercept (ANTHROPIC_BASE_URL etc.) removed — it added
+        # latency and only covered 3 providers. The proxy still runs on :9090 and
+        # can be re-enabled per-provider via openclaw.json baseUrl overrides.
 
         # Controller override
         mkdir -p /etc/systemd/system/clawfactory-controller.service.d
@@ -549,6 +546,84 @@ _lima_snapshot_pull() {
     if [[ "$count" -gt 0 ]]; then
         echo "[snapshots] Pulled ${count} snapshot(s) to host"
     fi
+}
+
+# ============================================================
+# Snapshot state management — snapshots are source of truth
+# ============================================================
+
+# Check if latest snapshot exists in VM
+_lima_has_snapshot() {
+    local instance="${1:-${INSTANCE_NAME:-default}}"
+    _lima_exec test -e "${LIMA_SRV}/snapshots/${instance}/latest.tar.age" 2>/dev/null &&
+    _lima_exec test -f "${LIMA_SRV}/secrets/${instance}/snapshot.key" 2>/dev/null
+}
+
+# Check if state dir has meaningful content
+_lima_has_state() {
+    local instance="${1:-${INSTANCE_NAME:-default}}"
+    _lima_exec test -f "${LIMA_SRV}/bot_repos/${instance}/state/openclaw.json" 2>/dev/null
+}
+
+# Get latest snapshot filename
+_lima_latest_snapshot_name() {
+    local instance="${1:-${INSTANCE_NAME:-default}}"
+    _lima_root "readlink -f ${LIMA_SRV}/snapshots/${instance}/latest.tar.age 2>/dev/null | xargs basename 2>/dev/null" 2>/dev/null
+}
+
+# Take a backup snapshot of current state (echoes backup filename)
+_lima_backup_state() {
+    local instance="${1:-${INSTANCE_NAME:-default}}"
+    local snapshot_dir="${LIMA_SRV}/snapshots/${instance}"
+    local state_dir="${LIMA_SRV}/bot_repos/${instance}/state"
+    local key_file="${LIMA_SRV}/secrets/${instance}/snapshot.key"
+
+    _lima_root "
+        backup_name=\"pre-start--\$(date -u +%Y-%m-%dT%H-%M-%SZ).tar.age\"
+        pubkey=\$(age-keygen -y ${key_file} 2>/dev/null)
+        if [ -z \"\$pubkey\" ]; then
+            echo 'ERROR' >&2
+            exit 1
+        fi
+
+        mkdir -p ${snapshot_dir}
+        cd ${state_dir}
+        tar --exclude='*.tmp*' \
+            --exclude='agents/*/sessions/*.jsonl' \
+            --exclude='installed' \
+            --exclude='installed/*' \
+            --exclude='workspace/*/.git' \
+            --exclude='sandboxes' \
+            --exclude='subagents' \
+            --exclude='media' \
+            -cf - . | age -r \"\$pubkey\" -o \"${snapshot_dir}/\$backup_name\"
+
+        echo \"\$backup_name\"
+    " 2>/dev/null
+}
+
+# Restore state from latest snapshot
+_lima_restore_snapshot() {
+    local instance="${1:-${INSTANCE_NAME:-default}}"
+    local snapshot_dir="${LIMA_SRV}/snapshots/${instance}"
+    local state_dir="${LIMA_SRV}/bot_repos/${instance}/state"
+    local key_file="${LIMA_SRV}/secrets/${instance}/snapshot.key"
+
+    _lima_root "
+        snapshot=\$(readlink -f ${snapshot_dir}/latest.tar.age 2>/dev/null)
+        if [ ! -f \"\$snapshot\" ]; then
+            echo '[snapshot] Could not resolve latest snapshot' >&2
+            exit 1
+        fi
+
+        mkdir -p ${state_dir}
+        if age -d -i ${key_file} \"\$snapshot\" | tar -C ${state_dir} -xf -; then
+            echo '[snapshot] State restored'
+        else
+            echo '[snapshot] Restore failed' >&2
+            exit 1
+        fi
+    "
 }
 
 # ============================================================

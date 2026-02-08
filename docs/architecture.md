@@ -27,6 +27,13 @@ ClawFactory is a launch platform for autonomous agents. Three subsystems work to
 │  │                 │  ──► OpenAI  │─────────┘              ││
 │  │                 │  ──► Gemini  │                        ││
 │  │                 └──────────────┘                        ││
+│  │                                                          ││
+│  │                 ┌──────────────┐                        ││
+│  │                 │  MITM Proxy │  (opt-in, off by default)││
+│  │                 │  :8888      │                        ││
+│  │                 │  iptables   │─► audit/traffic.enc.jsonl│
+│  │                 │  redirect   │  (Fernet encrypted)     ││
+│  │                 └──────────────┘                        ││
 │  └──────────────────────────────────────────────────────────┘│
 │                                                              │
 │  ┌──────────────────────────────────────────────────────────┐│
@@ -60,6 +67,7 @@ Each subsystem has strict boundaries — they can only write to what they own.
 | **Proxy** | Front door, routes all traffic | localhost:18789, :8080 | None |
 | **Gateway** | The agent itself — runs OpenClaw | Internal network | approved/ (git branches), state/ |
 | **LLM Proxy** | Logs outbound AI API calls | Internal :9090 | audit/traffic.jsonl |
+| **MITM Proxy** | Transparent TLS capture (opt-in) | Internal :8888 | audit/traffic.enc.jsonl (encrypted) |
 | **Controller** | Human authority layer | Internal network | approved/ (git pull), snapshots/ |
 
 ## Directory Layout

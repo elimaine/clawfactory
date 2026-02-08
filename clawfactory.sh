@@ -219,6 +219,36 @@ case "${1:-help}" in
             lima_ensure
             lima_sync
             lima_build
+
+            # Snapshot-based state management
+            if _lima_has_snapshot; then
+                snapshot_name=$(_lima_latest_snapshot_name)
+
+                if _lima_has_state; then
+                    echo ""
+                    echo "  Latest snapshot: ${snapshot_name}"
+                    read -p "  Restore state from snapshot? [Y/n] " answer
+                    if [[ "${answer,,}" != "n" ]]; then
+                        echo "  Backing up current state..."
+                        backup_name=$(_lima_backup_state)
+                        if [[ -n "$backup_name" && "$backup_name" != "ERROR" ]]; then
+                            echo "  Current state saved → ${backup_name}"
+                        fi
+                        _lima_restore_snapshot
+                        echo "  Restored from: ${snapshot_name}"
+                        if [[ -n "${backup_name:-}" && "$backup_name" != "ERROR" ]]; then
+                            echo "  Rollback: ./clawfactory.sh snapshot restore ${backup_name}"
+                        fi
+                    else
+                        echo "  Keeping current state"
+                    fi
+                else
+                    echo "[snapshot] Restoring state from: ${snapshot_name}"
+                    _lima_restore_snapshot
+                fi
+                echo ""
+            fi
+
             lima_services start
             echo ""
             echo "ClawFactory [${INSTANCE_NAME}] started (Lima VM)"
@@ -362,6 +392,25 @@ case "${1:-help}" in
                     -H "Content-Type: application/json" \
                     -d "{\"snapshot\": \"${target}\"}" | jq '.'
                 ;;
+            restore)
+                target="${3:-latest}"
+                if [[ "$SANDBOX_MODE" == "lima" ]]; then
+                    if ! _lima_has_snapshot; then
+                        echo "No snapshots found for [${INSTANCE_NAME}]"
+                        exit 1
+                    fi
+                    echo "This will stop the gateway and restore state from: ${target}"
+                    read -p "Continue? [y/N] " confirm
+                    [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Cancelled"; exit 0; }
+                    curl -s -X POST "http://localhost:${CONTROLLER_PORT}/controller/snapshot/restore" \
+                        -H "Content-Type: application/json" \
+                        -d "{\"snapshot\": \"${target}\"}" | jq '.'
+                else
+                    curl -s -X POST "http://localhost:${CONTROLLER_PORT}/controller/snapshot/restore" \
+                        -H "Content-Type: application/json" \
+                        -d "{\"snapshot\": \"${target}\"}" | jq '.'
+                fi
+                ;;
             *)
                 echo "Snapshot commands:"
                 echo ""
@@ -370,6 +419,7 @@ case "${1:-help}" in
                 echo "  ./clawfactory.sh snapshot rename <filename> <name>   Rename a snapshot"
                 echo "  ./clawfactory.sh snapshot delete <name>              Delete a snapshot"
                 echo "  ./clawfactory.sh snapshot delete all                 Delete all snapshots"
+                echo "  ./clawfactory.sh snapshot restore [name|latest]      Restore from a snapshot"
                 ;;
         esac
         ;;
