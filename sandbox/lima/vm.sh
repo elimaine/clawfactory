@@ -9,7 +9,7 @@
 # No Firecracker, no TAP networking — fast VZ networking.
 #
 # Provides: lima_ensure, lima_sync, lima_sync_watch, lima_build,
-#           lima_services, lima_openclaw, lima_status, lima_shell
+#           lima_services, lima_tunnels, lima_openclaw, lima_status, lima_shell
 
 # --- Configuration ---
 LIMA_VM_NAME="clawfactory"
@@ -527,6 +527,67 @@ EOF
         *)
             echo "Usage: lima_services {start|stop|restart|status}" >&2
             return 1
+            ;;
+    esac
+}
+
+# ============================================================
+# lima_tunnels — SSH port forwarding (localhost + Tailscale)
+# ============================================================
+lima_tunnels() {
+    local action="${1:-start}"
+    local instance="${INSTANCE_NAME:-default}"
+    local gw_port="${GATEWAY_PORT:-18789}"
+    local ctrl_port="${CONTROLLER_PORT:-8080}"
+    local proxy_port=9090
+    local pidfile="/tmp/clawfactory-tunnels-${instance}.pid"
+
+    case "$action" in
+        start)
+            # Kill stale tunnels
+            lima_tunnels stop 2>/dev/null
+
+            # Detect Tailscale IP (macOS app binary, bare CLI errors)
+            local ts_ip=""
+            ts_ip=$(/Applications/Tailscale.app/Contents/MacOS/Tailscale ip --4 2>/dev/null || true)
+
+            # Build forward args — always localhost (use array for safe expansion)
+            local fwd=()
+            fwd+=(-L "127.0.0.1:${gw_port}:127.0.0.1:${gw_port}")
+            fwd+=(-L "127.0.0.1:${ctrl_port}:127.0.0.1:${ctrl_port}")
+            fwd+=(-L "127.0.0.1:${proxy_port}:127.0.0.1:${proxy_port}")
+
+            # Add Tailscale binds if available
+            if [[ -n "$ts_ip" ]]; then
+                fwd+=(-L "${ts_ip}:${gw_port}:127.0.0.1:${gw_port}")
+                fwd+=(-L "${ts_ip}:${ctrl_port}:127.0.0.1:${ctrl_port}")
+                fwd+=(-L "${ts_ip}:${proxy_port}:127.0.0.1:${proxy_port}")
+            fi
+
+            # Launch background SSH tunnel
+            ssh -F "${LIMA_SSH_CONFIG}" "${fwd[@]}" -N -f "${LIMA_SSH_HOST}"
+            # Find the SSH PID we just spawned
+            pgrep -nf "ssh.*-N.*${LIMA_SSH_HOST}" > "$pidfile" 2>/dev/null || true
+
+            echo "  Tunnels: localhost (${gw_port}, ${ctrl_port}, ${proxy_port})"
+            [[ -n "$ts_ip" ]] && echo "  Tailnet: ${ts_ip} (${gw_port}, ${ctrl_port}, ${proxy_port})"
+            ;;
+        stop)
+            if [[ -f "$pidfile" ]]; then
+                local pid
+                pid=$(cat "$pidfile")
+                kill "$pid" 2>/dev/null || true
+                rm -f "$pidfile"
+            fi
+            # Also kill any orphaned tunnel processes for this VM
+            pkill -f "ssh.*-N.*-f.*${LIMA_SSH_HOST}" 2>/dev/null || true
+            ;;
+        status)
+            if [[ -f "$pidfile" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+                echo "Tunnels: running (PID $(cat "$pidfile"))"
+            else
+                echo "Tunnels: not running"
+            fi
             ;;
     esac
 }

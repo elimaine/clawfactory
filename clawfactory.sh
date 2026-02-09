@@ -207,6 +207,19 @@ print_urls() {
         echo "  Gateway:    http://localhost:${GATEWAY_PORT}"
         echo "  Controller: http://localhost:${CONTROLLER_PORT}/controller"
     fi
+
+    # Print Tailscale URLs if available
+    local ts_ip=""
+    ts_ip=$(/Applications/Tailscale.app/Contents/MacOS/Tailscale ip --4 2>/dev/null || true)
+    if [[ -n "$ts_ip" ]]; then
+        if [[ -n "$GATEWAY_TOKEN" ]]; then
+            echo "  Tailnet:    http://${ts_ip}:${GATEWAY_PORT}/?token=${GATEWAY_TOKEN}"
+            echo "  Tailnet:    http://${ts_ip}:${CONTROLLER_PORT}/controller?token=${CONTROLLER_TOKEN}"
+        else
+            echo "  Tailnet:    http://${ts_ip}:${GATEWAY_PORT}"
+            echo "  Tailnet:    http://${ts_ip}:${CONTROLLER_PORT}/controller"
+        fi
+    fi
 }
 
 # ============================================================
@@ -250,6 +263,7 @@ case "${1:-help}" in
             fi
 
             lima_services start
+            lima_tunnels start
             echo ""
             echo "ClawFactory [${INSTANCE_NAME}] started (Lima VM)"
             print_urls
@@ -262,6 +276,7 @@ case "${1:-help}" in
         ;;
     stop)
         if [[ "$SANDBOX_MODE" == "lima" ]]; then
+            lima_tunnels stop
             lima_stop
             echo "ClawFactory [${INSTANCE_NAME}] stopped (Lima VM)"
         else
@@ -272,6 +287,7 @@ case "${1:-help}" in
     restart)
         if [[ "$SANDBOX_MODE" == "lima" ]]; then
             lima_services restart
+            lima_tunnels start
             echo "ClawFactory [${INSTANCE_NAME}] restarted (Lima VM)"
         else
             ${COMPOSE_CMD} up -d --force-recreate
@@ -285,6 +301,7 @@ case "${1:-help}" in
             lima_sync
             lima_build
             lima_services restart
+            lima_tunnels start
             echo "ClawFactory [${INSTANCE_NAME}] rebuilt and restarted"
             print_urls
         else
@@ -890,6 +907,13 @@ ENVEOF
                 ;;
         esac
         ;;
+    tunnels)
+        if [[ "$SANDBOX_MODE" != "lima" ]]; then
+            echo "Tunnels are only available in Lima sandbox mode"
+            exit 1
+        fi
+        lima_tunnels "${2:-status}"
+        ;;
     sync)
         if [[ "$SANDBOX_MODE" == "lima" ]]; then
             lima_ensure
@@ -939,6 +963,7 @@ ENVEOF
         echo "  info            Show instance info and tokens"
         echo "  remote [fix]    Show/fix git remote URL"
         echo "  bots            List all saved bots"
+        echo "  tunnels [cmd]   SSH tunnels (start/stop/status)"
         echo "  sync [watch]    Sync files to VM (watch: auto-sync on changes)"
         echo "  lima            Lima sandbox management"
         echo ""

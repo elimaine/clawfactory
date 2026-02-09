@@ -69,7 +69,6 @@ compute_sizing() {
 
     # Lima VM: 2 GiB base + 2 GiB per instance
     local mem_gib=$(( 2 + instance_count * 2 ))
-    LIMA_MEMORY="${mem_gib}GiB"
 
     # CPUs: 2 base + 1 per instance, capped at host-1
     local host_cpus
@@ -78,6 +77,24 @@ compute_sizing() {
     [[ "$max_cpus" -lt 2 ]] && max_cpus=2
     LIMA_CPUS=$(( 2 + instance_count ))
     [[ "$LIMA_CPUS" -gt "$max_cpus" ]] && LIMA_CPUS="$max_cpus"
+
+    local host_mem_gib
+    host_mem_gib=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 17179869184) / 1073741824 ))
+
+    echo ""
+    info "Calculated: ${mem_gib} GiB RAM for ${instance_count} instance(s)"
+    info "Host has ${host_mem_gib} GiB total RAM"
+    echo ""
+    read -p "RAM for VM in GiB [${mem_gib}]: " custom_mem
+    if [[ -n "$custom_mem" ]]; then
+        if [[ "$custom_mem" =~ ^[0-9]+$ ]] && [[ "$custom_mem" -ge 2 ]]; then
+            mem_gib="$custom_mem"
+        else
+            warn "Invalid input, using calculated ${mem_gib} GiB"
+        fi
+    fi
+
+    LIMA_MEMORY="${mem_gib}GiB"
 
     mkdir -p "${CF_ROOT}/secrets"
     cat > "$FC_SIZING_FILE" <<EOF
