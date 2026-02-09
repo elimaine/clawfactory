@@ -300,6 +300,40 @@ def check_agent_auth(
     return secrets.compare_digest(actual_token, AGENT_API_TOKEN)
 
 
+def resolve_agent_file_scope(agent_id: str) -> Optional[Path]:
+    """Return the subdirectory of APPROVED_DIR this agent is allowed to write to.
+
+    Returns None for empty/default/main (full access).
+    Returns a Path relative to APPROVED_DIR for scoped agents.
+    """
+    if not agent_id or agent_id in ("default", "main"):
+        return None  # full access
+
+    # Read agents.list from live config
+    try:
+        with open(OPENCLAW_HOME / "openclaw.json") as f:
+            cfg = json.load(f)
+    except Exception:
+        return Path(f"agents/{agent_id}")  # safe fallback
+
+    agents_list = cfg.get("agents", {}).get("list", [])
+    for agent in agents_list:
+        if agent.get("id") == agent_id:
+            workspace = agent.get("workspace", "")
+            # Compute relative path within approved/
+            approved_str = str(APPROVED_DIR)
+            if workspace.startswith(approved_str):
+                rel = workspace[len(approved_str):].lstrip("/")
+                if rel:
+                    return Path(rel)
+                return None  # workspace IS approved/ → full access
+            # Workspace not under approved/ — use convention
+            return Path(f"agents/{agent_id}")
+
+    # Unknown agent — restrict to agents/<id> by default
+    return Path(f"agents/{agent_id}")
+
+
 # ============================================================
 # Audit Logging
 # ============================================================
@@ -1279,7 +1313,7 @@ async def promote_ui(
             </div>
 
             <div style="display: flex; flex-direction: column; gap: 0.5rem; border-top: 1px solid #333; padding-top: 0.75rem;">
-                <input type="text" id="propose-branch-name" placeholder="Branch name (e.g. fix-typo)" value="patch-{datetime.now().strftime('%Y%m%d-%H%M')}" style="width: 100%; box-sizing: border-box;">
+                <input type="text" id="propose-branch-name" placeholder="Branch name (e.g. fix-typo)" style="width: 100%; box-sizing: border-box;">
                 <input type="text" id="propose-commit-msg" placeholder="Commit message" value="apply local changes" style="width: 100%; box-sizing: border-box;">
                 <div style="display: flex; gap: 0.5rem;">
                     <button onclick="proposeChanges()" class="secondary">Create Proposal Branch</button>
@@ -2785,8 +2819,14 @@ async def promote_ui(
             function viewLocalChanges() {{ refreshLocalChanges(); }}
 
             // Propose Changes: commit uncommitted changes to a new proposal branch and push
+            function defaultBranchName() {{
+                const d = new Date();
+                const pad = n => String(n).padStart(2, '0');
+                return `patch-${{d.getFullYear()}}${{pad(d.getMonth()+1)}}${{pad(d.getDate())}}-${{pad(d.getHours())}}${{pad(d.getMinutes())}}`;
+            }}
             async function proposeChanges() {{
                 const nameInput = document.getElementById('propose-branch-name');
+                if (!nameInput.value.trim()) nameInput.value = defaultBranchName();
                 const msgInput = document.getElementById('propose-commit-msg');
                 const result = document.getElementById('propose-result');
                 const branchName = (nameInput.value || '').trim();
@@ -4845,6 +4885,7 @@ async def propose_changes(
     body = await request.json()
     branch_name = (body.get("branch") or "").strip()
     commit_msg = (body.get("message") or "").strip()
+    agent_id = (body.get("agent_id") or "").strip()
 
     if not branch_name:
         return {"error": "Branch name is required"}
@@ -4854,13 +4895,20 @@ async def propose_changes(
         return {"error": "Invalid branch name (use alphanumeric, hyphens, underscores)"}
 
     full_branch = f"proposal/{branch_name}"
-    audit_log("propose_changes", {"branch": full_branch, "message": commit_msg})
+    scope = resolve_agent_file_scope(agent_id)
+    audit_log("propose_changes", {"branch": full_branch, "message": commit_msg, "agent": agent_id or "unscoped", "scope": str(scope) if scope else "full"})
 
-    # Check for uncommitted changes
-    status_result = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=APPROVED_DIR, capture_output=True, text=True,
-    )
+    # Check for uncommitted changes (scoped if agent specified)
+    if scope is not None:
+        status_result = subprocess.run(
+            ["git", "status", "--porcelain", "--", str(scope)],
+            cwd=APPROVED_DIR, capture_output=True, text=True,
+        )
+    else:
+        status_result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=APPROVED_DIR, capture_output=True, text=True,
+        )
     if not status_result.stdout.strip():
         return {"error": "No uncommitted changes to propose"}
 
@@ -4877,8 +4925,11 @@ async def propose_changes(
         if result.returncode != 0:
             return {"error": f"Failed to create branch: {result.stderr.strip()}"}
 
-        # Stage all changes and commit
-        subprocess.run(["git", "add", "-A"], cwd=APPROVED_DIR, capture_output=True, text=True)
+        # Stage changes — scoped to agent's directory if agent_id provided
+        if scope is not None:
+            subprocess.run(["git", "add", "--", str(scope)], cwd=APPROVED_DIR, capture_output=True, text=True)
+        else:
+            subprocess.run(["git", "add", "-A"], cwd=APPROVED_DIR, capture_output=True, text=True)
         result = subprocess.run(
             ["git", "commit", "-m", commit_msg],
             cwd=APPROVED_DIR, capture_output=True, text=True,
@@ -7582,10 +7633,12 @@ async def agent_write_file(
     request: Request,
     token: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
+    agent_id: Optional[str] = Query(None),
 ):
     """Write a file to the approved dir — agent-scoped (requires AGENT_API_TOKEN).
 
     Path is relative to APPROVED_DIR. Only allows writing inside it.
+    When agent_id is provided, writes are restricted to that agent's workspace.
     """
     if not check_agent_auth(token, authorization):
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -7598,6 +7651,19 @@ async def agent_write_file(
     if ".." in filepath or filepath.startswith("/"):
         audit_log("agent_file_rejected", {"path": filepath, "reason": "path_traversal"})
         raise HTTPException(status_code=400, detail="Invalid path (no .. or absolute paths)")
+
+    # Per-agent file scope enforcement
+    scope = resolve_agent_file_scope((agent_id or "").strip())
+    if scope is not None:
+        if not filepath.startswith(str(scope)):
+            audit_log("agent_file_rejected", {
+                "path": filepath, "agent": agent_id,
+                "scope": str(scope), "reason": "out_of_scope"
+            })
+            raise HTTPException(
+                status_code=403,
+                detail=f"Agent '{agent_id}' can only write to {scope}/"
+            )
 
     # Security: block dangerous directories
     path_lower = filepath.lower()
@@ -7646,10 +7712,10 @@ async def agent_write_file(
         except (LookupError, OSError):
             pass  # non-Lima or user doesn't exist — skip silently
 
-        audit_log("agent_file_written", {"path": filepath, "size": len(body)})
+        audit_log("agent_file_written", {"path": filepath, "size": len(body), "agent": agent_id or "unscoped"})
         return {"status": "written", "path": filepath, "size": len(body)}
     except Exception as e:
-        audit_log("agent_file_error", {"path": filepath, "error": str(e)})
+        audit_log("agent_file_error", {"path": filepath, "error": str(e), "agent": agent_id or "unscoped"})
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -7725,12 +7791,24 @@ async def agent_gateway_channels(
 async def agent_gateway_restart(
     token: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
+    agent_id: Optional[str] = Query(None),
 ):
-    """Restart the gateway — agent-scoped (requires AGENT_API_TOKEN)."""
+    """Restart the gateway — agent-scoped (requires AGENT_API_TOKEN).
+
+    Only unscoped callers (no agent_id, or main/default) can restart.
+    """
     if not check_agent_auth(token, authorization):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    audit_log("gateway_restart_requested", {"source": "agent"})
+    scope = resolve_agent_file_scope((agent_id or "").strip())
+    if scope is not None:
+        audit_log("gateway_restart_denied", {"agent": agent_id, "reason": "scoped_agent"})
+        raise HTTPException(
+            status_code=403,
+            detail=f"Agent '{agent_id}' is not allowed to restart the gateway"
+        )
+
+    audit_log("gateway_restart_requested", {"source": "agent", "agent": agent_id or "unscoped"})
 
     if not restart_gateway():
         raise HTTPException(status_code=500, detail="Failed to restart gateway")
