@@ -140,6 +140,12 @@ lima_sync() {
         # Lock down secrets — only root can read controller env
         chmod 700 ${LIMA_SRV}/secrets/${instance}/ 2>/dev/null || true
         chmod 600 ${LIMA_SRV}/secrets/${instance}/*.env 2>/dev/null || true
+
+        # Fix ownership so gateway user can access deployed files
+        svc_user=openclaw-${instance}
+        if id \${svc_user} >/dev/null 2>&1; then
+            chown -R \${svc_user}:\${svc_user} ${LIMA_SRV}/bot_repos/${instance}/ 2>/dev/null || true
+        fi
     "
 
     # Keep staging for build step
