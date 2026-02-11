@@ -57,7 +57,7 @@ class TestHealthEndpoints:
         resp = requests.get(f"{BASE_URL}/status", params=get_params(), timeout=5)
         assert resp.status_code == 200
         data = resp.json()
-        assert "gateway_status" in data or "approved_sha" in data
+        assert "gateway_status" in data
 
 
 class TestSnapshotEndpoints:

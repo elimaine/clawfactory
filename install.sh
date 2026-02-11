@@ -294,14 +294,14 @@ init_bot_repo() {
     mkdir -p "${BOT_REPOS_DIR}/${INSTANCE_NAME}"
     mkdir -p "${BOT_REPOS_DIR}/${INSTANCE_NAME}/state"
 
-    # Check if approved/ already exists with OpenClaw source code
-    if [[ -f "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/Dockerfile" ]] || \
-       [[ -f "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/package.json" ]]; then
-        success "Using existing bot_repos/${INSTANCE_NAME}/approved (OpenClaw source found)"
+    # Check if code/ already exists with OpenClaw source code
+    if [[ -f "${BOT_REPOS_DIR}/${INSTANCE_NAME}/code/Dockerfile" ]] || \
+       [[ -f "${BOT_REPOS_DIR}/${INSTANCE_NAME}/code/package.json" ]]; then
+        success "Using existing bot_repos/${INSTANCE_NAME}/code (OpenClaw source found)"
         # Initialize as git repo if not already
-        if [[ ! -d "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/.git" ]]; then
+        if [[ ! -d "${BOT_REPOS_DIR}/${INSTANCE_NAME}/code/.git" ]]; then
             info "Initializing git repo..."
-            cd "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved"
+            cd "${BOT_REPOS_DIR}/${INSTANCE_NAME}/code"
             git init
             git add -A
             git commit -m "Initial commit from existing source" 2>/dev/null || true
@@ -317,15 +317,15 @@ init_bot_repo() {
         fi
 
         if [[ -z "$repo_owner" ]]; then
-            warn "No existing source in bot_repos/${INSTANCE_NAME}/approved/"
+            warn "No existing source in bot_repos/${INSTANCE_NAME}/code/"
             echo ""
             echo "To set up OpenClaw source, clone OpenClaw manually:"
             echo ""
-            echo "  git clone https://github.com/openclaw/openclaw.git bot_repos/${INSTANCE_NAME}/approved"
+            echo "  git clone https://github.com/openclaw/openclaw.git bot_repos/${INSTANCE_NAME}/code"
             echo ""
             echo "Or copy from an existing bot:"
             echo ""
-            echo "  cp -r bot_repos/existing_bot/approved bot_repos/${INSTANCE_NAME}/approved"
+            echo "  cp -r bot_repos/existing_bot/code bot_repos/${INSTANCE_NAME}/code"
             echo ""
             if [[ "$GH_AVAILABLE" != "true" ]]; then
                 echo "To enable GitHub forking, install and authenticate GitHub CLI:"
@@ -355,13 +355,13 @@ init_bot_repo() {
             success "Fork exists: ${fork_repo}"
         fi
 
-        # Clone approved if not exists (single clone - bot pushes branches here)
-        if [[ ! -d "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/.git" ]]; then
-            info "Cloning fork to approved..."
-            git clone "${fork_url}" "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved"
-            success "Cloned to bot_repos/${INSTANCE_NAME}/approved"
+        # Clone code dir if not exists
+        if [[ ! -d "${BOT_REPOS_DIR}/${INSTANCE_NAME}/code/.git" ]]; then
+            info "Cloning fork to code dir..."
+            git clone "${fork_url}" "${BOT_REPOS_DIR}/${INSTANCE_NAME}/code"
+            success "Cloned to bot_repos/${INSTANCE_NAME}/code"
         else
-            success "approved already exists"
+            success "Code dir already exists"
         fi
     fi
 
@@ -369,13 +369,13 @@ init_bot_repo() {
     mkdir -p "${BOT_REPOS_DIR}/${INSTANCE_NAME}/state"
 
     # Create workspace config files if they don't exist
-    if [[ ! -f "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/workspace/SOUL.md" ]]; then
+    if [[ ! -f "${BOT_REPOS_DIR}/${INSTANCE_NAME}/code/workspace/SOUL.md" ]]; then
         info "Creating bot config files..."
-        mkdir -p "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/workspace/skills"
-        mkdir -p "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/workspace/memory"
-        mkdir -p "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/workspace/${INSTANCE_NAME}_save"
+        mkdir -p "${BOT_REPOS_DIR}/${INSTANCE_NAME}/code/workspace/skills"
+        mkdir -p "${BOT_REPOS_DIR}/${INSTANCE_NAME}/code/workspace/memory"
+        mkdir -p "${BOT_REPOS_DIR}/${INSTANCE_NAME}/code/workspace/${INSTANCE_NAME}_save"
 
-        cat > "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/workspace/SOUL.md" <<'EOF'
+        cat > "${BOT_REPOS_DIR}/${INSTANCE_NAME}/code/workspace/SOUL.md" <<'EOF'
 # Soul
 
 You are a helpful AI assistant running in the ClawFactory secure environment.
@@ -386,61 +386,36 @@ You are a helpful AI assistant running in the ClawFactory secure environment.
 2. Respect user privacy
 3. Admit when you don't know something
 4. Follow the policies defined in your config
-5. Use the proposal workflow for configuration changes
 
-## Workspace Security
+## Workspace
 
-Your workspace is version-controlled. To modify your configuration:
-1. Write changes to `/workspace/approved/workspace/`
-2. Create a branch, commit, and push
-3. Open a PR for review
-4. Wait for approval before changes take effect
-
-See `skills/propose.md` for detailed instructions.
+Your workspace files live in `/workspace/code/workspace/`.
+Configuration changes are managed by your operator via the controller UI.
 
 ## Capabilities
 
 - You can use all your configured tools and skills
-- You can propose changes to SOUL.md, TOOLS.md, etc.
-- Changes require human approval before they take effect
 - Memory search is enabled for context recall
 - Your save state goes in the {instance}_save/ directory
+- Use encrypted snapshots for full state backup
 EOF
 
-        cat > "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/workspace/policies.yml" <<'EOF'
+        cat > "${BOT_REPOS_DIR}/${INSTANCE_NAME}/code/workspace/policies.yml" <<'EOF'
 # Policies
 
 allowed_actions:
   - read_files
-  - write_proposals
-  - create_commits
-  - open_pull_requests
+  - write_files
   - backup_memory
   - create_snapshots
 
 forbidden_actions:
-  - direct_promotion
   - secret_access
   - network_escalation
   - docker_access
 EOF
 
-        cat > "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/workspace/skills/propose.md" <<'EOF'
-# Propose Changes Skill
-
-When you need to modify your configuration, use the proposal workflow.
-
-## How to Propose
-
-1. Write changes to `/workspace/approved/workspace/`
-2. Create a branch: `git checkout -b proposal/my-change`
-3. Commit and push: `git add . && git commit -m "Proposal: description" && git push origin proposal/my-change`
-4. Open a PR on GitHub
-5. Notify your operator for review
-6. Wait for approval
-EOF
-
-        cat > "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/workspace/skills/self-management.md" <<EOF
+        cat > "${BOT_REPOS_DIR}/${INSTANCE_NAME}/code/workspace/skills/self-management.md" <<EOF
 # Self-Management Skill
 
 This skill covers how you manage your own state, memories, and configuration.
@@ -449,50 +424,45 @@ This skill covers how you manage your own state, memories, and configuration.
 
 Your state is split into two categories:
 
-1. **Git-tracked** (in \`approved/workspace/\`) - Goes through PR approval
+1. **Code** (in \`code/workspace/\`) - Your workspace files
    - Memory markdown files (\`memory/*.md\`)
    - Configuration (SOUL.md, skills/, policies.yml)
    - Your save directory (\`${INSTANCE_NAME}_save/\`)
 
-2. **Encrypted snapshots** (in \`state/\`) - Not in git, backed up via encryption
+2. **Encrypted snapshots** (in \`state/\`) - Backed up via encryption
    - Embeddings database (\`memory/main.sqlite\`)
    - Runtime config (\`openclaw.json\`)
    - Paired devices and credentials
-
-## Memory Backup
-
-To save memories to GitHub:
-
-\`\`\`bash
-curl -X POST http://controller:8080/memory/backup
-\`\`\`
 
 ## Encrypted Snapshots
 
 For full state backup (including embeddings):
 
 \`\`\`bash
-curl -X POST http://controller:8080/snapshot
+curl -X POST http://controller:8080/internal/snapshot
+\`\`\`
+
+List existing snapshots:
+\`\`\`bash
+curl http://controller:8080/internal/snapshot
 \`\`\`
 
 ## Your Save Directory
 
-You have a persistent save directory at \`/workspace/approved/workspace/${INSTANCE_NAME}_save/\`.
+You have a persistent save directory at \`/workspace/code/workspace/${INSTANCE_NAME}_save/\`.
 
 Add npm dependencies to \`package.json\` there - they install on container startup.
 
-## Proposing Changes
+## Status Endpoints
 
-1. Write changes to \`/workspace/approved/workspace/\`
-2. Create a branch, commit, push
-3. Open a PR for approval
-4. Changes take effect after merge and restart
-
-You cannot merge your own PRs - this requires human approval.
+Check system health:
+\`\`\`bash
+curl http://controller:8080/health
+\`\`\`
 EOF
 
         # Create initial package.json for bot save state
-        cat > "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved/workspace/${INSTANCE_NAME}_save/package.json" <<EOF
+        cat > "${BOT_REPOS_DIR}/${INSTANCE_NAME}/code/workspace/${INSTANCE_NAME}_save/package.json" <<EOF
 {
   "name": "${INSTANCE_NAME}-save",
   "version": "1.0.0",
@@ -501,7 +471,7 @@ EOF
 }
 EOF
 
-        cd "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved"
+        cd "${BOT_REPOS_DIR}/${INSTANCE_NAME}/code"
         git add workspace/
         git commit -m "Add ClawFactory bot config files"
         git push origin main
@@ -1442,7 +1412,7 @@ configure_github_auto() {
 
     # Update local repo to push to GitHub
     info "Configuring local repo to push to GitHub..."
-    cd "${BOT_REPOS_DIR}/${INSTANCE_NAME}/approved"
+    cd "${BOT_REPOS_DIR}/${INSTANCE_NAME}/code"
     git remote set-url origin "https://github.com/${repo_owner}/${GITHUB_BOT_REPO}.git" 2>/dev/null || \
         git remote add origin "https://github.com/${repo_owner}/${GITHUB_BOT_REPO}.git"
 
@@ -1452,10 +1422,9 @@ configure_github_auto() {
     success "GitHub configured!"
     echo ""
     echo "Your bot repo: https://github.com/${repo_owner}/${GITHUB_BOT_REPO}"
-    echo "Webhook URL: ${CONTROLLER_URL}/webhook/github"
     echo ""
     echo "Note: You may need to push the initial bot content to GitHub:"
-    echo "  cd bot_repos/${INSTANCE_NAME}/approved && git push -u origin main"
+    echo "  cd bot_repos/${INSTANCE_NAME}/code && git push -u origin main"
     echo ""
 }
 

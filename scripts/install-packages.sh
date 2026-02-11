@@ -7,7 +7,7 @@
 set -euo pipefail
 
 INSTANCE_NAME="${INSTANCE_NAME:-default}"
-WORKSPACE_DIR="${WORKSPACE_DIR:-/workspace/approved/workspace}"
+WORKSPACE_DIR="${WORKSPACE_DIR:-/workspace/code/workspace}"
 STATE_DIR="${STATE_DIR:-/home/node/.openclaw}"
 SAVE_DIR="${WORKSPACE_DIR}/${INSTANCE_NAME}_save"
 INSTALL_DIR="${STATE_DIR}/installed"

@@ -41,17 +41,17 @@ For those who prefer to wire things up by hand.
 # Optional: Fork to an organization (e.g., my-bots-org/bot1-bot)
 
 # 2. Create the instance directory structure
-mkdir -p bot_repos/bot1/{approved,state}
+mkdir -p bot_repos/bot1/{code,state}
 
 # 3. Clone your fork
-git clone https://github.com/YOUR_ORG_OR_USERNAME/bot1-bot.git bot_repos/bot1/approved
+git clone https://github.com/YOUR_ORG_OR_USERNAME/bot1-bot.git bot_repos/bot1/code
 
 # 4. Set up the workspace
-mkdir -p bot_repos/bot1/approved/workspace/bot1_save
+mkdir -p bot_repos/bot1/code/workspace/bot1_save
 # Create SOUL.md, TOOLS.md, etc. in workspace/
-git -C bot_repos/bot1/approved add workspace/
-git -C bot_repos/bot1/approved commit -m "Add config files"
-git -C bot_repos/bot1/approved push
+git -C bot_repos/bot1/code add workspace/
+git -C bot_repos/bot1/code commit -m "Add config files"
+git -C bot_repos/bot1/code push
 
 # 5. Configure secrets
 mkdir -p secrets/bot1

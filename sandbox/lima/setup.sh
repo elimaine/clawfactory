@@ -289,7 +289,7 @@ Wants=docker.service
 
 [Service]
 Type=simple
-WorkingDirectory=/srv/clawfactory/bot_repos/%i/approved
+WorkingDirectory=/srv/clawfactory/bot_repos/%i/code
 EnvironmentFile=/srv/clawfactory/secrets/%i/gateway.env
 Environment=OPENCLAW_STATE_DIR=/srv/clawfactory/bot_repos/%i/state
 ExecStart=/usr/bin/node dist/index.js gateway --bind lan

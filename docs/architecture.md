@@ -38,20 +38,20 @@ ClawFactory is a launch platform for autonomous agents. Three subsystems work to
 │                                                              │
 │  ┌──────────────────────────────────────────────────────────┐│
 │  │                   Volumes                                ││
-│  │  approved/     state/          snapshots/    secrets/   ││
-│  │  (git repo)    (runtime)       (encrypted)   (600)      ││
+│  │  code/         state/          snapshots/    secrets/   ││
+│  │  (bot code)    (runtime)       (encrypted)   (600)      ││
 │  └──────────────────────────────────────────────────────────┘│
 │                                                              │
 │  [Kill Switch] ─────────────────────────────────────────────│
 └──────────────────────────────────────────────────────────────┘
 
-GitHub: your-org/{instance}-bot (fork of openclaw/openclaw)
-         └── workspace/
-             ├── SOUL.md, TOOLS.md, etc.
-             ├── skills/
-             ├── memory/           ← memory markdown (git tracked)
-             └── {instance}_save/  ← bot's declarative state
-                 └── package.json  ← dependencies (installed on startup)
+code/   (OpenClaw source + workspace)
+ └── workspace/
+     ├── SOUL.md, TOOLS.md, etc.
+     ├── skills/
+     ├── memory/           ← memory markdown
+     └── {instance}_save/  ← bot's declarative state
+         └── package.json  ← dependencies (installed on startup)
 ```
 
 ### Lima Mode (macOS)
@@ -65,10 +65,10 @@ Each subsystem has strict boundaries — they can only write to what they own.
 | Subsystem | Role | Listens On | Write Access |
 |-----------|------|------------|--------------|
 | **Proxy** | Front door, routes all traffic | localhost:18789, :8080 | None |
-| **Gateway** | The agent itself — runs OpenClaw | Internal network | approved/ (git branches), state/ |
+| **Gateway** | The agent itself — runs OpenClaw | Internal network | code/, state/ |
 | **LLM Proxy** | Logs outbound AI API calls | Internal :9090 | audit/traffic.jsonl |
 | **MITM Proxy** | Transparent TLS capture (opt-in) | Internal :8888 | audit/traffic.enc.jsonl (encrypted) |
-| **Controller** | Human authority layer | Internal network | approved/ (git pull), snapshots/ |
+| **Controller** | Management & monitoring | Internal network | code/ (pull upstream), snapshots/ |
 
 ## Directory Layout
 
@@ -77,11 +77,11 @@ Every agent instance gets its own isolated directory tree:
 ```
 bot_repos/
 ├── bot1/
-│   ├── approved/              # Git clone — the bot's codebase
+│   ├── code/                  # Bot code directory (OpenClaw source)
 │   │   └── workspace/
 │   │       ├── SOUL.md        # Personality definition
 │   │       ├── skills/        # Learned abilities
-│   │       ├── memory/        # Memory logs (git tracked)
+│   │       ├── memory/        # Memory logs
 │   │       └── bot1_save/     # Bot's declarative save state
 │   │           └── package.json
 │   └── state/                 # Runtime state (lives in encrypted snapshots)
@@ -104,36 +104,11 @@ secrets/
 └── tokens.env                 # Token registry for the fleet
 ```
 
-## Promotion Pipeline
-
-The core security model: bots can *propose*, but only humans can *promote*.
-
-### Online (via GitHub)
-
-1. Bot edits files in `approved/workspace/`
-2. Bot commits and pushes to a proposal branch
-3. Bot opens a PR on GitHub
-4. **Human merges the PR** — this is the authority checkpoint
-5. GitHub webhook fires, Controller picks it up
-6. Controller pulls main into `approved/`
-7. Gateway restarts with the new configuration
-
-### Offline (via Controller UI)
-
-1. Bot commits to a feature branch in `approved/`
-2. Human opens the Controller dashboard
-3. **Human clicks Promote** — authority checkpoint
-4. Controller pulls main
-5. Gateway restarts
-
 ## Pulling Upstream Updates
 
-Bot repos are forks of OpenClaw, so pulling in new OpenClaw releases is straightforward:
+Bot code directories are clones of OpenClaw. Pull in new releases via the Controller UI ("Pull Latest OpenClaw") or manually:
 
 ```bash
-cd bot_repos/bot1/approved
-git remote add upstream https://github.com/openclaw/openclaw.git
-git fetch upstream
-git merge upstream/main
-git push origin main
+cd bot_repos/bot1/code
+git pull upstream main
 ```

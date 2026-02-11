@@ -712,7 +712,7 @@ function Initialize-BotRepo {
     Write-Info "Initializing bot repository..."
 
     $botDir = Join-Path $BotReposDir $script:INSTANCE_NAME
-    $approvedDir = Join-Path $botDir "approved"
+    $codeDir = Join-Path $botDir "code"
     $stateDir = Join-Path $botDir "state"
 
     # Create directories
@@ -723,17 +723,17 @@ function Initialize-BotRepo {
         New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
     }
 
-    # Check if approved/ already exists with OpenClaw source
-    $hasDockerfile = Test-Path (Join-Path $approvedDir "Dockerfile")
-    $hasPackageJson = Test-Path (Join-Path $approvedDir "package.json")
+    # Check if code/ already exists with OpenClaw source
+    $hasDockerfile = Test-Path (Join-Path $codeDir "Dockerfile")
+    $hasPackageJson = Test-Path (Join-Path $codeDir "package.json")
 
     if ($hasDockerfile -or $hasPackageJson) {
-        Write-Success "Using existing bot_repos\$script:INSTANCE_NAME\approved (OpenClaw source found)"
+        Write-Success "Using existing bot_repos\$script:INSTANCE_NAME\code (OpenClaw source found)"
 
         # Initialize git if not already
-        if (-not (Test-Path (Join-Path $approvedDir ".git"))) {
+        if (-not (Test-Path (Join-Path $codeDir ".git"))) {
             Write-Info "Initializing git repo..."
-            Push-Location $approvedDir
+            Push-Location $codeDir
             git init
             git add -A
             git commit -m "Initial commit from existing source" 2>$null
@@ -751,15 +751,15 @@ function Initialize-BotRepo {
         }
 
         if (-not $repoOwner) {
-            Write-Warn "No existing source in bot_repos\$script:INSTANCE_NAME\approved\"
+            Write-Warn "No existing source in bot_repos\$script:INSTANCE_NAME\code\"
             Write-Host ""
             Write-Host "To set up OpenClaw source, clone OpenClaw manually:"
             Write-Host ""
-            Write-Host "  git clone https://github.com/openclaw/openclaw.git bot_repos\$script:INSTANCE_NAME\approved"
+            Write-Host "  git clone https://github.com/openclaw/openclaw.git bot_repos\$script:INSTANCE_NAME\code"
             Write-Host ""
             Write-Host "Or copy from an existing bot:"
             Write-Host ""
-            Write-Host "  Copy-Item -Recurse bot_repos\existing_bot\approved bot_repos\$script:INSTANCE_NAME\approved"
+            Write-Host "  Copy-Item -Recurse bot_repos\existing_bot\code bot_repos\$script:INSTANCE_NAME\code"
             Write-Host ""
             if (-not $script:GH_AVAILABLE) {
                 Write-Host "To enable GitHub forking, install and authenticate GitHub CLI:"
@@ -794,17 +794,17 @@ function Initialize-BotRepo {
         }
 
         # Clone if needed
-        if (-not (Test-Path (Join-Path $approvedDir ".git"))) {
-            Write-Info "Cloning fork to approved..."
-            git clone $forkUrl $approvedDir
-            Write-Success "Cloned to bot_repos\$script:INSTANCE_NAME\approved"
+        if (-not (Test-Path (Join-Path $codeDir ".git"))) {
+            Write-Info "Cloning fork to code dir..."
+            git clone $forkUrl $codeDir
+            Write-Success "Cloned to bot_repos\$script:INSTANCE_NAME\code"
         } else {
-            Write-Success "approved already exists"
+            Write-Success "Code dir already exists"
         }
     }
 
     # Create workspace config files if needed
-    $workspaceDir = Join-Path $approvedDir "workspace"
+    $workspaceDir = Join-Path $codeDir "workspace"
     $soulFile = Join-Path $workspaceDir "SOUL.md"
 
     if (-not (Test-Path $soulFile)) {
@@ -826,17 +826,11 @@ You are a helpful AI assistant running in the ClawFactory secure environment.
 2. Respect user privacy
 3. Admit when you don't know something
 4. Follow the policies defined in your config
-5. Use the proposal workflow for configuration changes
 
-## Workspace Security
+## Workspace
 
-Your workspace is version-controlled. To modify your configuration:
-1. Write changes to `/workspace/approved/workspace/`
-2. Create a branch, commit, and push
-3. Open a PR for review
-4. Wait for approval before changes take effect
-
-See `skills/propose.md` for detailed instructions.
+Your workspace files live in `/workspace/code/workspace/`.
+Configuration changes are managed by your operator via the controller UI.
 "@
         Set-Content -Path $soulFile -Value $soulContent
 
@@ -846,14 +840,11 @@ See `skills/propose.md` for detailed instructions.
 
 allowed_actions:
   - read_files
-  - write_proposals
-  - create_commits
-  - open_pull_requests
+  - write_files
   - backup_memory
   - create_snapshots
 
 forbidden_actions:
-  - direct_promotion
   - secret_access
   - network_escalation
   - docker_access
@@ -1244,9 +1235,9 @@ function Print-Summary {
     Write-Host "     Controller: http://localhost:8080/controller"
     Write-Host ""
 
-    if (-not (Test-Path (Join-Path $BotReposDir "$script:INSTANCE_NAME\approved\Dockerfile"))) {
+    if (-not (Test-Path (Join-Path $BotReposDir "$script:INSTANCE_NAME\code\Dockerfile"))) {
         Write-Host "  3. Set up OpenClaw source (required before starting):"
-        Write-Host "     git clone https://github.com/openclaw/openclaw.git bot_repos\$script:INSTANCE_NAME\approved"
+        Write-Host "     git clone https://github.com/openclaw/openclaw.git bot_repos\$script:INSTANCE_NAME\code"
         Write-Host ""
     }
 

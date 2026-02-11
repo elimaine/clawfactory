@@ -6,7 +6,7 @@
 # Prerequisites:
 #   1. Install Sysbox: https://github.com/nestybox/sysbox
 #   2. Verify: docker info | grep -i sysbox
-#   3. Build base image: ./clawfactory.sh rebuild (builds from approved/ first)
+#   3. Build base image: ./clawfactory.sh rebuild (builds from code/ first)
 #
 # What this enables:
 #   - OpenClaw can create Docker containers inside the gateway for tool sandboxing
@@ -39,8 +39,8 @@ services:
     volumes:
       # OpenClaw home directory
       - ./bot_repos/${INSTANCE_NAME:-default}/state:/home/node/.openclaw
-      # Git repo clone
-      - ./bot_repos/${INSTANCE_NAME:-default}/approved:/workspace/approved:rw
+      # Bot code directory
+      - ./bot_repos/${INSTANCE_NAME:-default}/code:/workspace/code:rw
       # Docker data directory (persisted for sandbox images)
       - gateway-docker-data:/var/lib/docker
       # Temp filesystem

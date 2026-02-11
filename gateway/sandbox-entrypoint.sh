@@ -87,26 +87,26 @@ main() {
     # Secure state directory permissions
     chmod 700 /home/node/.openclaw 2>/dev/null || true
 
-    # Sync approved config files to OpenClaw workspace on startup
-    log "Syncing workspace from approved config..."
-    cp -r /workspace/approved/workspace/*.md /home/node/.openclaw/workspace/ 2>/dev/null || true
-    cp -r /workspace/approved/workspace/skills /home/node/.openclaw/workspace/ 2>/dev/null || true
-    cp -r /workspace/approved/workspace/policies.yml /home/node/.openclaw/workspace/ 2>/dev/null || true
+    # Sync code config files to OpenClaw workspace on startup
+    log "Syncing workspace from code dir..."
+    cp -r /workspace/code/workspace/*.md /home/node/.openclaw/workspace/ 2>/dev/null || true
+    cp -r /workspace/code/workspace/skills /home/node/.openclaw/workspace/ 2>/dev/null || true
+    cp -r /workspace/code/workspace/policies.yml /home/node/.openclaw/workspace/ 2>/dev/null || true
 
     # Memory stays in state/ (encrypted snapshots, not git)
     mkdir -p /home/node/.openclaw/workspace/memory
 
-    # Migrate existing memory from approved if state is empty (one-time)
-    if [ -d "/workspace/approved/workspace/memory" ] && [ -z "$(ls -A /home/node/.openclaw/workspace/memory 2>/dev/null)" ]; then
-        log "Migrating memory from approved to state..."
-        cp -r /workspace/approved/workspace/memory/* /home/node/.openclaw/workspace/memory/ 2>/dev/null || true
+    # Migrate existing memory from code dir if state is empty (one-time)
+    if [ -d "/workspace/code/workspace/memory" ] && [ -z "$(ls -A /home/node/.openclaw/workspace/memory 2>/dev/null)" ]; then
+        log "Migrating memory from code dir to state..."
+        cp -r /workspace/code/workspace/memory/* /home/node/.openclaw/workspace/memory/ 2>/dev/null || true
     fi
-    if [ -f "/workspace/approved/workspace/MEMORY.md" ] && [ ! -f "/home/node/.openclaw/workspace/MEMORY.md" ]; then
-        cp /workspace/approved/workspace/MEMORY.md /home/node/.openclaw/workspace/MEMORY.md
+    if [ -f "/workspace/code/workspace/MEMORY.md" ] && [ ! -f "/home/node/.openclaw/workspace/MEMORY.md" ]; then
+        cp /workspace/code/workspace/MEMORY.md /home/node/.openclaw/workspace/MEMORY.md
     fi
 
     # Install packages from {instance}_save/package.json if changed
-    SAVE_DIR="/workspace/approved/workspace/${INSTANCE_NAME}_save"
+    SAVE_DIR="/workspace/code/workspace/${INSTANCE_NAME}_save"
     INSTALL_DIR="/home/node/.openclaw/installed"
     if [ -f "$SAVE_DIR/package.json" ]; then
         mkdir -p "$INSTALL_DIR"

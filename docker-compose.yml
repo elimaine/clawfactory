@@ -11,7 +11,7 @@
 #   Default ports: Gateway=18789, Controller=8080
 #
 # Architecture:
-#   approved/     - Git clone (bot pushes branches, PRs merged on GitHub)
+#   code/         - Bot code directory (OpenClaw source + workspace)
 #   state/        - Runtime state (encrypted snapshots)
 
 services:
@@ -45,11 +45,11 @@ services:
   # - Connects to Discord
   # - Makes LLM calls (routed through LLM proxy for logging)
   # - Uses OpenClaw's native sandbox for tool execution
-  # - Bot pushes branches to approved/, PRs merged on GitHub
+  # - Runs from code/ directory
   # ============================================================
   gateway:
     build:
-      context: ./bot_repos/${INSTANCE_NAME:-default}/approved
+      context: ./bot_repos/${INSTANCE_NAME:-default}/code
       dockerfile: Dockerfile
     image: clawfactory-gateway:${INSTANCE_NAME:-local}
     container_name: clawfactory-${INSTANCE_NAME:-default}-gateway
@@ -70,26 +70,26 @@ services:
         # Secure state directory permissions
         chmod 700 /home/node/.openclaw 2>/dev/null || true
 
-        # Sync approved config files to OpenClaw workspace on startup
-        echo "[startup] Syncing workspace from approved config..."
-        cp -r /workspace/approved/workspace/*.md /home/node/.openclaw/workspace/ 2>/dev/null || true
-        cp -r /workspace/approved/workspace/skills /home/node/.openclaw/workspace/ 2>/dev/null || true
-        cp -r /workspace/approved/workspace/policies.yml /home/node/.openclaw/workspace/ 2>/dev/null || true
+        # Sync code config files to OpenClaw workspace on startup
+        echo "[startup] Syncing workspace from code dir..."
+        cp -r /workspace/code/workspace/*.md /home/node/.openclaw/workspace/ 2>/dev/null || true
+        cp -r /workspace/code/workspace/skills /home/node/.openclaw/workspace/ 2>/dev/null || true
+        cp -r /workspace/code/workspace/policies.yml /home/node/.openclaw/workspace/ 2>/dev/null || true
 
         # Memory stays in state/ (encrypted snapshots, not git)
         mkdir -p /home/node/.openclaw/workspace/memory
 
-        # Migrate existing memory from approved if state is empty (one-time)
-        if [ -d "/workspace/approved/workspace/memory" ] && [ -z "$(ls -A /home/node/.openclaw/workspace/memory 2>/dev/null)" ]; then
-          echo "[startup] Migrating memory from approved to state..."
-          cp -r /workspace/approved/workspace/memory/* /home/node/.openclaw/workspace/memory/ 2>/dev/null || true
+        # Migrate existing memory from code dir if state is empty (one-time)
+        if [ -d "/workspace/code/workspace/memory" ] && [ -z "$(ls -A /home/node/.openclaw/workspace/memory 2>/dev/null)" ]; then
+          echo "[startup] Migrating memory from code dir to state..."
+          cp -r /workspace/code/workspace/memory/* /home/node/.openclaw/workspace/memory/ 2>/dev/null || true
         fi
-        if [ -f "/workspace/approved/workspace/MEMORY.md" ] && [ ! -f "/home/node/.openclaw/workspace/MEMORY.md" ]; then
-          cp /workspace/approved/workspace/MEMORY.md /home/node/.openclaw/workspace/MEMORY.md
+        if [ -f "/workspace/code/workspace/MEMORY.md" ] && [ ! -f "/home/node/.openclaw/workspace/MEMORY.md" ]; then
+          cp /workspace/code/workspace/MEMORY.md /home/node/.openclaw/workspace/MEMORY.md
         fi
 
         # Install packages from {instance}_save/package.json if changed
-        SAVE_DIR="/workspace/approved/workspace/$${INSTANCE_NAME}_save"
+        SAVE_DIR="/workspace/code/workspace/$${INSTANCE_NAME}_save"
         INSTALL_DIR="/home/node/.openclaw/installed"
         if [ -f "$$SAVE_DIR/package.json" ]; then
           mkdir -p "$$INSTALL_DIR"
@@ -121,8 +121,8 @@ services:
     volumes:
       # OpenClaw home directory (config, state, embeddings, installed packages)
       - ./bot_repos/${INSTANCE_NAME:-default}/state:/home/node/.openclaw
-      # Git repo clone (bot pushes branches, PRs merged on GitHub)
-      - ./bot_repos/${INSTANCE_NAME:-default}/approved:/workspace/approved:rw
+      # Bot code directory (OpenClaw source + workspace)
+      - ./bot_repos/${INSTANCE_NAME:-default}/code:/workspace/code:rw
       # Temp filesystem
       - type: tmpfs
         target: /tmp
@@ -166,12 +166,11 @@ services:
       retries: 3
 
   # ============================================================
-  # Controller: Authority & promotion
-  # - Receives GitHub webhooks
-  # - Performs promotions (pulls main after PR merge)
+  # Controller: Management & monitoring
   # - Restarts Gateway
   # - Manages encrypted snapshots
-  # - Hosts approval UI (for offline mode)
+  # - Hosts dashboard UI
+  # - Config editor
   # ============================================================
   controller:
     build:
@@ -182,10 +181,9 @@ services:
     env_file:
       - ./secrets/${INSTANCE_NAME:-default}/controller.env
     environment:
-      - APPROVED_DIR=/srv/bot/approved
+      - CODE_DIR=/srv/bot/code
       - OPENCLAW_HOME=/srv/bot/state
       - AUDIT_LOG=/srv/audit/audit.jsonl
-      - GITHUB_REPO=${GITHUB_ORG:-${GITHUB_USERNAME}}/${INSTANCE_NAME:-default}-bot
       - INSTANCE_NAME=${INSTANCE_NAME:-default}
       - GATEWAY_CONTAINER=clawfactory-${INSTANCE_NAME:-default}-gateway
       - SNAPSHOTS_DIR=/srv/snapshots
@@ -195,8 +193,8 @@ services:
       - CAPTURE_STATE_FILE=/srv/audit/capture_enabled
       - NGINX_LOG=/var/log/nginx/access.json
     volumes:
-      # Git repo clone: Controller pulls main after PR merge
-      - ./bot_repos/${INSTANCE_NAME:-default}/approved:/srv/bot/approved:rw
+      # Bot code directory
+      - ./bot_repos/${INSTANCE_NAME:-default}/code:/srv/bot/code:rw
       # OpenClaw state: For snapshots
       - ./bot_repos/${INSTANCE_NAME:-default}/state:/srv/bot/state:rw
       # Snapshots directory

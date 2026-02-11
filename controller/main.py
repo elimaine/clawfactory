@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 """
-ClawFactory Controller - Authority & Promotion Service
+ClawFactory Controller
 
 Responsibilities:
-- Receive GitHub webhooks (PR merged → pull main)
-- Perform promotions (pull main after PR merge)
-- Restart Gateway after promotion
+- Dashboard UI for managing gateway instances
+- Gateway start/stop/restart/rebuild
+- Pull upstream OpenClaw updates
 - Create encrypted snapshots of bot state
-- Host approval UI for offline mode
-- Audit logging
+- LLM traffic proxy & audit logging
+- Gateway config editor
 """
 
 import asyncio
-import hashlib
-import hmac
 import json
 import os
 import secrets
@@ -32,26 +30,18 @@ import traffic_log
 import scrub
 
 # Configuration from environment
-APPROVED_DIR = Path(os.environ.get("APPROVED_DIR", "/srv/bot/approved"))
+CODE_DIR = Path(os.environ.get("CODE_DIR", os.environ.get("APPROVED_DIR", "/srv/bot/code")))
 OPENCLAW_HOME = Path(os.environ.get("OPENCLAW_HOME", "/srv/bot/state"))
 AUDIT_LOG = Path(os.environ.get("AUDIT_LOG", "/srv/audit/audit.jsonl"))
-GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
-ALLOWED_MERGE_ACTORS = os.environ.get("ALLOWED_MERGE_ACTORS", "").split(",")
 INSTANCE_NAME = os.environ.get("INSTANCE_NAME", "default")
 GATEWAY_CONTAINER = os.environ.get("GATEWAY_CONTAINER", f"clawfactory-{INSTANCE_NAME}-gateway")
 GATEWAY_PORT = os.environ.get("GATEWAY_PORT", "18789")
-GITHUB_REPO = os.environ.get("GITHUB_REPO", "")
 CONTROLLER_API_TOKEN = os.environ.get("CONTROLLER_API_TOKEN", "")
 GATEWAY_INTERNAL_TOKEN = os.environ.get("GATEWAY_INTERNAL_TOKEN", "")
 AGENT_API_TOKEN = os.environ.get("AGENT_API_TOKEN", "")
 SNAPSHOTS_DIR = Path(os.environ.get("SNAPSHOTS_DIR", "/srv/snapshots"))
 AGE_KEY = Path(os.environ.get("AGE_KEY", "/srv/secrets/snapshot.key"))
 SECRETS_DIR = Path(os.environ.get("SECRETS_DIR", f"/srv/clawfactory/secrets/{INSTANCE_NAME}"))
-GIT_USER_NAME = os.environ.get("GIT_USER_NAME", "ClawFactory Controller")
-GIT_USER_EMAIL = os.environ.get("GIT_USER_EMAIL", "controller@clawfactory.local")
-
-# Detect offline mode (no GitHub configured)
-OFFLINE_MODE = not GITHUB_REPO or GITHUB_REPO.strip() == "" or "/" not in GITHUB_REPO
 
 # Lima mode: GATEWAY_CONTAINER=local means systemd, not Docker
 IS_LIMA_MODE = GATEWAY_CONTAINER == "local"
@@ -124,65 +114,6 @@ def log_startup():
 
 
 log_startup()
-
-
-SPICE_PRESETS = {
-    "nospice":   {"auto_config": False, "auto_merge": False, "auto_deploy": False, "auto_pull": False},
-    "medspice":  {"auto_config": True,  "auto_merge": False, "auto_deploy": False, "auto_pull": False},
-    "veryspice": {"auto_config": True,  "auto_merge": True,  "auto_deploy": True,  "auto_pull": False},
-}
-
-SPICE_FLAG_KEYS = ("auto_config", "auto_merge", "auto_deploy", "auto_pull")
-SPICE_VAR_PREFIX = "SPICE_AUTO_"
-
-
-def _read_config_vars() -> dict:
-    """Read env.vars from gateway config."""
-    try:
-        with open(OPENCLAW_HOME / "openclaw.json") as f:
-            config = json.load(f)
-        return config.get("env", {}).get("vars", {})
-    except Exception:
-        return {}
-
-
-def get_spice_mode() -> str:
-    """Read current spice mode preset from gateway config."""
-    return _read_config_vars().get("SPICYMODE", "nospice")
-
-
-def get_spice_flags() -> dict:
-    """Return individual spice flags as {auto_config, auto_merge, auto_deploy, auto_pull}."""
-    v = _read_config_vars()
-    # If granular keys exist, use them; otherwise derive from legacy preset
-    if "SPICE_AUTO_CONFIG" in v:
-        return {k: v.get(f"SPICE_AUTO_{k.split('_', 1)[1].upper()}", "false").lower() == "true" for k in SPICE_FLAG_KEYS}
-    return dict(SPICE_PRESETS.get(v.get("SPICYMODE", "nospice"), SPICE_PRESETS["nospice"]))
-
-
-def _flags_to_preset(flags: dict) -> str:
-    """Compute preset name from flags, or 'custom' if no preset matches."""
-    for name, preset in SPICE_PRESETS.items():
-        if all(flags.get(k) == preset[k] for k in SPICE_FLAG_KEYS):
-            return name
-    return "custom"
-
-
-def spice_auto_config() -> bool:
-    return get_spice_flags().get("auto_config", False)
-
-
-def spice_auto_merge() -> bool:
-    return get_spice_flags().get("auto_merge", False)
-
-
-def spice_auto_deploy() -> bool:
-    return get_spice_flags().get("auto_deploy", False)
-
-
-def is_spicy() -> bool:
-    """True when any spice flag is on (backward compat)."""
-    return any(get_spice_flags().values())
 
 
 # ============================================================
@@ -301,10 +232,11 @@ def check_agent_auth(
 
 
 def resolve_agent_file_scope(agent_id: str) -> Optional[Path]:
-    """Return the subdirectory of APPROVED_DIR this agent is allowed to write to.
+    """Return the subdirectory of CODE_DIR this agent is allowed to write to.
+
 
     Returns None for empty/default/main (full access).
-    Returns a Path relative to APPROVED_DIR for scoped agents.
+    Returns a Path relative to CODE_DIR for scoped agents.
     """
     if not agent_id or agent_id in ("default", "main"):
         return None  # full access
@@ -320,14 +252,14 @@ def resolve_agent_file_scope(agent_id: str) -> Optional[Path]:
     for agent in agents_list:
         if agent.get("id") == agent_id:
             workspace = agent.get("workspace", "")
-            # Compute relative path within approved/
-            approved_str = str(APPROVED_DIR)
-            if workspace.startswith(approved_str):
-                rel = workspace[len(approved_str):].lstrip("/")
+            # Compute relative path within code dir
+            code_str = str(CODE_DIR)
+            if workspace.startswith(code_str):
+                rel = workspace[len(code_str):].lstrip("/")
                 if rel:
                     return Path(rel)
-                return None  # workspace IS approved/ → full access
-            # Workspace not under approved/ — use convention
+                return None  # workspace IS code dir → full access
+            # Workspace not under code dir — use convention
             return Path(f"agents/{agent_id}")
 
     # Unknown agent — restrict to agents/<id> by default
@@ -351,447 +283,7 @@ def audit_log(event: str, details: dict):
     print(f"[audit] {event}: {details}")
 
 
-# ============================================================
-# Git Operations
-# ============================================================
 
-def git_fetch_main() -> bool:
-    """Fetch latest main branch from GitHub."""
-    try:
-        result = subprocess.run(
-            ["git", "fetch", "origin", "main"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        return result.returncode == 0
-    except Exception as e:
-        audit_log("git_fetch_error", {"error": str(e)})
-        return False
-
-
-def git_get_main_sha() -> Optional[str]:
-    """Get the SHA of main branch (git repo or .git-sha marker from sync)."""
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception:
-        pass
-    # Fall back to .git-sha marker written during lima_sync
-    sha_file = APPROVED_DIR / ".git-sha"
-    try:
-        if sha_file.exists():
-            return sha_file.read_text().strip()
-    except Exception:
-        pass
-    return None
-
-
-def git_list_remote_branches() -> list:
-    """List remote branches with their latest commit info (only main and proposal/*)."""
-    branches = []
-    try:
-        # Get only main and proposal branches (not all the clutter from parent repos)
-        result = subprocess.run(
-            ["git", "branch", "-r", "--format=%(refname:short)|%(objectname:short)|%(committerdate:relative)|%(subject)"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            for line in result.stdout.strip().split("\n"):
-                if not line or "origin/HEAD" in line:
-                    continue
-                parts = line.split("|", 3)
-                if len(parts) >= 4:
-                    branch_name = parts[0].replace("origin/", "")
-                    # Only include main and proposal/* branches
-                    if branch_name != "main" and not branch_name.startswith("proposal/"):
-                        continue
-                    branches.append({
-                        "name": branch_name,
-                        "sha": parts[1],
-                        "date": parts[2],
-                        "message": parts[3][:60] + ("..." if len(parts[3]) > 60 else ""),
-                        "is_main": branch_name == "main",
-                        "is_proposal": branch_name.startswith("proposal/"),
-                    })
-    except Exception as e:
-        audit_log("git_list_branches_error", {"error": str(e)})
-    return branches
-
-
-def git_get_branch_diff(branch: str) -> dict:
-    """Get diff between a branch and main."""
-    result = {"commits": [], "files": [], "diff": "", "ahead": 0, "behind": 0}
-    try:
-        # Get commit count ahead/behind
-        count_result = subprocess.run(
-            ["git", "rev-list", "--left-right", "--count", f"origin/main...origin/{branch}"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-        )
-        if count_result.returncode == 0:
-            parts = count_result.stdout.strip().split()
-            if len(parts) == 2:
-                result["behind"] = int(parts[0])
-                result["ahead"] = int(parts[1])
-
-        # Get commits on branch not in main
-        log_result = subprocess.run(
-            ["git", "log", "--format=%h %s", f"origin/main..origin/{branch}"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-        )
-        if log_result.returncode == 0 and log_result.stdout.strip():
-            result["commits"] = log_result.stdout.strip().split("\n")
-
-        # Get changed files
-        files_result = subprocess.run(
-            ["git", "diff", "--name-only", f"origin/main...origin/{branch}"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-        )
-        if files_result.returncode == 0 and files_result.stdout.strip():
-            result["files"] = files_result.stdout.strip().split("\n")
-
-        # Get diff (truncated)
-        diff_result = subprocess.run(
-            ["git", "diff", f"origin/main...origin/{branch}"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-        )
-        if diff_result.returncode == 0:
-            diff_content = diff_result.stdout
-            if len(diff_content) > 50000:
-                diff_content = diff_content[:50000] + "\n\n... (diff truncated) ..."
-            result["diff"] = diff_content
-
-    except Exception as e:
-        audit_log("git_branch_diff_error", {"branch": branch, "error": str(e)})
-    return result
-
-
-def git_fetch_origin() -> bool:
-    """Fetch latest from origin."""
-    try:
-        # Get GitHub token for authentication
-        github_token = os.environ.get("GITHUB_TOKEN", "")
-        remote_url = None
-
-        if github_token:
-            # Get and modify remote URL with token
-            url_result = subprocess.run(
-                ["git", "remote", "get-url", "origin"],
-                cwd=APPROVED_DIR,
-                capture_output=True,
-                text=True,
-            )
-            remote_url = url_result.stdout.strip()
-
-            # Handle HTTPS URLs
-            if remote_url.startswith("https://github.com/"):
-                auth_url = remote_url.replace(
-                    "https://github.com/",
-                    f"https://x-access-token:{github_token}@github.com/"
-                )
-                subprocess.run(
-                    ["git", "remote", "set-url", "origin", auth_url],
-                    cwd=APPROVED_DIR,
-                    capture_output=True,
-                )
-            # Handle SSH URLs (git@github.com:owner/repo.git)
-            elif remote_url.startswith("git@github.com:"):
-                repo_path = remote_url.replace("git@github.com:", "")
-                auth_url = f"https://x-access-token:{github_token}@github.com/{repo_path}"
-                subprocess.run(
-                    ["git", "remote", "set-url", "origin", auth_url],
-                    cwd=APPROVED_DIR,
-                    capture_output=True,
-                )
-
-        result = subprocess.run(
-            ["git", "fetch", "--prune", "origin"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-
-        # Restore original remote URL
-        if github_token and remote_url:
-            subprocess.run(
-                ["git", "remote", "set-url", "origin", remote_url],
-                cwd=APPROVED_DIR,
-                capture_output=True,
-            )
-
-        return result.returncode == 0
-    except Exception as e:
-        audit_log("git_fetch_error", {"error": str(e)})
-        return False
-
-
-def git_get_remote_sha(fetch_first: bool = False) -> Optional[str]:
-    """Get the SHA of origin/main."""
-    try:
-        if fetch_first:
-            git_fetch_origin()
-        result = subprocess.run(
-            ["git", "rev-parse", "origin/main"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception:
-        pass
-    return None
-
-
-def promote_sha(sha: str) -> bool:
-    """
-    Promote a SHA to approved by checking it out.
-
-    This is the ONLY way active config changes.
-    """
-    try:
-        # Get GitHub token for authentication
-        github_token = os.environ.get("GITHUB_TOKEN", "")
-        remote_url = None
-
-        if github_token:
-            # Get and modify remote URL with token
-            url_result = subprocess.run(
-                ["git", "remote", "get-url", "origin"],
-                cwd=APPROVED_DIR,
-                capture_output=True,
-                text=True,
-            )
-            remote_url = url_result.stdout.strip()
-
-            # Handle HTTPS URLs
-            if remote_url.startswith("https://github.com/"):
-                auth_url = remote_url.replace(
-                    "https://github.com/",
-                    f"https://x-access-token:{github_token}@github.com/"
-                )
-                subprocess.run(
-                    ["git", "remote", "set-url", "origin", auth_url],
-                    cwd=APPROVED_DIR,
-                    capture_output=True,
-                )
-            # Handle SSH URLs (git@github.com:owner/repo.git)
-            elif remote_url.startswith("git@github.com:"):
-                repo_path = remote_url.replace("git@github.com:", "")
-                auth_url = f"https://x-access-token:{github_token}@github.com/{repo_path}"
-                subprocess.run(
-                    ["git", "remote", "set-url", "origin", auth_url],
-                    cwd=APPROVED_DIR,
-                    capture_output=True,
-                )
-
-        # Fetch first to ensure we have the SHA
-        subprocess.run(
-            ["git", "fetch", "origin"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-
-        # Restore original remote URL after fetch
-        if github_token and remote_url:
-            subprocess.run(
-                ["git", "remote", "set-url", "origin", remote_url],
-                cwd=APPROVED_DIR,
-                capture_output=True,
-            )
-
-        # Checkout the SHA
-        result = subprocess.run(
-            ["git", "checkout", sha],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            audit_log("promote_error", {"sha": sha, "stderr": result.stderr})
-            return False
-
-        audit_log("promote_success", {"sha": sha})
-        return True
-    except Exception as e:
-        audit_log("promote_error", {"sha": sha, "error": str(e)})
-        return False
-
-
-def git_get_pending_changes() -> dict:
-    """Get commits and changed files between local and origin/main."""
-    result = {
-        "commits": [],
-        "files": [],
-        "diff_stat": "",
-        "diff": "",
-    }
-
-    try:
-        # Get full commit log with messages between HEAD and origin/main
-        log_result = subprocess.run(
-            ["git", "log", "--format=%h %s%n%b%n---", "HEAD..origin/main"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-        )
-        if log_result.returncode == 0 and log_result.stdout.strip():
-            # Parse commits - split by --- separator
-            raw_commits = log_result.stdout.strip().split("\n---\n")
-            result["commits"] = [c.strip() for c in raw_commits if c.strip()]
-
-        # Get changed files
-        files_result = subprocess.run(
-            ["git", "diff", "--name-only", "HEAD..origin/main"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-        )
-        if files_result.returncode == 0 and files_result.stdout.strip():
-            result["files"] = files_result.stdout.strip().split("\n")
-
-        # Get diff stat
-        stat_result = subprocess.run(
-            ["git", "diff", "--stat", "HEAD..origin/main"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-        )
-        if stat_result.returncode == 0:
-            result["diff_stat"] = stat_result.stdout.strip()
-
-        # Get actual diff (truncate if too large)
-        diff_result = subprocess.run(
-            ["git", "diff", "HEAD..origin/main"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-        )
-        if diff_result.returncode == 0:
-            diff_content = diff_result.stdout
-            # Truncate if over 50KB
-            if len(diff_content) > 50000:
-                diff_content = diff_content[:50000] + "\n\n... (diff truncated, too large to display) ..."
-            result["diff"] = diff_content
-
-    except Exception as e:
-        audit_log("git_pending_changes_error", {"error": str(e)})
-
-    return result
-
-
-def format_diff_html(diff_text: str) -> str:
-    """Format diff text with syntax highlighting HTML."""
-    if not diff_text:
-        return "No diff"
-
-    import html
-    lines = diff_text.split("\n")
-    formatted_lines = []
-
-    for line in lines:
-        escaped = html.escape(line)
-        if line.startswith("diff --git"):
-            formatted_lines.append(f'<span class="diff-header">{escaped}</span>')
-        elif line.startswith("---") or line.startswith("+++"):
-            formatted_lines.append(f'<span class="diff-file">{escaped}</span>')
-        elif line.startswith("@@"):
-            formatted_lines.append(f'<span class="diff-hunk">{escaped}</span>')
-        elif line.startswith("+"):
-            formatted_lines.append(f'<span class="diff-add">{escaped}</span>')
-        elif line.startswith("-"):
-            formatted_lines.append(f'<span class="diff-del">{escaped}</span>')
-        else:
-            formatted_lines.append(f'<span class="diff-context">{escaped}</span>')
-
-    return "\n".join(formatted_lines)
-
-
-def promote_main() -> bool:
-    """Pull latest main branch to approved."""
-    try:
-        # Get GitHub token for authentication
-        github_token = os.environ.get("GITHUB_TOKEN", "")
-        remote_url = None
-
-        if github_token:
-            # Get and modify remote URL with token
-            url_result = subprocess.run(
-                ["git", "remote", "get-url", "origin"],
-                cwd=APPROVED_DIR,
-                capture_output=True,
-                text=True,
-            )
-            remote_url = url_result.stdout.strip()
-
-            # Handle HTTPS URLs
-            if remote_url.startswith("https://github.com/"):
-                auth_url = remote_url.replace(
-                    "https://github.com/",
-                    f"https://x-access-token:{github_token}@github.com/"
-                )
-                subprocess.run(
-                    ["git", "remote", "set-url", "origin", auth_url],
-                    cwd=APPROVED_DIR,
-                    capture_output=True,
-                )
-            # Handle SSH URLs (git@github.com:owner/repo.git)
-            elif remote_url.startswith("git@github.com:"):
-                repo_path = remote_url.replace("git@github.com:", "")
-                auth_url = f"https://x-access-token:{github_token}@github.com/{repo_path}"
-                subprocess.run(
-                    ["git", "remote", "set-url", "origin", auth_url],
-                    cwd=APPROVED_DIR,
-                    capture_output=True,
-                )
-
-        result = subprocess.run(
-            ["git", "pull", "origin", "main"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-
-        # Restore original remote URL
-        if github_token and remote_url:
-            subprocess.run(
-                ["git", "remote", "set-url", "origin", remote_url],
-                cwd=APPROVED_DIR,
-                capture_output=True,
-            )
-
-        if result.returncode != 0:
-            audit_log("promote_error", {"stderr": result.stderr})
-            return False
-
-        sha = git_get_main_sha()
-        audit_log("promote_success", {"sha": sha})
-        return True
-    except Exception as e:
-        audit_log("promote_error", {"error": str(e)})
-        return False
 
 
 def get_gateway_status() -> str:
@@ -831,90 +323,7 @@ def restart_gateway() -> bool:
 
 
 # ============================================================
-# GitHub Webhook
-# ============================================================
-
-def verify_github_signature(payload: bytes, signature: str) -> bool:
-    """Verify GitHub webhook signature."""
-    if not GITHUB_WEBHOOK_SECRET:
-        return False
-
-    expected = "sha256=" + hmac.new(
-        GITHUB_WEBHOOK_SECRET.encode(),
-        payload,
-        hashlib.sha256
-    ).hexdigest()
-
-    return hmac.compare_digest(expected, signature)
-
-
-@app.post("/webhook/github")
-async def github_webhook(
-    request: Request,
-    x_hub_signature_256: str = Header(None),
-    x_github_event: str = Header(None),
-):
-    """
-    Handle GitHub webhook events.
-
-    Only processes PR merge events from allowed actors.
-    """
-    payload = await request.body()
-
-    # Verify signature
-    if not verify_github_signature(payload, x_hub_signature_256 or ""):
-        audit_log("webhook_rejected", {"reason": "invalid_signature"})
-        raise HTTPException(status_code=401, detail="Invalid signature")
-
-    data = json.loads(payload)
-
-    # Only handle PR events
-    if x_github_event != "pull_request":
-        return {"status": "ignored", "reason": "not a PR event"}
-
-    # Only handle merged PRs
-    action = data.get("action")
-    pr = data.get("pull_request", {})
-    merged = pr.get("merged", False)
-
-    if action != "closed" or not merged:
-        return {"status": "ignored", "reason": "not a merge event"}
-
-    # Verify merge actor
-    merged_by = pr.get("merged_by", {}).get("login", "")
-    if merged_by not in ALLOWED_MERGE_ACTORS:
-        audit_log("webhook_rejected", {
-            "reason": "unauthorized_actor",
-            "actor": merged_by,
-        })
-        raise HTTPException(status_code=403, detail="Unauthorized merge actor")
-
-    # Verify target branch
-    base_branch = pr.get("base", {}).get("ref", "")
-    if base_branch != "main":
-        return {"status": "ignored", "reason": "not main branch"}
-
-    audit_log("webhook_received", {
-        "pr": pr.get("number"),
-        "title": pr.get("title"),
-        "merged_by": merged_by,
-    })
-
-    # Perform promotion - pull latest main
-    if not promote_main():
-        raise HTTPException(status_code=500, detail="Failed to promote")
-
-    sha = git_get_main_sha()
-
-    if not restart_gateway():
-        # Promotion succeeded but restart failed - log but don't fail
-        return {"status": "partial", "sha": sha, "restart": False}
-
-    return {"status": "promoted", "sha": sha}
-
-
-# ============================================================
-# Manual Promotion (Offline Mode)
+# Dashboard UI
 # ============================================================
 
 @app.get("/controller", response_class=HTMLResponse)
@@ -956,62 +365,6 @@ async def promote_ui(
                 </body>
                 </html>
             """, status_code=401)
-
-    # Get recent commits and remote status
-    current_sha = git_get_main_sha() or "unknown"
-
-    if OFFLINE_MODE:
-        # No remote configured — skip fetch/remote operations, show local history
-        try:
-            result = subprocess.run(
-                ["git", "log", "HEAD", "--oneline", "-10"],
-                cwd=APPROVED_DIR,
-                capture_output=True,
-                text=True,
-            )
-            commits = result.stdout.strip() if result.returncode == 0 else "No commits yet"
-        except Exception as e:
-            commits = f"Error: {e}"
-        remote_sha = "unknown"
-        needs_update = False
-        pending_changes = {"commits": [], "files": [], "diff_stat": ""}
-    else:
-        # Fetch latest from remote (uses GITHUB_TOKEN for auth)
-        git_fetch_origin()
-
-        # Get recent commits on origin/main
-        try:
-            result = subprocess.run(
-                ["git", "log", "origin/main", "--oneline", "-10"],
-                cwd=APPROVED_DIR,
-                capture_output=True,
-                text=True,
-            )
-            commits = result.stdout.strip() if result.returncode == 0 else "Error reading commits"
-        except Exception as e:
-            commits = f"Error: {e}"
-
-        # Fetch from origin to get latest remote SHA
-        remote_sha = git_get_remote_sha(fetch_first=True) or "unknown"
-
-        # Check if remote has commits that local doesn't have (remote is ahead)
-        needs_update = False
-        if remote_sha != "unknown":
-            try:
-                ahead_check = subprocess.run(
-                    ["git", "log", "--oneline", "HEAD..origin/main"],
-                    cwd=APPROVED_DIR,
-                    capture_output=True,
-                    text=True,
-                )
-                needs_update = bool(ahead_check.returncode == 0 and ahead_check.stdout.strip())
-            except Exception:
-                needs_update = current_sha != remote_sha
-
-        pending_changes = git_get_pending_changes() if needs_update else {"commits": [], "files": [], "diff_stat": ""}
-
-    status_msg = "Up to date" if not needs_update else f"⚠️ Update available"
-    status_class = "success" if not needs_update else "warning"
 
     # Get gateway status
     gateway_status = get_gateway_status()
@@ -1153,183 +506,27 @@ async def promote_ui(
 
         <div class="stats">
             <div class="stat">
-                <div class="stat-value">{current_sha[:8]}</div>
-                <div class="stat-label">Active SHA</div>
-            </div>
-            <div class="stat">
                 <div class="stat-value {gateway_class}">
                     <span id="gateway-status-indicator" class="status-dot"></span>
                     <a href="http://localhost:{GATEWAY_PORT}" target="_blank" style="color: inherit; text-decoration: none;" title="Open Gateway on port {GATEWAY_PORT}">{gateway_status}</a>
                 </div>
                 <div class="stat-label">Gateway <a href="http://localhost:{GATEWAY_PORT}" target="_blank" style="color: #2196F3; text-decoration: none;">:{GATEWAY_PORT}</a> <span id="gateway-last-update" style="font-size: 0.7rem; color: #666;"></span></div>
             </div>
-            <div class="stat">
-                <div class="stat-value"><span class="{status_class}">{status_msg}</span></div>
-                <div class="stat-label">Sync Status</div>
-            </div>
-        </div>
-
-        <div id="proposed-config-banner" style="display: none; background: #2d1f3d; border: 1px solid #9c27b0; padding: 0.75rem 1rem; border-radius: 4px; margin-bottom: 1rem;">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-                <div>
-                    <strong style="color: #ce93d8;">AI Config Proposal</strong>
-                    <span id="proposed-config-reason" style="margin-left: 0.5rem; color: #ccc;"></span>
-                </div>
-                <div style="display: flex; gap: 0.5rem;">
-                    <button id="config-apply-btn" onclick="applyProposedConfig()" style="background: #9c27b0; color: white; border: none; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; font-family: monospace;">Apply & Restart</button>
-                    <button onclick="reviewProposedConfig()" style="background: transparent; color: #ce93d8; border: 1px solid #9c27b0; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; font-family: monospace;">Review</button>
-                    <button onclick="dismissProposal()" style="background: transparent; color: #888; border: 1px solid #555; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; font-family: monospace;">Dismiss</button>
-                </div>
-            </div>
-            <div id="proposed-config-keys" style="margin-top: 0.5rem; font-size: 0.8rem; color: #888;"></div>
-            <div id="proposed-config-preview" style="display: none; margin-top: 0.5rem;"></div>
-            <div id="proposed-config-status" style="display: none; margin-top: 0.5rem; font-size: 0.85rem;"></div>
         </div>
 
         <div class="grid">
             <div>
-                <h2>Promotion</h2>
+                <h2>Controls</h2>
                 <div class="card">
-                    {"" if OFFLINE_MODE else f'''<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
-                        <div>
-                            <span style="color: #888;">Local:</span> <span class="sha">{current_sha[:8]}</span>
-                            <span style="margin: 0 0.5rem; color: #444;">→</span>
-                            <span style="color: #888;">Remote:</span> <span class="sha">{remote_sha[:8]}</span>
-                        </div>
-                    </div>'''}
-                    {"" if OFFLINE_MODE else ("<div style='background: #ff9800; color: #000; padding: 0.75rem; border-radius: 4px; margin-bottom: 1rem; font-weight: bold;'>🔄 New version available on GitHub!</div>" if needs_update else "")}
-                    {"" if OFFLINE_MODE else (f'''<details style="margin-bottom: 1rem; background: #1a1a1a; border: 1px solid #ff9800; border-radius: 4px; padding: 0.5rem;">
-                        <summary style="cursor: pointer; color: #ff9800; font-weight: bold;">📋 View {len(pending_changes["commits"])} pending commit(s) and {len(pending_changes["files"])} file(s)</summary>
-                        <div style="margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid #333;">
-                            <div style="margin-bottom: 0.75rem;">
-                                <strong style="color: #4CAF50;">Commits:</strong>
-                                <pre style="margin: 0.5rem 0; font-size: 0.8rem; color: #ccc; background: #252525; padding: 0.5rem; border-radius: 3px; overflow-x: auto; white-space: pre-wrap;">{chr(10).join(pending_changes["commits"]) or "No commits"}</pre>
-                            </div>
-                            <div style="margin-bottom: 0.75rem;">
-                                <strong style="color: #2196F3;">Changed Files:</strong>
-                                <pre style="margin: 0.5rem 0; font-size: 0.8rem; color: #ccc; background: #252525; padding: 0.5rem; border-radius: 3px; overflow-x: auto;">{chr(10).join(pending_changes["files"]) or "No files"}</pre>
-                            </div>
-                            <details style="margin-bottom: 0.75rem;">
-                                <summary style="cursor: pointer; color: #9c27b0; font-size: 0.9rem;">📄 View Full Diff</summary>
-                                <pre class="diff-view" style="margin: 0.5rem 0; background: #1e1e1e; padding: 0.5rem; border-radius: 3px; overflow-x: auto; max-height: 400px; overflow-y: auto;">{format_diff_html(pending_changes.get("diff", ""))}</pre>
-                            </details>
-                            <div>
-                                <strong style="color: #888;">Stats:</strong>
-                                <pre style="margin: 0.5rem 0; font-size: 0.75rem; color: #888; background: #252525; padding: 0.5rem; border-radius: 3px; overflow-x: auto;">{pending_changes["diff_stat"] or "No changes"}</pre>
-                            </div>
-                        </div>
-                    </details>''' if needs_update else "")}
-                    {f'''<div style="margin-bottom: 1rem;">
-                        <div style="background: #1a3a1a; border: 1px solid #4CAF50; border-radius: 4px; padding: 0.75rem; margin-bottom: 1rem;">
-                            <strong style="color: #4CAF50;">🔌 Local Mode</strong>
-                            <span style="color: #888; margin-left: 0.5rem;"><a href="#settings" onclick="switchPage('settings')" style="color: #2196F3; text-decoration: none;">Connect GitHub</a></span>
-                        </div>
-                        <div style="margin-bottom: 0.5rem;">
-                            <span style="color: #888;">Current commit:</span> <span class="sha">{current_sha[:8]}</span>
-                        </div>
-                    </div>
                     <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem;">
                         <button onclick="pullUpstream()">Pull Latest OpenClaw</button>
                         <button onclick="rebuildGateway()" class="secondary">Rebuild Gateway</button>
-                        <button onclick="restartGateway()" class="secondary">Restart Gateway</button>
+                        <button onclick="restartGateway()" class="danger">Restart Gateway</button>
                     </div>
                     <div id="promote-result" class="result"></div>
-
-                    <h3 style="margin-top: 1.5rem; font-size: 0.9rem; color: #888;">Local Changes</h3>
-                    <button onclick="viewLocalChanges()" class="secondary small">View Uncommitted Changes</button>
-                    <div id="local-changes" style="margin-top: 0.5rem;"></div>''' if OFFLINE_MODE else f'''<div id="deploy-section" style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
-                        <button id="merge-deploy-btn" onclick="mergeAllAndDeploy()" {"style='background: #ff9800; border-color: #ff9800; animation: pulse 2s infinite;'" if needs_update else ""}>Merge All & Deploy</button>
-                        <button id="deploy-main-btn" onclick="promoteMain()" class="secondary">Deploy Main Only</button>
-                    </div>
-                    <div id="promote-result" class="result"></div>
-
-                    <h3 style="margin-top: 1.5rem; font-size: 0.9rem; color: #888;">Promote Specific SHA</h3>
-                    <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
-                        <input type="text" id="promote-sha-input" placeholder="Enter full SHA" style="width: 300px;">
-                        <button onclick="promoteSha()" class="secondary">Promote SHA</button>
-                    </div>'''}
-                </div>
-
-                <h2>Recent Commits</h2>
-                <pre>{commits}</pre>
-            </div>
-            <div>
-                <h2>Spice Mode <span style="font-size: 1.2rem;">&#127798;</span></h2>
-                <div class="card">
-                    <div style="display: flex; gap: 0.5rem;">
-                        <button id="spice-nospice" onclick="setSpicePreset('nospice')" class="secondary" style="flex: 1; font-size: 0.85rem;">&#129482; no spice</button>
-                        <button id="spice-medspice" onclick="setSpicePreset('medspice')" class="secondary" style="flex: 1; font-size: 0.85rem;">&#127798; med spice</button>
-                        <button id="spice-veryspice" onclick="setSpicePreset('veryspice')" class="secondary" style="flex: 1; font-size: 0.85rem;">&#128293; very spice</button>
-                    </div>
-                    <div style="border-top: 1px solid #333; margin-top: 0.75rem; padding-top: 0.75rem;">
-                        <div style="display: flex; flex-direction: column; gap: 0.4rem;">
-                            <label style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: #ccc; cursor: pointer;">
-                                <input type="checkbox" id="spice-flag-auto-config" onchange="onSpiceFlagChange()"> Auto-accept config proposals
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: #ccc; cursor: pointer;">
-                                <input type="checkbox" id="spice-flag-auto-merge" onchange="onSpiceFlagChange()"> Auto-merge branch proposals
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: #ccc; cursor: pointer;">
-                                <input type="checkbox" id="spice-flag-auto-deploy" onchange="onSpiceFlagChange()"> Auto-deploy after merge
-                            </label>
-                            <label style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: #ccc; cursor: pointer;">
-                                <input type="checkbox" id="spice-flag-auto-pull" onchange="onSpiceFlagChange()"> Auto-pull upstream
-                            </label>
-                        </div>
-                    </div>
-                    <div id="spice-current" style="margin-top: 0.5rem; font-size: 0.85rem; color: #aaa;"></div>
-                    <div id="spice-result" class="result" style="margin-top: 0.5rem;"></div>
-                </div>
-
-                <h2>Quick Actions</h2>
-                <div class="card">
-                    <button onclick="restartGateway()" class="danger">Restart Gateway</button>
-                    <div id="status-result" class="result"></div>
                 </div>
             </div>
         </div>
-
-        {"" if OFFLINE_MODE else '''<h2>Branches</h2>
-        <div class="card">
-            <button onclick="fetchBranches()">Refresh Branches</button>
-            <div id="branches-list" style="margin-top: 0.5rem; max-height: 400px; overflow-y: auto;"></div>
-            <div id="branch-diff-view" style="display: none; margin-top: 1rem; border-top: 1px solid #333; padding-top: 1rem;">
-                <h3 style="color: #2196F3; margin: 0 0 0.5rem 0;">Branch: <span id="branch-diff-name"></span></h3>
-                <div id="branch-diff-content"></div>
-            </div>
-        </div>
-
-        <h2>Propose Changes</h2>
-        <div id="propose-section"><div class="card">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
-                <p style="color: #888; font-size: 0.85rem; margin: 0;">Commit uncommitted changes to a new proposal branch and push.</p>
-                <button onclick="refreshLocalChanges()" class="secondary small">Refresh</button>
-            </div>
-
-            <div id="local-changes-viewer">
-                <div id="local-changes-summary" style="margin-bottom: 0.75rem;">
-                    <span style="color: #888;">Click Refresh to scan for uncommitted changes.</span>
-                </div>
-                <div id="local-changes-files" style="display: none; margin-bottom: 0.75rem;">
-                    <strong style="color: #4CAF50; font-size: 0.85rem;">Changed Files</strong>
-                    <div id="local-changes-file-list" style="margin-top: 0.25rem; font-family: monospace; font-size: 0.8rem; background: #1a1a1a; border-radius: 4px; padding: 0.5rem; max-height: 200px; overflow-y: auto;"></div>
-                </div>
-                <details id="local-changes-diff-details" style="display: none; margin-bottom: 0.75rem;">
-                    <summary style="cursor: pointer; color: #9c27b0; font-size: 0.85rem;">View Full Diff</summary>
-                    <pre id="local-changes-diff" class="diff-view" style="margin: 0.5rem 0 0 0; background: #1e1e1e; padding: 0.5rem; border-radius: 3px; overflow-x: auto; max-height: 400px; overflow-y: auto; font-size: 0.75rem;"></pre>
-                </details>
-            </div>
-
-            <div style="display: flex; flex-direction: column; gap: 0.5rem; border-top: 1px solid #333; padding-top: 0.75rem;">
-                <input type="text" id="propose-branch-name" placeholder="Branch name (e.g. fix-typo)" style="width: 100%; box-sizing: border-box;">
-                <input type="text" id="propose-commit-msg" placeholder="Commit message" value="apply local changes" style="width: 100%; box-sizing: border-box;">
-                <div style="display: flex; gap: 0.5rem;">
-                    <button onclick="proposeChanges()" class="secondary">Create Proposal Branch</button>
-                </div>
-            </div>
-            <div id="propose-result" class="result" style="margin-top: 0.5rem;"></div>
-        </div></div>'''}
-        <div id="local-changes" style="display: none;"></div>
         </div><!-- /page-dashboard -->
 
         <!-- ==================== GATEWAY PAGE ==================== -->
@@ -1635,46 +832,6 @@ async def promote_ui(
         <div id="page-settings" class="page">
         <h1>Settings</h1>
 
-        <h2>GitHub Connection</h2>
-        <div class="card">
-            <div id="github-status" style="margin-bottom: 1rem;">
-                <span style="color: #888;">Loading...</span>
-            </div>
-            <div id="github-connect-form" style="display: none;">
-                <div style="display: flex; flex-direction: column; gap: 0.75rem; max-width: 500px;">
-                    <div>
-                        <label style="color: #888; font-size: 0.85rem; display: block; margin-bottom: 0.25rem;">GitHub PAT <span style="color: #666;">(repo scope)</span></label>
-                        <input type="password" id="gh-token" placeholder="ghp_... or github_pat_..." style="width: 100%; padding: 0.4rem 0.6rem; background: #222; color: #eee; border: 1px solid #444; border-radius: 3px; font-family: monospace;">
-                    </div>
-                    <div>
-                        <label style="color: #888; font-size: 0.85rem; display: block; margin-bottom: 0.25rem;">Repository</label>
-                        <input type="text" id="gh-repo" placeholder="owner/repo" style="width: 100%; padding: 0.4rem 0.6rem; background: #222; color: #eee; border: 1px solid #444; border-radius: 3px; font-family: monospace;">
-                    </div>
-                    <div>
-                        <label style="color: #888; font-size: 0.85rem; display: block; margin-bottom: 0.25rem;">Git User Name</label>
-                        <input type="text" id="gh-username" placeholder="Your Name" style="width: 100%; padding: 0.4rem 0.6rem; background: #222; color: #eee; border: 1px solid #444; border-radius: 3px;">
-                    </div>
-                    <div>
-                        <label style="color: #888; font-size: 0.85rem; display: block; margin-bottom: 0.25rem;">Git User Email</label>
-                        <input type="text" id="gh-email" placeholder="you@example.com" style="width: 100%; padding: 0.4rem 0.6rem; background: #222; color: #eee; border: 1px solid #444; border-radius: 3px;">
-                    </div>
-                    <div>
-                        <button onclick="connectGitHub()">Connect GitHub</button>
-                    </div>
-                </div>
-            </div>
-            <div id="github-connected-info" style="display: none;">
-                <div style="display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1rem;">
-                    <div><span style="color: #888;">Repo:</span> <span id="gh-current-repo" style="color: #4CAF50;"></span></div>
-                    <div><span style="color: #888;">Token:</span> <span id="gh-current-token" style="color: #666; font-family: monospace;"></span></div>
-                    <div><span style="color: #888;">User:</span> <span id="gh-current-user"></span></div>
-                    <div><span style="color: #888;">Email:</span> <span id="gh-current-email"></span></div>
-                </div>
-                <button onclick="disconnectGitHub()" class="danger">Disconnect GitHub</button>
-            </div>
-            <div id="github-settings-result" class="result"></div>
-        </div>
-
         <h2>Instance Info</h2>
         <div class="card">
             <div style="display: flex; flex-direction: column; gap: 0.5rem;">
@@ -1759,10 +916,6 @@ async def promote_ui(
                 // Auto-load snapshots when switching to snapshots
                 if (name === 'snapshots') {{
                     fetchSnapshots();
-                }}
-                // Auto-load GitHub settings when switching to settings
-                if (name === 'settings') {{
-                    loadGitHubSettings();
                 }}
             }}
 
@@ -2360,681 +1513,6 @@ async def promote_ui(
                         clearInterval(logsAutoRefreshInterval);
                         logsAutoRefreshInterval = null;
                     }}
-                }}
-            }}
-
-            // Branch management
-            async function fetchBranches() {{
-                const list = document.getElementById('branches-list');
-                list.innerHTML = '<p style="color: #888;">Loading branches...</p>';
-                try {{
-                    const resp = await fetch(basePath + '/branches');
-                    const data = await resp.json();
-                    if (data.error) {{
-                        list.innerHTML = `<p style="color: #ef9a9a;">${{data.error}}</p>`;
-                        return;
-                    }}
-                    if (!data.branches || data.branches.length === 0) {{
-                        list.innerHTML = '<p style="color: #888;">No branches found.</p>';
-                        return;
-                    }}
-
-                    let html = '';
-                    // Sort: main first, then proposals, then others
-                    const sorted = data.branches.sort((a, b) => {{
-                        if (a.is_main) return -1;
-                        if (b.is_main) return 1;
-                        if (a.is_proposal && !b.is_proposal) return -1;
-                        if (!a.is_proposal && b.is_proposal) return 1;
-                        return a.name.localeCompare(b.name);
-                    }});
-
-                    for (const branch of sorted) {{
-                        const color = branch.is_main ? '#4CAF50' : branch.is_proposal ? '#ff9800' : '#2196F3';
-                        const badge = branch.is_main ? '(active)' : branch.is_proposal ? '(proposal)' : '';
-                        html += `
-                            <div class="pending-item">
-                                <div class="pending-item-info">
-                                    <span style="color: ${{color}}; font-weight: bold;">${{branch.name}}</span>
-                                    <span style="color: #666; font-size: 0.8rem;">${{badge}}</span><br>
-                                    <span style="color: #888; font-size: 0.8rem;">
-                                        <span class="sha">${{branch.sha}}</span> · ${{branch.date}} · ${{branch.message}}
-                                    </span>
-                                </div>
-                                <div class="pending-item-actions">
-                                    ${{!branch.is_main ? `<button class="small secondary" onclick="viewBranchDiff('${{branch.name}}')">View Diff</button>` : ''}}
-                                    ${{branch.is_proposal ? `<button class="small" onclick="mergeBranch('${{branch.name}}')">Merge</button>` : ''}}
-                                    ${{branch.is_proposal ? `<button class="small danger" onclick="denyBranch('${{branch.name}}')">Deny</button>` : ''}}
-                                </div>
-                            </div>
-                        `;
-                    }}
-                    list.innerHTML = html;
-                }} catch(e) {{
-                    list.innerHTML = `<p style="color: #ef9a9a;">Error: ${{e.message}}</p>`;
-                }}
-            }}
-
-            async function viewBranchDiff(branch) {{
-                const diffView = document.getElementById('branch-diff-view');
-                const diffName = document.getElementById('branch-diff-name');
-                const diffContent = document.getElementById('branch-diff-content');
-
-                diffView.style.display = 'block';
-                diffName.textContent = branch;
-                diffContent.innerHTML = '<p style="color: #888;">Loading diff...</p>';
-
-                try {{
-                    const resp = await fetch(basePath + '/branches/' + encodeURIComponent(branch) + '/diff');
-                    const data = await resp.json();
-
-                    if (data.error) {{
-                        diffContent.innerHTML = `<p style="color: #ef9a9a;">${{data.error}}</p>`;
-                        return;
-                    }}
-
-                    let html = `
-                        <p style="color: #888; font-size: 0.85rem;">
-                            <span style="color: #4CAF50;">+${{data.ahead}} ahead</span> /
-                            <span style="color: #ef9a9a;">-${{data.behind}} behind</span> main
-                        </p>
-                    `;
-
-                    if (data.commits && data.commits.length > 0) {{
-                        html += `<details open style="margin: 0.5rem 0;">
-                            <summary style="cursor: pointer; color: #4CAF50;">Commits (${{data.commits.length}})</summary>
-                            <pre style="margin: 0.5rem 0; font-size: 0.8rem; background: #252525; padding: 0.5rem; border-radius: 3px;">${{data.commits.join('\\n')}}</pre>
-                        </details>`;
-                    }}
-
-                    if (data.files && data.files.length > 0) {{
-                        html += `<details style="margin: 0.5rem 0;">
-                            <summary style="cursor: pointer; color: #2196F3;">Changed Files (${{data.files.length}})</summary>
-                            <pre style="margin: 0.5rem 0; font-size: 0.8rem; background: #252525; padding: 0.5rem; border-radius: 3px;">${{data.files.join('\\n')}}</pre>
-                        </details>`;
-                    }}
-
-                    if (data.diff) {{
-                        html += `<details style="margin: 0.5rem 0;">
-                            <summary style="cursor: pointer; color: #9c27b0;">Full Diff</summary>
-                            <pre class="diff-view" style="margin: 0.5rem 0; font-size: 0.75rem; background: #1e1e1e; padding: 0.5rem; border-radius: 3px; max-height: 400px; overflow: auto;">${{formatDiffHtml(data.diff)}}</pre>
-                        </details>`;
-                    }}
-
-                    html += `<button class="small" onclick="mergeBranch('${{branch}}')" style="margin-top: 0.5rem;">Merge to Main</button>`;
-                    html += `<button class="small danger" onclick="denyBranch('${{branch}}')" style="margin-left: 0.5rem;">Deny</button>`;
-                    html += `<button class="small secondary" onclick="document.getElementById('branch-diff-view').style.display='none'" style="margin-left: 0.5rem;">Close</button>`;
-
-                    diffContent.innerHTML = html;
-                }} catch(e) {{
-                    diffContent.innerHTML = `<p style="color: #ef9a9a;">Error: ${{e.message}}</p>`;
-                }}
-            }}
-
-            function formatDiffHtml(diff) {{
-                if (!diff) return 'No diff';
-                return diff.split('\\n').map(line => {{
-                    const escaped = line.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                    if (line.startsWith('diff --git')) return `<span class="diff-header">${{escaped}}</span>`;
-                    if (line.startsWith('---') || line.startsWith('+++')) return `<span class="diff-file">${{escaped}}</span>`;
-                    if (line.startsWith('@@')) return `<span class="diff-hunk">${{escaped}}</span>`;
-                    if (line.startsWith('+')) return `<span class="diff-add">${{escaped}}</span>`;
-                    if (line.startsWith('-')) return `<span class="diff-del">${{escaped}}</span>`;
-                    return `<span class="diff-context">${{escaped}}</span>`;
-                }}).join('\\n');
-            }}
-
-            async function mergeBranch(branch) {{
-                if (!confirm(`Merge branch "${{branch}}" into main?`)) return;
-
-                const diffContent = document.getElementById('branch-diff-content');
-                if (diffContent) {{
-                    diffContent.innerHTML = '<p style="color: #888;">Checking for conflicts and merging...</p>';
-                }}
-
-                try {{
-                    const resp = await fetch(basePath + '/branches/' + encodeURIComponent(branch) + '/merge', {{ method: 'POST' }});
-                    const data = await resp.json();
-
-                    if (data.error) {{
-                        let errorHtml = `<p style="color: #ef9a9a; font-weight: bold;">❌ ${{data.error}}</p>`;
-
-                        if (data.has_conflicts) {{
-                            errorHtml += `
-                                <div style="background: #3d2020; border: 1px solid #ef9a9a; border-radius: 4px; padding: 0.75rem; margin-top: 0.5rem;">
-                                    <p style="color: #ef9a9a; margin: 0 0 0.5rem 0;"><strong>⚠️ Merge Conflicts Detected</strong></p>
-                                    <p style="color: #ccc; margin: 0; font-size: 0.85rem;">
-                                        This branch has conflicts with main that cannot be automatically resolved.<br><br>
-                                        <strong>To resolve:</strong><br>
-                                        1. <code>git checkout ${{branch}}</code><br>
-                                        2. <code>git merge main</code><br>
-                                        3. Resolve conflicts in your editor<br>
-                                        4. <code>git add . && git commit</code><br>
-                                        5. <code>git push</code>
-                                    </p>
-                                </div>`;
-                            if (data.conflict_files && data.conflict_files.length > 0) {{
-                                errorHtml += `<pre style="margin-top: 0.5rem; font-size: 0.75rem; color: #ef9a9a; background: #252525; padding: 0.5rem; border-radius: 3px;">${{data.conflict_files.join('\\n')}}</pre>`;
-                            }}
-                        }}
-
-                        if (diffContent) {{
-                            diffContent.innerHTML = errorHtml;
-                        }} else {{
-                            alert('Error: ' + data.error);
-                        }}
-                        return;
-                    }}
-
-                    // Refresh branches and hide diff view
-                    document.getElementById('branch-diff-view').style.display = 'none';
-                    fetchBranches();
-
-                    // Show success
-                    alert('Branch merged successfully! Refresh the page to see updates.');
-                }} catch(e) {{
-                    if (diffContent) {{
-                        diffContent.innerHTML = `<p style="color: #ef9a9a;">Error: ${{e.message}}</p>`;
-                    }} else {{
-                        alert('Error: ' + e.message);
-                    }}
-                }}
-            }}
-
-            async function denyBranch(branch) {{
-                if (!confirm(`Deny and delete branch "${{branch}}"? This cannot be undone.`)) return;
-
-                const diffContent = document.getElementById('branch-diff-content');
-                if (diffContent) {{
-                    diffContent.innerHTML = '<p style="color: #888;">Deleting branch...</p>';
-                }}
-
-                try {{
-                    const resp = await fetch(basePath + '/branches/' + encodeURIComponent(branch) + '/deny', {{ method: 'POST' }});
-                    const data = await resp.json();
-
-                    if (data.error) {{
-                        if (diffContent) {{
-                            diffContent.innerHTML = `<p style="color: #ef9a9a;">❌ ${{data.error}}</p>`;
-                        }} else {{
-                            alert('Error: ' + data.error);
-                        }}
-                        return;
-                    }}
-
-                    // Refresh branches and hide diff view
-                    document.getElementById('branch-diff-view').style.display = 'none';
-                    fetchBranches();
-
-                    alert('Branch denied and deleted.');
-                }} catch(e) {{
-                    if (diffContent) {{
-                        diffContent.innerHTML = `<p style="color: #ef9a9a;">Error: ${{e.message}}</p>`;
-                    }} else {{
-                        alert('Error: ' + e.message);
-                    }}
-                }}
-            }}
-
-            // Spice Mode — granular flag-based controls
-            const spicePresets = {{
-                nospice:   {{ auto_config: false, auto_merge: false, auto_deploy: false, auto_pull: false }},
-                medspice:  {{ auto_config: true,  auto_merge: false, auto_deploy: false, auto_pull: false }},
-                veryspice: {{ auto_config: true,  auto_merge: true,  auto_deploy: true,  auto_pull: false }},
-            }};
-            const spiceLabels = {{
-                'nospice': 'No spice - strictly business',
-                'medspice': 'Med spice - balanced heat',
-                'veryspice': 'Very spice - full send',
-                'custom': 'Custom spice blend',
-            }};
-            window.spiceFlags = {{ auto_config: false, auto_merge: false, auto_deploy: false, auto_pull: false }};
-            window.currentSpiceMode = 'nospice';
-            function isSpicy() {{ return Object.values(window.spiceFlags).some(v => v); }}
-
-            function flagsToPreset(flags) {{
-                for (const [name, preset] of Object.entries(spicePresets)) {{
-                    if (Object.keys(preset).every(k => !!flags[k] === !!preset[k])) return name;
-                }}
-                return 'custom';
-            }}
-
-            function highlightSpice(mode) {{
-                ['nospice', 'medspice', 'veryspice'].forEach(m => {{
-                    const btn = document.getElementById('spice-' + m);
-                    if (btn) btn.style.borderColor = m === mode ? '#ff5722' : '#444';
-                }});
-                const cur = document.getElementById('spice-current');
-                if (cur) cur.textContent = 'Current: ' + (spiceLabels[mode] || mode);
-            }}
-
-            function syncCheckboxes(flags) {{
-                const ids = {{ auto_config: 'spice-flag-auto-config', auto_merge: 'spice-flag-auto-merge', auto_deploy: 'spice-flag-auto-deploy', auto_pull: 'spice-flag-auto-pull' }};
-                for (const [key, id] of Object.entries(ids)) {{
-                    const cb = document.getElementById(id);
-                    if (cb) cb.checked = !!flags[key];
-                }}
-            }}
-
-            function readCheckboxes() {{
-                return {{
-                    auto_config: !!document.getElementById('spice-flag-auto-config')?.checked,
-                    auto_merge: !!document.getElementById('spice-flag-auto-merge')?.checked,
-                    auto_deploy: !!document.getElementById('spice-flag-auto-deploy')?.checked,
-                    auto_pull: !!document.getElementById('spice-flag-auto-pull')?.checked,
-                }};
-            }}
-
-            function _greySection(el, grey, msg) {{
-                if (!el) return;
-                const inputs = el.querySelectorAll('input, button');
-                const ovId = el.id + '-spice-overlay';
-                if (grey) {{
-                    inputs.forEach(i => {{ i.style.opacity = '0.4'; i.style.pointerEvents = 'none'; }});
-                    if (!document.getElementById(ovId)) {{
-                        const ov = document.createElement('div');
-                        ov.id = ovId;
-                        ov.style.cssText = 'padding: 0.5rem; margin-top: 0.5rem; background: #2d2d1a; border: 1px solid #666; border-radius: 4px; font-size: 0.85rem; color: #ff9800;';
-                        ov.textContent = msg;
-                        el.appendChild(ov);
-                    }}
-                }} else {{
-                    inputs.forEach(i => {{ i.style.opacity = '1'; i.style.pointerEvents = 'auto'; }});
-                    const ov = document.getElementById(ovId);
-                    if (ov) ov.remove();
-                }}
-            }}
-
-            function updateSpiceUI() {{
-                const f = window.spiceFlags;
-
-                // Deploy section — greyed when auto_deploy
-                const deploy = document.getElementById('deploy-section');
-                _greySection(deploy, f.auto_deploy, 'Auto-deploy enabled — deploys happen automatically after merge.');
-
-                // Merge-all button — greyed when auto_merge + auto_deploy
-                const mergeBtn = document.getElementById('merge-deploy-btn');
-                if (mergeBtn) {{
-                    const grey = f.auto_merge && f.auto_deploy;
-                    mergeBtn.style.opacity = grey ? '0.4' : '1';
-                    mergeBtn.style.pointerEvents = grey ? 'none' : 'auto';
-                }}
-
-                // Deploy main button — greyed when auto_deploy
-                const deployBtn = document.getElementById('deploy-main-btn');
-                if (deployBtn) {{
-                    deployBtn.style.opacity = f.auto_deploy ? '0.4' : '1';
-                    deployBtn.style.pointerEvents = f.auto_deploy ? 'none' : 'auto';
-                }}
-
-                // Config proposal banner Apply button — greyed when auto_config
-                const applyBtn = document.getElementById('config-apply-btn');
-                if (applyBtn) {{
-                    applyBtn.style.opacity = f.auto_config ? '0.4' : '1';
-                    applyBtn.style.pointerEvents = f.auto_config ? 'none' : 'auto';
-                }}
-                const banner = document.getElementById('proposed-config-banner');
-                if (banner && banner.style.display !== 'none' && f.auto_config) {{
-                    const status = document.getElementById('proposed-config-status');
-                    if (status) {{
-                        status.style.display = 'block';
-                        status.innerHTML = '<span style="color: #ff9800;">Auto-accept enabled — will be applied automatically.</span>';
-                    }}
-                }}
-            }}
-
-            async function loadSpiceMode() {{
-                try {{
-                    const resp = await fetch(basePath + '/spice');
-                    const data = await resp.json();
-                    if (data.flags) {{
-                        window.spiceFlags = data.flags;
-                        syncCheckboxes(data.flags);
-                    }}
-                    window.currentSpiceMode = data.mode || 'nospice';
-                    highlightSpice(window.currentSpiceMode);
-                    updateSpiceUI();
-                }} catch(e) {{ /* ignore on load */ }}
-            }}
-            loadSpiceMode();
-
-            async function _sendSpiceFlags(flags) {{
-                const result = document.getElementById('spice-result');
-                try {{
-                    const resp = await fetch(basePath + '/spice', {{
-                        method: 'POST',
-                        headers: {{ 'Content-Type': 'application/json' }},
-                        body: JSON.stringify({{ flags: flags }})
-                    }});
-                    const data = await resp.json();
-                    if (data.error) {{
-                        result.style.display = 'block';
-                        result.className = 'result error';
-                        result.textContent = data.error;
-                    }} else {{
-                        window.spiceFlags = data.flags || flags;
-                        window.currentSpiceMode = data.mode || flagsToPreset(flags);
-                        syncCheckboxes(window.spiceFlags);
-                        highlightSpice(window.currentSpiceMode);
-                        updateSpiceUI();
-                        result.style.display = 'block';
-                        result.className = 'result';
-                        result.textContent = data.label;
-                        setTimeout(() => result.style.display = 'none', 2000);
-                    }}
-                }} catch(e) {{
-                    result.style.display = 'block';
-                    result.className = 'result error';
-                    result.textContent = 'Error: ' + e.message;
-                }}
-            }}
-
-            function setSpicePreset(name) {{
-                const preset = spicePresets[name];
-                if (!preset) return;
-                syncCheckboxes(preset);
-                _sendSpiceFlags(preset);
-            }}
-
-            function onSpiceFlagChange() {{
-                const flags = readCheckboxes();
-                _sendSpiceFlags(flags);
-            }}
-
-            // Keep old name for backward compat
-            function setSpiceMode(mode) {{ setSpicePreset(mode); }}
-
-            async function restartGateway() {{
-                if (!confirm('Restart the gateway? This will briefly interrupt the bot.')) return;
-                const result = document.getElementById('gateway-system-result') || document.getElementById('status-result') || document.getElementById('promote-result');
-                result.style.display = 'block';
-                result.className = 'result';
-                result.textContent = 'Restarting gateway...';
-                try {{
-                    const resp = await fetch(basePath + '/gateway/restart', {{ method: 'POST' }});
-                    const data = await resp.json();
-                    if (!resp.ok || data.error || data.detail) {{
-                        result.className = 'result error';
-                        result.textContent = data.error || data.detail || 'Unknown error';
-                    }} else {{
-                        result.textContent = 'Gateway restarting... Status: ' + (data.status || 'ok');
-                    }}
-                }} catch(e) {{
-                    result.className = 'result error';
-                    result.textContent = 'Error: ' + e.message;
-                }}
-            }}
-
-            // Offline mode: Pull latest OpenClaw from upstream
-            async function pullUpstream() {{
-                const result = document.getElementById('promote-result');
-                result.style.display = 'block';
-                result.className = 'result';
-                result.textContent = 'Pulling latest OpenClaw from upstream...';
-                try {{
-                    const resp = await fetch(basePath + '/pull-upstream', {{ method: 'POST' }});
-                    const data = await resp.json();
-                    if (!resp.ok || data.error || data.detail) {{
-                        result.className = 'result error';
-                        result.innerHTML = 'Pull failed: ' + (data.error || data.detail || 'Unknown error');
-                    }} else {{
-                        result.innerHTML = '<span style="color: #4CAF50;">✅ ' + (data.message || 'Pulled successfully') + '</span>';
-                        if (data.changes) {{
-                            result.innerHTML += '<br><pre style="margin-top: 0.5rem; font-size: 0.8rem;">' + data.changes + '</pre>';
-                        }}
-                    }}
-                }} catch(e) {{
-                    result.className = 'result error';
-                    result.textContent = 'Error: ' + e.message;
-                }}
-            }}
-
-            // Offline mode: Rebuild gateway Docker image
-            async function rebuildGateway() {{
-                if (!confirm('Rebuild the gateway image? This will rebuild from local source and restart.')) return;
-                const result = document.getElementById('promote-result');
-                result.style.display = 'block';
-                result.className = 'result';
-                result.textContent = 'Rebuilding gateway image... This may take a while.';
-                try {{
-                    const resp = await fetch(basePath + '/gateway/rebuild', {{ method: 'POST' }});
-                    const data = await resp.json();
-                    if (!resp.ok || data.error || data.detail) {{
-                        result.className = 'result error';
-                        result.textContent = 'Rebuild failed: ' + (data.error || data.detail || 'Unknown error');
-                    }} else {{
-                        result.innerHTML = '<span style="color: #4CAF50;">✅ ' + (data.message || 'Rebuild complete') + '</span>';
-                    }}
-                }} catch(e) {{
-                    result.className = 'result error';
-                    result.textContent = 'Error: ' + e.message;
-                }}
-            }}
-
-            // View local uncommitted changes (structured viewer)
-            async function refreshLocalChanges() {{
-                const summary = document.getElementById('local-changes-summary');
-                const filesSection = document.getElementById('local-changes-files');
-                const fileList = document.getElementById('local-changes-file-list');
-                const diffDetails = document.getElementById('local-changes-diff-details');
-                const diffPre = document.getElementById('local-changes-diff');
-                summary.innerHTML = '<span style="color: #888;">Scanning...</span>';
-                filesSection.style.display = 'none';
-                diffDetails.style.display = 'none';
-                try {{
-                    const resp = await fetch(basePath + '/local-changes');
-                    const data = await resp.json();
-                    if (!resp.ok || data.error || data.detail) {{
-                        summary.innerHTML = '<span style="color: #ef9a9a;">Error: ' + (data.error || data.detail || 'Unknown') + '</span>';
-                        return;
-                    }}
-                    const count = data.file_count || 0;
-                    if (count === 0) {{
-                        summary.innerHTML = '<span style="color: #4CAF50;">No uncommitted changes</span>';
-                        return;
-                    }}
-                    summary.innerHTML = '<span style="color: #ff9800;">' + count + ' file' + (count !== 1 ? 's' : '') + ' changed</span>' +
-                        (data.diff_stat ? '<pre style="margin: 0.25rem 0 0 0; font-size: 0.75rem; color: #888;">' + escapeHtml(data.diff_stat) + '</pre>' : '');
-                    // File list
-                    if (data.files && data.files.length) {{
-                        filesSection.style.display = 'block';
-                        fileList.innerHTML = data.files.map(f => {{
-                            const status = f.substring(0, 2);
-                            const name = f.substring(3);
-                            let color = '#ccc';
-                            if (status.includes('M')) color = '#ff9800';
-                            else if (status.includes('A') || status.includes('?')) color = '#4CAF50';
-                            else if (status.includes('D')) color = '#ef5350';
-                            else if (status.includes('R')) color = '#2196F3';
-                            return '<div style="padding: 2px 0;"><span style="color: #666; display: inline-block; width: 24px;">' + escapeHtml(status) + '</span><span style="color: ' + color + ';">' + escapeHtml(name) + '</span></div>';
-                        }}).join('');
-                    }}
-                    // Diff
-                    const diff = data.diff || data.diff_cached || '';
-                    if (diff) {{
-                        diffDetails.style.display = 'block';
-                        diffPre.innerHTML = formatDiffHtml(diff);
-                    }}
-                }} catch(e) {{
-                    summary.innerHTML = '<span style="color: #ef9a9a;">Error: ' + e.message + '</span>';
-                }}
-            }}
-
-            function escapeHtml(text) {{
-                const div = document.createElement('div');
-                div.textContent = text;
-                return div.innerHTML;
-            }}
-
-            function formatDiffHtml(diff) {{
-                return diff.split('\\n').map(line => {{
-                    if (line.startsWith('+++') || line.startsWith('---')) return '<span style="color: #888;">' + escapeHtml(line) + '</span>';
-                    if (line.startsWith('+')) return '<span style="color: #4CAF50;">' + escapeHtml(line) + '</span>';
-                    if (line.startsWith('-')) return '<span style="color: #ef5350;">' + escapeHtml(line) + '</span>';
-                    if (line.startsWith('@@')) return '<span style="color: #2196F3;">' + escapeHtml(line) + '</span>';
-                    if (line.startsWith('diff ')) return '<span style="color: #ff9800; font-weight: bold;">' + escapeHtml(line) + '</span>';
-                    return escapeHtml(line);
-                }}).join('\\n');
-            }}
-
-            // Backward compat alias
-            function viewLocalChanges() {{ refreshLocalChanges(); }}
-
-            // Propose Changes: commit uncommitted changes to a new proposal branch and push
-            function defaultBranchName() {{
-                const d = new Date();
-                const pad = n => String(n).padStart(2, '0');
-                return `patch-${{d.getFullYear()}}${{pad(d.getMonth()+1)}}${{pad(d.getDate())}}-${{pad(d.getHours())}}${{pad(d.getMinutes())}}`;
-            }}
-            async function proposeChanges() {{
-                const nameInput = document.getElementById('propose-branch-name');
-                if (!nameInput.value.trim()) nameInput.value = defaultBranchName();
-                const msgInput = document.getElementById('propose-commit-msg');
-                const result = document.getElementById('propose-result');
-                const branchName = (nameInput.value || '').trim();
-                const commitMsg = (msgInput.value || '').trim();
-                if (!branchName) {{ alert('Enter a branch name'); return; }}
-                if (!commitMsg) {{ alert('Enter a commit message'); return; }}
-                if (!confirm(`Create proposal/${{branchName}} with uncommitted changes?`)) return;
-                result.style.display = 'block';
-                result.className = 'result';
-                result.textContent = 'Creating proposal branch...';
-                try {{
-                    const resp = await fetch(basePath + '/branches/propose', {{
-                        method: 'POST',
-                        headers: {{ 'Content-Type': 'application/json' }},
-                        body: JSON.stringify({{ branch: branchName, message: commitMsg }})
-                    }});
-                    const data = await resp.json();
-                    if (!resp.ok || data.error) {{
-                        result.className = 'result error';
-                        result.textContent = data.error || data.detail || 'Failed';
-                    }} else {{
-                        result.className = 'result';
-                        result.innerHTML = '<span style="color: #4CAF50;">' + (data.message || 'Proposal branch created') + '</span>';
-                        nameInput.value = '';
-                        msgInput.value = '';
-                        fetchBranches();
-                        refreshLocalChanges();
-                    }}
-                }} catch(e) {{
-                    result.className = 'result error';
-                    result.textContent = 'Error: ' + e.message;
-                }}
-            }}
-
-            async function mergeAllAndDeploy() {{
-                const result = document.getElementById('promote-result');
-                result.style.display = 'block';
-                result.className = 'result';
-                result.textContent = 'Checking for conflicts and merging proposal branches...';
-
-                try {{
-                    // First merge all proposal branches
-                    const mergeResp = await fetch(basePath + '/branches/merge-all', {{ method: 'POST' }});
-                    const mergeData = await mergeResp.json();
-
-                    if (mergeData.error) {{
-                        result.className = 'result error';
-                        result.textContent = 'Merge failed: ' + mergeData.error;
-                        return;
-                    }}
-
-                    let statusText = '';
-                    if (mergeData.merged && mergeData.merged.length > 0) {{
-                        statusText += `✅ Merged: ${{mergeData.merged.join(', ')}}\\n`;
-                    }}
-                    if (mergeData.skipped_conflicts && mergeData.skipped_conflicts.length > 0) {{
-                        statusText += `⚠️ Skipped (conflicts): ${{mergeData.skipped_conflicts.join(', ')}}\\n`;
-                    }}
-                    const otherErrors = mergeData.errors ? mergeData.errors.filter(e => !e.has_conflicts) : [];
-                    if (otherErrors.length > 0) {{
-                        statusText += `❌ Other errors: ${{otherErrors.map(e => e.branch).join(', ')}}\\n`;
-                    }}
-                    if (mergeData.status === 'no_branches') {{
-                        statusText = 'No proposal branches to merge. ';
-                    }}
-
-                    // If there are only conflicts and no successful merges, warn but allow deploy
-                    if (mergeData.skipped_conflicts && mergeData.skipped_conflicts.length > 0 && (!mergeData.merged || mergeData.merged.length === 0)) {{
-                        statusText += '\\n⚠️ All branches have conflicts. Deploying main as-is...\\n';
-                    }} else {{
-                        result.textContent = statusText + 'Now deploying main...';
-                    }}
-
-                    // Then deploy main
-                    const deployResp = await fetch(basePath + '/promote-main', {{ method: 'POST' }});
-                    if (deployResp.ok) {{
-                        let finalHtml = statusText.replace(/\\n/g, '<br>') + '<br><span style="color: #4CAF50;">✅ Deployed! Restarting gateway...</span>';
-                        if (mergeData.skipped_conflicts && mergeData.skipped_conflicts.length > 0) {{
-                            finalHtml += '<br><br><span style="color: #ff9800;">Note: Resolve conflicts locally for: ' + mergeData.skipped_conflicts.join(', ') + '</span>';
-                        }}
-                        result.innerHTML = finalHtml;
-                        setTimeout(() => window.location.reload(), 3000);
-                    }} else {{
-                        const text = await deployResp.text();
-                        result.className = 'result error';
-                        result.innerHTML = statusText.replace(/\\n/g, '<br>') + '<br>Deploy failed: ' + (text || deployResp.statusText);
-                    }}
-                }} catch(e) {{
-                    result.className = 'result error';
-                    result.textContent = 'Error: ' + e.message;
-                }}
-            }}
-
-            async function promoteMain() {{
-                const result = document.getElementById('promote-result');
-                result.style.display = 'block';
-                result.className = 'result';
-                result.textContent = 'Deploying main branch...';
-                try {{
-                    const resp = await fetch(basePath + '/promote-main', {{ method: 'POST' }});
-                    if (resp.ok) {{
-                        result.innerHTML = '<span style="color: #4CAF50;">✅ Deployed! Restarting gateway...</span>';
-                        setTimeout(() => window.location.reload(), 3000);
-                    }} else {{
-                        const text = await resp.text();
-                        result.className = 'result error';
-                        result.textContent = 'Failed: ' + (text || resp.statusText);
-                    }}
-                }} catch(e) {{
-                    result.className = 'result error';
-                    result.textContent = 'Error: ' + e.message;
-                }}
-            }}
-
-            async function promoteSha() {{
-                const sha = document.getElementById('promote-sha-input').value.trim();
-                if (!sha || sha.length < 7) {{
-                    alert('Please enter a valid SHA (at least 7 characters)');
-                    return;
-                }}
-                if (!confirm(`Promote SHA "${{sha}}" to approved?`)) return;
-
-                const result = document.getElementById('promote-result');
-                result.style.display = 'block';
-                result.className = 'result';
-                result.textContent = `Promoting SHA ${{sha}}...`;
-
-                try {{
-                    const formData = new FormData();
-                    formData.append('sha', sha);
-                    const resp = await fetch(basePath + '/controller', {{
-                        method: 'POST',
-                        body: formData
-                    }});
-                    if (resp.ok) {{
-                        result.innerHTML = `<span style="color: #4CAF50;">✅ Promoted SHA ${{sha}}! Restarting gateway...</span>`;
-                        document.getElementById('promote-sha-input').value = '';
-                        setTimeout(() => window.location.reload(), 3000);
-                    }} else {{
-                        const text = await resp.text();
-                        result.className = 'result error';
-                        result.textContent = 'Failed: ' + (text || resp.statusText);
-                    }}
-                }} catch(e) {{
-                    result.className = 'result error';
-                    result.textContent = 'Error: ' + e.message;
                 }}
             }}
 
@@ -3937,101 +2415,6 @@ async def promote_ui(
                 }}
             }}
 
-            // Proposed config functions
-            async function checkProposedConfig() {{
-                try {{
-                    const resp = await fetch(basePath + '/config/proposed');
-                    const data = await resp.json();
-                    const banner = document.getElementById('proposed-config-banner');
-
-                    if (data.has_proposal) {{
-                        banner.style.display = 'block';
-                        document.getElementById('proposed-config-reason').textContent = data.reason || '';
-                        const keys = Object.keys(data.config || {{}});
-                        document.getElementById('proposed-config-keys').textContent = 'Changes: ' + keys.join(', ');
-                        window.proposedConfig = data.config;
-                        window.proposedReason = data.reason;
-                    }} else {{
-                        banner.style.display = 'none';
-                        window.proposedConfig = null;
-                    }}
-                }} catch(e) {{
-                    console.error('Error checking proposed config:', e);
-                }}
-            }}
-
-            function deepMerge(target, source) {{
-                const out = {{ ...target }};
-                for (const key of Object.keys(source)) {{
-                    if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])
-                        && target[key] && typeof target[key] === 'object' && !Array.isArray(target[key])) {{
-                        out[key] = deepMerge(target[key], source[key]);
-                    }} else {{
-                        out[key] = source[key];
-                    }}
-                }}
-                return out;
-            }}
-
-            async function applyProposedConfig() {{
-                if (!window.proposedConfig) return;
-                if (!confirm('Apply the AI-proposed config changes and restart the gateway?')) return;
-
-                const status = document.getElementById('proposed-config-status');
-                status.style.display = 'block';
-                status.innerHTML = '<span style="color: #ff9800;">Applying changes...</span>';
-
-                try {{
-                    const resp = await fetch(basePath + '/config/apply-proposed', {{
-                        method: 'POST',
-                        headers: {{ 'Content-Type': 'application/json' }},
-                    }});
-                    const data = await resp.json();
-                    if (!resp.ok || data.error) {{
-                        let errMsg = escapeHtml(data.error || data.detail || 'Failed');
-                        if (data.validation_errors && data.validation_errors.length) {{
-                            errMsg += '<br><ul style="margin: 0.3rem 0 0 1rem; padding: 0; font-size: 0.8rem;">';
-                            data.validation_errors.forEach(e => {{ errMsg += '<li>' + escapeHtml(e) + '</li>'; }});
-                            errMsg += '</ul>';
-                        }}
-                        status.innerHTML = '<span style="color: #ef5350;">' + errMsg + '</span>';
-                    }} else {{
-                        status.innerHTML = '<span style="color: #4CAF50;">Applied and restarted gateway.</span>';
-                        setTimeout(() => {{
-                            document.getElementById('proposed-config-banner').style.display = 'none';
-                            window.proposedConfig = null;
-                        }}, 2000);
-                    }}
-                }} catch(e) {{
-                    status.innerHTML = '<span style="color: #ef5350;">Error: ' + escapeHtml(e.message) + '</span>';
-                }}
-            }}
-
-            function reviewProposedConfig() {{
-                const preview = document.getElementById('proposed-config-preview');
-                if (preview.style.display === 'block') {{
-                    preview.style.display = 'none';
-                    return;
-                }}
-                if (!window.proposedConfig) return;
-                preview.style.display = 'block';
-                preview.innerHTML = '<pre style="background: #1a1a1a; padding: 0.5rem; border-radius: 4px; max-height: 300px; overflow: auto; font-size: 0.8rem; color: #ccc;">' + escapeHtml(JSON.stringify(window.proposedConfig, null, 2)) + '</pre>';
-            }}
-
-            async function dismissProposal() {{
-                if (!confirm('Dismiss this config proposal?')) return;
-                try {{
-                    await fetch(basePath + '/config/proposed', {{ method: 'DELETE' }});
-                    document.getElementById('proposed-config-banner').style.display = 'none';
-                    window.proposedConfig = null;
-                }} catch(e) {{
-                    alert('Error: ' + e.message);
-                }}
-            }}
-
-            // Check for proposed config on page load
-            checkProposedConfig();
-
             // Calculate safe context window based on RAM and model size
             function calcSafeContext(paramBillions, maxContext, availableRamGb) {{
                 // Model weights (Q4 quantized): ~0.5-0.6 GB per billion params
@@ -4417,7 +2800,6 @@ async def promote_ui(
 
             // Load data on page load
             fetchHealth();
-            fetchBranches();
             checkConfigBackup();
 
             // Auto-polling intervals (in ms)
@@ -4428,88 +2810,6 @@ async def promote_ui(
             setInterval(() => {{
                 fetchHealth();
             }}, POLL_INTERVAL_FAST);
-
-            // Proposed config - check for AI proposals
-            setInterval(() => {{
-                checkProposedConfig();
-            }}, POLL_INTERVAL_SLOW);
-
-            // ---- Settings: GitHub connection ----
-            async function loadGitHubSettings() {{
-                try {{
-                    const res = await fetch(basePath + '/settings/github', {{ credentials: 'include' }});
-                    const data = await res.json();
-                    const statusEl = document.getElementById('github-status');
-                    const formEl = document.getElementById('github-connect-form');
-                    const infoEl = document.getElementById('github-connected-info');
-                    if (data.connected) {{
-                        statusEl.innerHTML = '<span style="color: #4CAF50; font-weight: bold;">Connected</span>';
-                        formEl.style.display = 'none';
-                        infoEl.style.display = 'block';
-                        document.getElementById('gh-current-repo').textContent = data.repo;
-                        document.getElementById('gh-current-token').textContent = data.masked_token;
-                        document.getElementById('gh-current-user').textContent = data.username;
-                        document.getElementById('gh-current-email').textContent = data.email;
-                    }} else {{
-                        statusEl.innerHTML = '<span style="color: #ff9800; font-weight: bold;">Not configured</span>';
-                        formEl.style.display = 'block';
-                        infoEl.style.display = 'none';
-                    }}
-                }} catch (e) {{
-                    document.getElementById('github-status').innerHTML = '<span style="color: #ef9a9a;">Error loading settings</span>';
-                }}
-            }}
-
-            async function connectGitHub() {{
-                const token = document.getElementById('gh-token').value.trim();
-                const repo = document.getElementById('gh-repo').value.trim();
-                const username = document.getElementById('gh-username').value.trim();
-                const email = document.getElementById('gh-email').value.trim();
-                const resultEl = document.getElementById('github-settings-result');
-                if (!token || !repo) {{
-                    resultEl.innerHTML = '<span style="color: #ef9a9a;">Token and repo are required</span>';
-                    return;
-                }}
-                resultEl.innerHTML = '<span style="color: #888;">Saving...</span>';
-                try {{
-                    const res = await fetch(basePath + '/settings/github', {{
-                        method: 'POST',
-                        headers: {{ 'Content-Type': 'application/json' }},
-                        credentials: 'include',
-                        body: JSON.stringify({{ token, repo, username, email }})
-                    }});
-                    const data = await res.json();
-                    if (data.ok) {{
-                        resultEl.innerHTML = '<span style="color: #4CAF50;">GitHub connected. Reloading...</span>';
-                        setTimeout(() => window.location.reload(), 1500);
-                    }} else {{
-                        resultEl.innerHTML = '<span style="color: #ef9a9a;">' + escHtml(data.error || 'Failed') + '</span>';
-                    }}
-                }} catch (e) {{
-                    resultEl.innerHTML = '<span style="color: #ef9a9a;">Error: ' + escHtml(e.message) + '</span>';
-                }}
-            }}
-
-            async function disconnectGitHub() {{
-                if (!confirm('Disconnect GitHub? The controller will switch to offline mode.')) return;
-                const resultEl = document.getElementById('github-settings-result');
-                resultEl.innerHTML = '<span style="color: #888;">Disconnecting...</span>';
-                try {{
-                    const res = await fetch(basePath + '/settings/github', {{
-                        method: 'DELETE',
-                        credentials: 'include'
-                    }});
-                    const data = await res.json();
-                    if (data.ok) {{
-                        resultEl.innerHTML = '<span style="color: #4CAF50;">Disconnected. Reloading...</span>';
-                        setTimeout(() => window.location.reload(), 1500);
-                    }} else {{
-                        resultEl.innerHTML = '<span style="color: #ef9a9a;">' + escHtml(data.error || 'Failed') + '</span>';
-                    }}
-                }} catch (e) {{
-                    resultEl.innerHTML = '<span style="color: #ef9a9a;">Error: ' + escHtml(e.message) + '</span>';
-                }}
-            }}
 
             console.log('ClawFactory UI loaded. Auto-polling enabled.');
         </script>
@@ -4544,78 +2844,6 @@ async def root_dashboard(
     return await promote_ui(request, token, session)
 
 
-@app.post("/controller")
-async def promote_manual(
-    request: Request,
-    token: Optional[str] = Query(None),
-    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
-    authorization: Optional[str] = Header(None),
-):
-    """Handle manual promotion of specific SHA from UI."""
-    # Check authentication
-    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    form = await request.form()
-    sha = form.get("sha", "").strip()
-
-    if not sha or len(sha) < 7:
-        raise HTTPException(status_code=400, detail="Invalid SHA")
-
-    audit_log("manual_promote_requested", {"sha": sha})
-
-    if not promote_sha(sha):
-        raise HTTPException(status_code=500, detail="Promotion failed")
-
-    restart_gateway()
-
-    return HTMLResponse(f"""
-        <html>
-        <body style="font-family: monospace; padding: 2rem; background: #1a1a1a; color: #4CAF50;">
-            <h1>✅ Promoted</h1>
-            <p>SHA: {sha}</p>
-            <p>Gateway restarting...</p>
-            <a href="/controller" style="color: #2196F3;">← Back</a>
-        </body>
-        </html>
-    """)
-
-
-@app.post("/promote-main")
-@app.post("/controller/promote-main")
-async def promote_main_endpoint(
-    token: Optional[str] = Query(None),
-    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
-    authorization: Optional[str] = Header(None),
-):
-    """Pull latest main and restart gateway."""
-    # Check authentication
-    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    audit_log("promote_main_requested", {})
-
-    if OFFLINE_MODE:
-        raise HTTPException(status_code=400, detail="Cannot deploy from main — GitHub is not configured. Set up GitHub in Settings first.")
-
-    if not promote_main():
-        raise HTTPException(status_code=500, detail="Promotion failed")
-
-    sha = git_get_main_sha()
-    restart_gateway()
-
-    return HTMLResponse(f"""
-        <html>
-        <body style="font-family: monospace; padding: 2rem; background: #1a1a1a; color: #4CAF50;">
-            <h1>✅ Promoted to Main</h1>
-            <p>SHA: {sha}</p>
-            <p>Gateway restarting...</p>
-            <a href="/controller" style="color: #2196F3;">← Back</a>
-        </body>
-        </html>
-    """)
-
-
 # ============================================================
 # Health & Status
 # ============================================================
@@ -4631,12 +2859,9 @@ async def health():
 @app.get("/controller/status")
 async def status():
     """Get current system status."""
-    current_sha = git_get_main_sha()
-
     gateway_status = get_gateway_status()
 
     return {
-        "approved_sha": current_sha,
         "gateway_status": gateway_status,
         "audit_log": str(AUDIT_LOG),
     }
@@ -5158,776 +3383,6 @@ async def delete_traffic_logs(
     })
 
     return {"deleted_log": deleted_log, "deleted_key": deleted_key}
-
-
-# ============================================================
-# Spice Mode (LLM Temperature)
-# ============================================================
-
-SPICYMODES = {"nospice", "medspice", "veryspice", "custom"}
-SPICE_LABELS = {
-    "nospice":   "No spice - strictly business",
-    "medspice":  "Med spice - balanced heat",
-    "veryspice": "Very spice - full send",
-    "custom":    "Custom spice blend",
-}
-
-
-def _write_spice_to_config(flags: dict, preset: str) -> dict:
-    """Write spice flags and preset to gateway config. Returns the config dict."""
-    with open(GATEWAY_CONFIG_PATH) as f:
-        config = json.load(f)
-    if "env" not in config:
-        config["env"] = {}
-    if "vars" not in config["env"]:
-        config["env"]["vars"] = {}
-    config["env"]["vars"]["SPICYMODE"] = preset
-    config["env"]["vars"]["SPICE_AUTO_CONFIG"] = str(flags.get("auto_config", False)).lower()
-    config["env"]["vars"]["SPICE_AUTO_MERGE"] = str(flags.get("auto_merge", False)).lower()
-    config["env"]["vars"]["SPICE_AUTO_DEPLOY"] = str(flags.get("auto_deploy", False)).lower()
-    config["env"]["vars"]["SPICE_AUTO_PULL"] = str(flags.get("auto_pull", False)).lower()
-    with open(GATEWAY_CONFIG_PATH, "w") as f:
-        json.dump(config, f, indent=2)
-    return config
-
-
-@app.get("/spice")
-@app.get("/controller/spice")
-async def get_spice(
-    token: Optional[str] = Query(None),
-    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
-    authorization: Optional[str] = Header(None),
-):
-    """Get current spice mode and granular flags."""
-    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    flags = get_spice_flags()
-    preset = _flags_to_preset(flags)
-    return {
-        "mode": preset,
-        "label": SPICE_LABELS.get(preset, preset),
-        "auto_accept": any(flags.values()),
-        "flags": flags,
-    }
-
-
-@app.post("/spice")
-@app.post("/controller/spice")
-async def set_spice(
-    request: Request,
-    token: Optional[str] = Query(None),
-    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
-    authorization: Optional[str] = Header(None),
-):
-    """Set spice mode — accepts {mode: preset} or {flags: {...}}."""
-    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    data = await request.json()
-    try:
-        if "flags" in data:
-            flags = {k: bool(data["flags"].get(k, False)) for k in SPICE_FLAG_KEYS}
-            preset = _flags_to_preset(flags)
-        else:
-            mode = data.get("mode", "medspice")
-            if mode not in SPICE_PRESETS:
-                return {"error": f"Unknown preset: {mode}"}
-            flags = dict(SPICE_PRESETS[mode])
-            preset = mode
-        _write_spice_to_config(flags, preset)
-        audit_log("spice_mode_set", {"preset": preset, "flags": flags})
-        return {"mode": preset, "label": SPICE_LABELS.get(preset, preset), "flags": flags}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-# ============================================================
-# Branches
-# ============================================================
-
-@app.get("/branches")
-@app.get("/controller/branches")
-async def list_branches(
-    token: Optional[str] = Query(None),
-    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
-    authorization: Optional[str] = Header(None),
-):
-    """List all remote branches."""
-    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    # Fetch latest first
-    git_fetch_origin()
-    branches = git_list_remote_branches()
-    return {"branches": branches}
-
-
-@app.get("/branches/{branch:path}/diff")
-@app.get("/controller/branches/{branch:path}/diff")
-async def get_branch_diff(
-    branch: str,
-    token: Optional[str] = Query(None),
-    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
-    authorization: Optional[str] = Header(None),
-):
-    """Get diff between a branch and main."""
-    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    diff = git_get_branch_diff(branch)
-    return {"branch": branch, **diff}
-
-
-def git_ensure_config():
-    """Ensure git user config is set for merge commits."""
-    subprocess.run(
-        ["git", "config", "user.name", GIT_USER_NAME],
-        cwd=APPROVED_DIR,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.email", GIT_USER_EMAIL],
-        cwd=APPROVED_DIR,
-        capture_output=True,
-    )
-
-
-def git_setup_auth():
-    """Set up git remote URL with auth token. Returns original URL to restore later."""
-    git_ensure_config()  # Ensure git user config is set
-    github_token = os.environ.get("GITHUB_TOKEN", "")
-    if not github_token:
-        return None
-
-    url_result = subprocess.run(
-        ["git", "remote", "get-url", "origin"],
-        cwd=APPROVED_DIR,
-        capture_output=True,
-        text=True,
-    )
-    remote_url = url_result.stdout.strip()
-
-    # Handle HTTPS URLs
-    if remote_url.startswith("https://github.com/"):
-        auth_url = remote_url.replace(
-            "https://github.com/",
-            f"https://x-access-token:{github_token}@github.com/"
-        )
-        subprocess.run(
-            ["git", "remote", "set-url", "origin", auth_url],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-        )
-        return remote_url
-
-    # Handle SSH URLs (git@github.com:owner/repo.git)
-    if remote_url.startswith("git@github.com:"):
-        # Convert git@github.com:owner/repo.git to https://x-access-token:{token}@github.com/owner/repo.git
-        repo_path = remote_url.replace("git@github.com:", "")
-        auth_url = f"https://x-access-token:{github_token}@github.com/{repo_path}"
-        subprocess.run(
-            ["git", "remote", "set-url", "origin", auth_url],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-        )
-        return remote_url
-
-    return None
-
-
-def git_restore_url(original_url: Optional[str]):
-    """Restore the original git remote URL."""
-    if original_url:
-        subprocess.run(
-            ["git", "remote", "set-url", "origin", original_url],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-        )
-
-
-@app.post("/branches/propose")
-@app.post("/controller/branches/propose")
-async def propose_changes(
-    request: Request,
-    token: Optional[str] = Query(None),
-    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
-    authorization: Optional[str] = Header(None),
-):
-    """Commit uncommitted changes to a new proposal/* branch and push."""
-    if not (check_auth(token, session, authorization) or check_agent_auth(token, authorization)):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    import re
-    body = await request.json()
-    branch_name = (body.get("branch") or "").strip()
-    commit_msg = (body.get("message") or "").strip()
-    agent_id = (body.get("agent_id") or "").strip()
-
-    if not branch_name:
-        return {"error": "Branch name is required"}
-    if not commit_msg:
-        return {"error": "Commit message is required"}
-    if not re.match(r'^[a-zA-Z0-9_\-]+$', branch_name):
-        return {"error": "Invalid branch name (use alphanumeric, hyphens, underscores)"}
-
-    full_branch = f"proposal/{branch_name}"
-    scope = resolve_agent_file_scope(agent_id)
-    audit_log("propose_changes", {"branch": full_branch, "message": commit_msg, "agent": agent_id or "unscoped", "scope": str(scope) if scope else "full"})
-
-    # Check for uncommitted changes (scoped if agent specified)
-    if scope is not None:
-        status_result = subprocess.run(
-            ["git", "status", "--porcelain", "--", str(scope)],
-            cwd=APPROVED_DIR, capture_output=True, text=True,
-        )
-    else:
-        status_result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=APPROVED_DIR, capture_output=True, text=True,
-        )
-    if not status_result.stdout.strip():
-        return {"error": "No uncommitted changes to propose"}
-
-    original_url = git_setup_auth()
-    try:
-        # Make sure we're on main
-        subprocess.run(["git", "checkout", "main"], cwd=APPROVED_DIR, capture_output=True, text=True)
-
-        # Create and switch to proposal branch
-        result = subprocess.run(
-            ["git", "checkout", "-b", full_branch],
-            cwd=APPROVED_DIR, capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            return {"error": f"Failed to create branch: {result.stderr.strip()}"}
-
-        # Stage changes — scoped to agent's directory if agent_id provided
-        if scope is not None:
-            subprocess.run(["git", "add", "--", str(scope)], cwd=APPROVED_DIR, capture_output=True, text=True)
-        else:
-            subprocess.run(["git", "add", "-A"], cwd=APPROVED_DIR, capture_output=True, text=True)
-        result = subprocess.run(
-            ["git", "commit", "-m", commit_msg],
-            cwd=APPROVED_DIR, capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            # Rollback: switch back to main and delete the branch
-            subprocess.run(["git", "checkout", "main"], cwd=APPROVED_DIR, capture_output=True)
-            subprocess.run(["git", "branch", "-D", full_branch], cwd=APPROVED_DIR, capture_output=True)
-            return {"error": f"Commit failed: {result.stderr.strip()}"}
-
-        # Push to origin
-        push_result = subprocess.run(
-            ["git", "push", "-u", "origin", full_branch],
-            cwd=APPROVED_DIR, capture_output=True, text=True, timeout=60,
-        )
-
-        # Switch back to main regardless of push result
-        subprocess.run(["git", "checkout", "main"], cwd=APPROVED_DIR, capture_output=True)
-
-        if push_result.returncode != 0:
-            return {"error": f"Push failed: {push_result.stderr.strip()}"}
-
-        audit_log("propose_changes_success", {"branch": full_branch})
-
-        # Auto-merge when spice flag set
-        if spice_auto_merge():
-            merge_result = _auto_merge_proposal_branches()
-            if merge_result.get("merged"):
-                audit_log("branch_auto_merged_on_propose", {"branch": full_branch, "flags": get_spice_flags()})
-                msg = f"Created, pushed, and auto-merged {full_branch} (spice mode)"
-                # Auto-deploy after merge
-                if spice_auto_deploy():
-                    if restart_gateway():
-                        audit_log("auto_deploy_on_propose", {"branch": full_branch})
-                        msg += " — gateway restarted"
-                    else:
-                        audit_log("auto_deploy_failed_on_propose", {"branch": full_branch})
-                        msg += " — auto-deploy failed"
-                return {"message": msg}
-
-        return {"message": f"Created and pushed {full_branch}"}
-    except subprocess.TimeoutExpired:
-        subprocess.run(["git", "checkout", "main"], cwd=APPROVED_DIR, capture_output=True)
-        return {"error": "Push timed out"}
-    except Exception as e:
-        subprocess.run(["git", "checkout", "main"], cwd=APPROVED_DIR, capture_output=True)
-        audit_log("propose_changes_error", {"branch": full_branch, "error": str(e)})
-        return {"error": str(e)}
-    finally:
-        git_restore_url(original_url)
-
-
-@app.post("/branches/merge-all")
-@app.post("/controller/branches/merge-all")
-async def merge_all_branches(
-    token: Optional[str] = Query(None),
-    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
-    authorization: Optional[str] = Header(None),
-):
-    """Merge all proposal branches into main using git directly."""
-    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    # Set up git authentication
-    original_url = git_setup_auth()
-
-    try:
-        # Fetch and get proposal branches
-        subprocess.run(
-            ["git", "fetch", "--prune", "origin"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        branches = git_list_remote_branches()
-        proposal_branches = [b for b in branches if b["is_proposal"]]
-
-        if not proposal_branches:
-            git_restore_url(original_url)
-            return {"status": "no_branches", "merged": [], "errors": []}
-
-        audit_log("merge_all_requested", {"branches": [b["name"] for b in proposal_branches]})
-
-        merged = []
-        errors = []
-        skipped_conflicts = []
-
-        for branch_info in proposal_branches:
-            branch_name = branch_info["name"]
-            try:
-                # Check for conflicts first
-                conflict_check = subprocess.run(
-                    ["git", "merge-tree", "--write-tree", "origin/main", f"origin/{branch_name}"],
-                    capture_output=True,
-                    text=True,
-                    cwd=APPROVED_DIR,
-                    timeout=30,
-                )
-
-                if conflict_check.returncode != 0:
-                    skipped_conflicts.append(branch_name)
-                    errors.append({"branch": branch_name, "error": "Has merge conflicts", "has_conflicts": True})
-                    continue
-
-                # Checkout main
-                checkout_result = subprocess.run(
-                    ["git", "checkout", "main"],
-                    capture_output=True,
-                    text=True,
-                    cwd=APPROVED_DIR,
-                    timeout=30,
-                )
-                if checkout_result.returncode != 0:
-                    errors.append({"branch": branch_name, "error": f"Checkout failed: {checkout_result.stderr}"})
-                    continue
-
-                # Pull latest main
-                pull_result = subprocess.run(
-                    ["git", "pull", "origin", "main"],
-                    capture_output=True,
-                    text=True,
-                    cwd=APPROVED_DIR,
-                    timeout=60,
-                )
-                if pull_result.returncode != 0:
-                    errors.append({"branch": branch_name, "error": f"Pull failed: {pull_result.stderr}"})
-                    continue
-
-                # Merge the branch (squash)
-                merge_result = subprocess.run(
-                    ["git", "merge", "--squash", f"origin/{branch_name}"],
-                    capture_output=True,
-                    text=True,
-                    cwd=APPROVED_DIR,
-                    timeout=60,
-                )
-                if merge_result.returncode != 0:
-                    subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=APPROVED_DIR, capture_output=True)
-                    errors.append({"branch": branch_name, "error": f"Merge failed: {merge_result.stderr}"})
-                    continue
-
-                # Commit
-                commit_result = subprocess.run(
-                    ["git", "commit", "-m", f"Merge {branch_name} (squashed via controller)"],
-                    capture_output=True,
-                    text=True,
-                    cwd=APPROVED_DIR,
-                    timeout=30,
-                )
-                if commit_result.returncode != 0:
-                    subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=APPROVED_DIR, capture_output=True)
-                    errors.append({"branch": branch_name, "error": f"Commit failed: {commit_result.stderr}"})
-                    continue
-
-                # Push
-                push_result = subprocess.run(
-                    ["git", "push", "origin", "main"],
-                    capture_output=True,
-                    text=True,
-                    cwd=APPROVED_DIR,
-                    timeout=60,
-                )
-                if push_result.returncode != 0:
-                    errors.append({"branch": branch_name, "error": f"Push failed: {push_result.stderr}"})
-                    continue
-
-                # Delete remote branch
-                subprocess.run(
-                    ["git", "push", "origin", "--delete", branch_name],
-                    capture_output=True,
-                    text=True,
-                    cwd=APPROVED_DIR,
-                    timeout=30,
-                )
-
-                merged.append(branch_name)
-                audit_log("branch_merged", {"branch": branch_name})
-
-            except Exception as e:
-                errors.append({"branch": branch_name, "error": str(e)})
-
-        git_restore_url(original_url)
-        return {"status": "completed", "merged": merged, "errors": errors, "skipped_conflicts": skipped_conflicts}
-
-    except Exception as e:
-        git_restore_url(original_url)
-        return {"error": str(e)}
-
-
-# Note: git_setup_auth and git_restore_url are defined above merge_all_branches now
-# The duplicate definitions below should be removed
-
-
-@app.post("/branches/{branch:path}/merge")
-@app.post("/controller/branches/{branch:path}/merge")
-async def merge_branch(
-    branch: str,
-    token: Optional[str] = Query(None),
-    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
-    authorization: Optional[str] = Header(None),
-):
-    """Merge a branch into main using git directly."""
-    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    audit_log("branch_merge_requested", {"branch": branch})
-
-    # Set up git authentication
-    original_url = git_setup_auth()
-
-    try:
-        # Fetch latest
-        subprocess.run(
-            ["git", "fetch", "--prune", "origin"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-
-        # Check for conflicts using merge-tree
-        conflict_check = subprocess.run(
-            ["git", "merge-tree", "--write-tree", "origin/main", f"origin/{branch}"],
-            capture_output=True,
-            text=True,
-            cwd=APPROVED_DIR,
-            timeout=30,
-        )
-
-        # merge-tree returns non-zero if there are conflicts
-        if conflict_check.returncode != 0:
-            conflict_files = []
-            for line in conflict_check.stdout.split("\n"):
-                if line.strip() and "CONFLICT" in line:
-                    conflict_files.append(line.strip())
-
-            error_msg = "Branch has merge conflicts with main. "
-            if conflict_files:
-                error_msg += f"Conflicts in: {'; '.join(conflict_files[:5])}"
-                if len(conflict_files) > 5:
-                    error_msg += f" (+{len(conflict_files) - 5} more)"
-            else:
-                error_msg += "Please resolve conflicts locally and push."
-
-            audit_log("branch_merge_conflict", {"branch": branch, "conflicts": conflict_files})
-            git_restore_url(original_url)
-            return {"error": error_msg, "has_conflicts": True, "conflict_files": conflict_files}
-
-        # Checkout main
-        checkout_result = subprocess.run(
-            ["git", "checkout", "main"],
-            capture_output=True,
-            text=True,
-            cwd=APPROVED_DIR,
-            timeout=30,
-        )
-        if checkout_result.returncode != 0:
-            git_restore_url(original_url)
-            return {"error": f"Failed to checkout main: {checkout_result.stderr}"}
-
-        # Pull latest main
-        pull_result = subprocess.run(
-            ["git", "pull", "origin", "main"],
-            capture_output=True,
-            text=True,
-            cwd=APPROVED_DIR,
-            timeout=60,
-        )
-        if pull_result.returncode != 0:
-            git_restore_url(original_url)
-            return {"error": f"Failed to pull main: {pull_result.stderr}"}
-
-        # Merge the branch (squash for cleaner history)
-        merge_result = subprocess.run(
-            ["git", "merge", "--squash", f"origin/{branch}"],
-            capture_output=True,
-            text=True,
-            cwd=APPROVED_DIR,
-            timeout=60,
-        )
-        if merge_result.returncode != 0:
-            # Reset on failure
-            subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=APPROVED_DIR, capture_output=True)
-            git_restore_url(original_url)
-            return {"error": f"Merge failed: {merge_result.stderr}"}
-
-        # Commit the squashed merge
-        commit_result = subprocess.run(
-            ["git", "commit", "-m", f"Merge {branch} (squashed via controller)"],
-            capture_output=True,
-            text=True,
-            cwd=APPROVED_DIR,
-            timeout=30,
-        )
-        if commit_result.returncode != 0:
-            subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=APPROVED_DIR, capture_output=True)
-            git_restore_url(original_url)
-            return {"error": f"Commit failed: {commit_result.stderr}"}
-
-        # Push to origin
-        push_result = subprocess.run(
-            ["git", "push", "origin", "main"],
-            capture_output=True,
-            text=True,
-            cwd=APPROVED_DIR,
-            timeout=60,
-        )
-        if push_result.returncode != 0:
-            git_restore_url(original_url)
-            return {"error": f"Push failed: {push_result.stderr}"}
-
-        # Delete the remote branch
-        subprocess.run(
-            ["git", "push", "origin", "--delete", branch],
-            capture_output=True,
-            text=True,
-            cwd=APPROVED_DIR,
-            timeout=30,
-        )
-
-        git_restore_url(original_url)
-        audit_log("branch_merged", {"branch": branch})
-        return {"status": "merged", "branch": branch}
-
-    except Exception as e:
-        git_restore_url(original_url)
-        audit_log("branch_merge_error", {"branch": branch, "error": str(e)})
-        return {"error": str(e)}
-
-
-@app.post("/branches/{branch:path}/merge")
-@app.post("/controller/branches/{branch:path}/merge")
-async def merge_branch(
-    branch: str,
-    token: Optional[str] = Query(None),
-    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
-    authorization: Optional[str] = Header(None),
-):
-    """Merge a branch into main using git directly."""
-    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    audit_log("branch_merge_requested", {"branch": branch})
-
-    # Set up git authentication
-    original_url = git_setup_auth()
-
-    try:
-        # Fetch latest
-        subprocess.run(
-            ["git", "fetch", "--prune", "origin"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-
-        # Check for conflicts using merge-tree
-        conflict_check = subprocess.run(
-            ["git", "merge-tree", "--write-tree", "origin/main", f"origin/{branch}"],
-            capture_output=True,
-            text=True,
-            cwd=APPROVED_DIR,
-            timeout=30,
-        )
-
-        # merge-tree returns non-zero if there are conflicts
-        if conflict_check.returncode != 0:
-            conflict_files = []
-            for line in conflict_check.stdout.split("\n"):
-                if line.strip() and "CONFLICT" in line:
-                    conflict_files.append(line.strip())
-
-            error_msg = "Branch has merge conflicts with main. "
-            if conflict_files:
-                error_msg += f"Conflicts in: {'; '.join(conflict_files[:5])}"
-                if len(conflict_files) > 5:
-                    error_msg += f" (+{len(conflict_files) - 5} more)"
-            else:
-                error_msg += "Please resolve conflicts locally and push."
-
-            audit_log("branch_merge_conflict", {"branch": branch, "conflicts": conflict_files})
-            git_restore_url(original_url)
-            return {"error": error_msg, "has_conflicts": True, "conflict_files": conflict_files}
-
-        # Checkout main
-        checkout_result = subprocess.run(
-            ["git", "checkout", "main"],
-            capture_output=True,
-            text=True,
-            cwd=APPROVED_DIR,
-            timeout=30,
-        )
-        if checkout_result.returncode != 0:
-            git_restore_url(original_url)
-            return {"error": f"Failed to checkout main: {checkout_result.stderr}"}
-
-        # Pull latest main
-        pull_result = subprocess.run(
-            ["git", "pull", "origin", "main"],
-            capture_output=True,
-            text=True,
-            cwd=APPROVED_DIR,
-            timeout=60,
-        )
-        if pull_result.returncode != 0:
-            git_restore_url(original_url)
-            return {"error": f"Failed to pull main: {pull_result.stderr}"}
-
-        # Merge the branch (squash for cleaner history)
-        merge_result = subprocess.run(
-            ["git", "merge", "--squash", f"origin/{branch}"],
-            capture_output=True,
-            text=True,
-            cwd=APPROVED_DIR,
-            timeout=60,
-        )
-        if merge_result.returncode != 0:
-            # Reset on failure
-            subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=APPROVED_DIR, capture_output=True)
-            git_restore_url(original_url)
-            return {"error": f"Merge failed: {merge_result.stderr}"}
-
-        # Commit the squashed merge
-        commit_result = subprocess.run(
-            ["git", "commit", "-m", f"Merge {branch} (squashed via controller)"],
-            capture_output=True,
-            text=True,
-            cwd=APPROVED_DIR,
-            timeout=30,
-        )
-        if commit_result.returncode != 0:
-            subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=APPROVED_DIR, capture_output=True)
-            git_restore_url(original_url)
-            return {"error": f"Commit failed: {commit_result.stderr}"}
-
-        # Push to origin
-        push_result = subprocess.run(
-            ["git", "push", "origin", "main"],
-            capture_output=True,
-            text=True,
-            cwd=APPROVED_DIR,
-            timeout=60,
-        )
-        if push_result.returncode != 0:
-            git_restore_url(original_url)
-            return {"error": f"Push failed: {push_result.stderr}"}
-
-        # Delete the remote branch
-        subprocess.run(
-            ["git", "push", "origin", "--delete", branch],
-            capture_output=True,
-            text=True,
-            cwd=APPROVED_DIR,
-            timeout=30,
-        )
-
-        git_restore_url(original_url)
-        audit_log("branch_merged", {"branch": branch})
-        return {"status": "merged", "branch": branch}
-
-    except Exception as e:
-        git_restore_url(original_url)
-        audit_log("branch_merge_error", {"branch": branch, "error": str(e)})
-        return {"error": str(e)}
-
-
-@app.delete("/branches/{branch:path}")
-@app.post("/branches/{branch:path}/deny")
-@app.delete("/controller/branches/{branch:path}")
-@app.post("/controller/branches/{branch:path}/deny")
-async def deny_branch(
-    branch: str,
-    token: Optional[str] = Query(None),
-    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
-    authorization: Optional[str] = Header(None),
-):
-    """Deny (delete) a proposal branch without merging."""
-    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    # Only allow denying proposal branches
-    if not branch.startswith("proposal/"):
-        return {"error": "Can only deny proposal/* branches"}
-
-    audit_log("branch_deny_requested", {"branch": branch})
-
-    # Set up git authentication
-    original_url = git_setup_auth()
-
-    try:
-        # Fetch latest
-        subprocess.run(
-            ["git", "fetch", "--prune", "origin"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-
-        # Delete the remote branch
-        delete_result = subprocess.run(
-            ["git", "push", "origin", "--delete", branch],
-            capture_output=True,
-            text=True,
-            cwd=APPROVED_DIR,
-            timeout=30,
-        )
-
-        git_restore_url(original_url)
-
-        if delete_result.returncode != 0:
-            audit_log("branch_deny_error", {"branch": branch, "stderr": delete_result.stderr})
-            return {"error": f"Failed to delete branch: {delete_result.stderr}"}
-
-        audit_log("branch_denied", {"branch": branch})
-        return {"status": "denied", "branch": branch}
-
-    except Exception as e:
-        git_restore_url(original_url)
-        audit_log("branch_deny_error", {"branch": branch, "error": str(e)})
-        return {"error": str(e)}
 
 
 # ============================================================
@@ -7066,7 +4521,6 @@ async def snapshot_browse_save(
 # ============================================================
 
 GATEWAY_CONFIG_PATH = OPENCLAW_HOME / "openclaw.json"
-PROPOSED_CONFIG_PATH = Path("/srv/audit/proposed_config.json")
 KNOWN_GOOD_CONFIG_PATH = Path("/srv/audit/known_good_config.json")
 
 
@@ -7113,7 +4567,7 @@ def validate_gateway_config(config: dict) -> tuple[bool, list[str]]:
         try:
             result = subprocess.run(
                 cmd,
-                cwd=str(APPROVED_DIR),
+                cwd=str(CODE_DIR),
                 capture_output=True, text=True,
                 timeout=10,
                 env=env if not IS_LIMA_MODE else None,
@@ -7415,396 +4869,6 @@ async def gateway_config_revert(
 
 
 # ============================================================
-# Proposed Config (AI suggestions)
-# ============================================================
-
-MAX_CONFIG_SIZE = 1024 * 1024  # 1MB max config size
-MAX_REASON_LENGTH = 500
-
-
-@app.post("/config/propose")
-@app.post("/controller/config/propose")
-async def propose_config(
-    request: Request,
-):
-    """
-    AI can propose a config change. Only one proposal stored at a time.
-    New proposals overwrite existing ones. No auth required (localhost only).
-    """
-    # Check content length to prevent DoS
-    content_length = request.headers.get("content-length")
-    if content_length and int(content_length) > MAX_CONFIG_SIZE:
-        audit_log("config_propose_rejected", {"reason": "payload_too_large", "size": content_length})
-        raise HTTPException(status_code=413, detail=f"Payload too large. Max size: {MAX_CONFIG_SIZE} bytes")
-
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON")
-
-    config = body.get("config")
-    reason = body.get("reason", "No reason provided")
-
-    # Validate config is a dict
-    if not isinstance(config, dict):
-        audit_log("config_propose_rejected", {"reason": "config_not_dict", "type": type(config).__name__})
-        return {"error": "Config must be a JSON object (dict)"}
-
-    if not config:
-        return {"error": "No config provided"}
-
-    # Sanitize reason - truncate and strip control chars
-    if not isinstance(reason, str):
-        reason = "No reason provided"
-    reason = reason[:MAX_REASON_LENGTH].strip()
-    # Remove control characters except newlines
-    reason = ''.join(c for c in reason if c == '\n' or (ord(c) >= 32 and ord(c) != 127))
-
-    # Check serialized size
-    serialized = json.dumps(config)
-    if len(serialized) > MAX_CONFIG_SIZE:
-        audit_log("config_propose_rejected", {"reason": "config_too_large", "size": len(serialized)})
-        return {"error": f"Config too large. Max size: {MAX_CONFIG_SIZE} bytes"}
-
-    audit_log("config_proposed", {"reason": reason[:100], "keys": list(config.keys())})
-
-    try:
-        PROPOSED_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(PROPOSED_CONFIG_PATH, "w") as f:
-            json.dump({
-                "config": config,
-                "reason": reason,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }, f, indent=2)
-
-        # Auto-accept when auto_config flag set
-        if spice_auto_config():
-            result = _auto_apply_proposed_config()
-            if result.get("status") == "applied":
-                audit_log("config_auto_accepted", {"flags": get_spice_flags(), "keys": list(config.keys())})
-                return {"status": "auto_accepted", "message": "Config auto-applied (spice: auto_config)"}
-
-        return {"status": "proposed", "message": "Config proposal saved for review"}
-    except Exception as e:
-        audit_log("config_propose_error", {"error": str(e)})
-        return {"error": str(e)}
-
-
-@app.get("/config/proposed")
-@app.get("/controller/config/proposed")
-async def get_proposed_config(
-    token: Optional[str] = Query(None),
-    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
-    authorization: Optional[str] = Header(None),
-):
-    """Check if there's a pending config proposal."""
-    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    if not PROPOSED_CONFIG_PATH.exists():
-        return {"has_proposal": False}
-
-    try:
-        with open(PROPOSED_CONFIG_PATH) as f:
-            data = json.load(f)
-        return {
-            "has_proposal": True,
-            "config": data.get("config"),
-            "reason": data.get("reason"),
-            "timestamp": data.get("timestamp"),
-        }
-    except Exception as e:
-        return {"has_proposal": False, "error": str(e)}
-
-
-@app.delete("/config/proposed")
-@app.delete("/controller/config/proposed")
-async def delete_proposed_config(
-    token: Optional[str] = Query(None),
-    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
-    authorization: Optional[str] = Header(None),
-):
-    """Delete the pending config proposal."""
-    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    if PROPOSED_CONFIG_PATH.exists():
-        PROPOSED_CONFIG_PATH.unlink()
-        audit_log("config_proposal_deleted", {})
-        return {"status": "deleted"}
-    return {"status": "no_proposal"}
-
-
-@app.post("/config/apply-proposed")
-@app.post("/controller/config/apply-proposed")
-async def apply_proposed_config(
-    token: Optional[str] = Query(None),
-    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
-    authorization: Optional[str] = Header(None),
-):
-    """Deep-merge the pending proposal into the current config, save, restart gateway, then delete the proposal."""
-    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    if not PROPOSED_CONFIG_PATH.exists():
-        return {"error": "No pending proposal"}
-
-    try:
-        with open(PROPOSED_CONFIG_PATH) as f:
-            proposal = json.load(f)
-    except Exception as e:
-        return {"error": f"Failed to read proposal: {e}"}
-
-    proposed_config = proposal.get("config")
-    if not proposed_config or not isinstance(proposed_config, dict):
-        return {"error": "Invalid proposal (no config)"}
-
-    # Read current config
-    if not GATEWAY_CONFIG_PATH.exists():
-        return {"error": "Gateway config not found"}
-
-    try:
-        with open(GATEWAY_CONFIG_PATH) as f:
-            current = json.load(f)
-    except Exception as e:
-        return {"error": f"Failed to read current config: {e}"}
-
-    # Deep merge with list-aware handling for agents.list (merge by id)
-    def _deep_merge(base: dict, patch: dict, path: str = "") -> dict:
-        out = {**base}
-        for k, v in patch.items():
-            key_path = f"{path}.{k}" if path else k
-            if isinstance(v, dict) and isinstance(out.get(k), dict):
-                out[k] = _deep_merge(out[k], v, key_path)
-            elif isinstance(v, list) and isinstance(out.get(k), list) and key_path == "agents.list":
-                # Merge agent lists by id: update existing, append new
-                existing = {item["id"]: item for item in out[k] if isinstance(item, dict) and "id" in item}
-                for item in v:
-                    if isinstance(item, dict) and "id" in item:
-                        existing[item["id"]] = item
-                out[k] = list(existing.values())
-            else:
-                out[k] = v
-        return out
-
-    merged = _deep_merge(current, proposed_config)
-    merged.setdefault("meta", {})["lastTouchedAt"] = datetime.now(timezone.utc).isoformat()
-
-    # Validate merged config before applying
-    valid, errors = validate_gateway_config(merged)
-    if not valid:
-        audit_log("config_apply_proposed_rejected", {"errors": errors, "keys": list(proposed_config.keys())})
-        return {"error": "Config validation failed", "validation_errors": errors}
-
-    changed_keys = list(proposed_config.keys())
-    audit_log("config_apply_proposed", {"keys": changed_keys, "reason": proposal.get("reason", "")})
-
-    # Save backup, stop gateway, write config, start gateway
-    try:
-        import shutil
-        if GATEWAY_CONFIG_PATH.exists():
-            KNOWN_GOOD_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(GATEWAY_CONFIG_PATH, KNOWN_GOOD_CONFIG_PATH)
-
-        gateway_stop()
-
-        with open(GATEWAY_CONFIG_PATH, "w") as f:
-            json.dump(merged, f, indent=2)
-
-        gateway_start()
-    except Exception as e:
-        audit_log("config_apply_proposed_error", {"error": str(e)})
-        return {"error": f"Failed to apply: {e}"}
-
-    # Only delete proposal after successful save + restart
-    try:
-        PROPOSED_CONFIG_PATH.unlink()
-    except Exception:
-        pass
-
-    audit_log("config_apply_proposed_success", {"keys": changed_keys})
-    return {"status": "applied", "keys": changed_keys}
-
-
-# ============================================================
-# Spice Mode Auto-Accept
-# ============================================================
-
-def _auto_apply_proposed_config() -> dict:
-    """Apply a pending config proposal without auth (internal use for spice mode)."""
-    if not PROPOSED_CONFIG_PATH.exists():
-        return {"status": "no_proposal"}
-
-    try:
-        with open(PROPOSED_CONFIG_PATH) as f:
-            proposal = json.load(f)
-    except Exception as e:
-        return {"error": f"Failed to read proposal: {e}"}
-
-    proposed_config = proposal.get("config")
-    if not proposed_config or not isinstance(proposed_config, dict):
-        return {"error": "Invalid proposal"}
-
-    if not GATEWAY_CONFIG_PATH.exists():
-        return {"error": "Gateway config not found"}
-
-    try:
-        with open(GATEWAY_CONFIG_PATH) as f:
-            current = json.load(f)
-    except Exception as e:
-        return {"error": f"Failed to read config: {e}"}
-
-    def _deep_merge(base: dict, patch: dict, path: str = "") -> dict:
-        out = {**base}
-        for k, v in patch.items():
-            key_path = f"{path}.{k}" if path else k
-            if isinstance(v, dict) and isinstance(out.get(k), dict):
-                out[k] = _deep_merge(out[k], v, key_path)
-            elif isinstance(v, list) and isinstance(out.get(k), list) and key_path == "agents.list":
-                existing = {item["id"]: item for item in out[k] if isinstance(item, dict) and "id" in item}
-                for item in v:
-                    if isinstance(item, dict) and "id" in item:
-                        existing[item["id"]] = item
-                out[k] = list(existing.values())
-            else:
-                out[k] = v
-        return out
-
-    merged = _deep_merge(current, proposed_config)
-    merged.setdefault("meta", {})["lastTouchedAt"] = datetime.now(timezone.utc).isoformat()
-
-    valid, errors = validate_gateway_config(merged)
-    if not valid:
-        audit_log("config_auto_accept_rejected", {"errors": errors})
-        return {"error": "Validation failed", "validation_errors": errors}
-
-    try:
-        if GATEWAY_CONFIG_PATH.exists():
-            KNOWN_GOOD_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(GATEWAY_CONFIG_PATH, KNOWN_GOOD_CONFIG_PATH)
-
-        gateway_stop()
-        with open(GATEWAY_CONFIG_PATH, "w") as f:
-            json.dump(merged, f, indent=2)
-        gateway_start()
-    except Exception as e:
-        audit_log("config_auto_accept_error", {"error": str(e)})
-        return {"error": str(e)}
-
-    try:
-        PROPOSED_CONFIG_PATH.unlink()
-    except Exception:
-        pass
-
-    return {"status": "applied", "keys": list(proposed_config.keys())}
-
-
-def _auto_merge_proposal_branches() -> dict:
-    """Merge all proposal/* branches without auth (internal use for spice mode)."""
-    try:
-        subprocess.run(["git", "fetch", "--prune", "origin"], cwd=APPROVED_DIR,
-                       capture_output=True, text=True, timeout=30)
-        result = subprocess.run(
-            ["git", "branch", "-r", "--list", "origin/proposal/*"],
-            cwd=APPROVED_DIR, capture_output=True, text=True,
-        )
-        branches = [b.strip() for b in result.stdout.strip().split("\n") if b.strip()]
-        if not branches:
-            return {"status": "no_branches"}
-
-        merged = []
-        failed = []
-        original_url = git_setup_auth()
-        try:
-            for remote_branch in branches:
-                branch_name = remote_branch.replace("origin/", "", 1)
-                try:
-                    # Check for conflicts first
-                    check = subprocess.run(
-                        ["git", "merge-tree", "--write-tree", "origin/main", remote_branch],
-                        cwd=APPROVED_DIR, capture_output=True, text=True,
-                    )
-                    if check.returncode != 0:
-                        failed.append({"branch": branch_name, "reason": "conflict"})
-                        continue
-
-                    subprocess.run(["git", "checkout", "main"], cwd=APPROVED_DIR, capture_output=True)
-                    merge_result = subprocess.run(
-                        ["git", "merge", "--squash", remote_branch],
-                        cwd=APPROVED_DIR, capture_output=True, text=True,
-                    )
-                    if merge_result.returncode != 0:
-                        subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=APPROVED_DIR, capture_output=True)
-                        failed.append({"branch": branch_name, "reason": "merge_failed"})
-                        continue
-
-                    commit_result = subprocess.run(
-                        ["git", "commit", "-m", f"Auto-merge {branch_name} (spice mode)"],
-                        cwd=APPROVED_DIR, capture_output=True, text=True,
-                    )
-                    if commit_result.returncode != 0:
-                        subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=APPROVED_DIR, capture_output=True)
-                        failed.append({"branch": branch_name, "reason": "commit_failed"})
-                        continue
-
-                    # Push main and delete the proposal branch
-                    subprocess.run(["git", "push", "origin", "main"], cwd=APPROVED_DIR,
-                                   capture_output=True, text=True, timeout=30)
-                    subprocess.run(["git", "push", "origin", "--delete", branch_name], cwd=APPROVED_DIR,
-                                   capture_output=True, text=True, timeout=30)
-
-                    merged.append(branch_name)
-                    audit_log("branch_auto_merged", {"branch": branch_name, "spice": get_spice_mode()})
-                except Exception as e:
-                    subprocess.run(["git", "checkout", "main"], cwd=APPROVED_DIR, capture_output=True)
-                    subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=APPROVED_DIR, capture_output=True)
-                    failed.append({"branch": branch_name, "reason": str(e)})
-        finally:
-            subprocess.run(["git", "checkout", "main"], cwd=APPROVED_DIR, capture_output=True)
-            git_restore_url(original_url)
-
-        return {"status": "done", "merged": merged, "failed": failed}
-    except Exception as e:
-        audit_log("auto_merge_error", {"error": str(e)})
-        return {"error": str(e)}
-
-
-async def _spice_auto_accept_loop():
-    """Background loop: check for pending proposals every 60 seconds per spice flags."""
-    while True:
-        await asyncio.sleep(60)
-        try:
-            flags = get_spice_flags()
-            if not any(flags.values()):
-                continue
-
-            # Auto-apply pending config proposals
-            if flags["auto_config"] and PROPOSED_CONFIG_PATH.exists():
-                result = _auto_apply_proposed_config()
-                if result.get("status") == "applied":
-                    audit_log("config_auto_accepted_periodic", {"keys": result.get("keys", [])})
-
-            # Auto-merge pending branch proposals
-            if flags["auto_merge"]:
-                result = _auto_merge_proposal_branches()
-                if result.get("merged"):
-                    audit_log("branches_auto_merged_periodic", {"merged": result["merged"]})
-                    # Auto-deploy after merge
-                    if flags["auto_deploy"]:
-                        if restart_gateway():
-                            audit_log("auto_deploy_periodic", {"merged": result["merged"]})
-                        else:
-                            audit_log("auto_deploy_failed_periodic", {"merged": result["merged"]})
-        except Exception as e:
-            audit_log("spice_auto_accept_error", {"error": str(e)})
-
-
-@app.on_event("startup")
-async def start_spice_loop():
-    asyncio.create_task(_spice_auto_accept_loop())
-
-
-# ============================================================
 # Gateway Pairing (Device + DM)
 # ============================================================
 
@@ -7815,7 +4879,7 @@ def run_gateway_command(cmd: list[str], timeout: int = 30) -> tuple[bool, str]:
             svc_user = f"openclaw-{INSTANCE_NAME}"
             result = subprocess.run(
                 ["sudo", "-u", svc_user] + cmd,
-                cwd=str(APPROVED_DIR),
+                cwd=str(CODE_DIR),
                 capture_output=True, text=True, timeout=timeout,
             )
             output = result.stdout + result.stderr
@@ -7855,7 +4919,7 @@ async def pull_upstream_endpoint(
     session: Optional[str] = Cookie(None, alias="clawfactory_session"),
     authorization: Optional[str] = Header(None),
 ):
-    """Pull latest OpenClaw from upstream (offline mode)."""
+    """Pull latest OpenClaw from upstream."""
     if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -7863,12 +4927,15 @@ async def pull_upstream_endpoint(
 
     try:
         # Ensure git user config is set for merge commits
-        git_ensure_config()
+        subprocess.run(["git", "config", "user.name", "ClawFactory Controller"],
+                       cwd=CODE_DIR, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "controller@clawfactory.local"],
+                       cwd=CODE_DIR, capture_output=True)
 
         # Check if upstream remote exists, add if not
         result = subprocess.run(
             ["git", "remote", "get-url", "upstream"],
-            cwd=APPROVED_DIR,
+            cwd=CODE_DIR,
             capture_output=True,
             text=True
         )
@@ -7876,7 +4943,7 @@ async def pull_upstream_endpoint(
             # Add upstream remote
             subprocess.run(
                 ["git", "remote", "add", "upstream", "https://github.com/openclaw/openclaw.git"],
-                cwd=APPROVED_DIR,
+                cwd=CODE_DIR,
                 capture_output=True,
                 text=True
             )
@@ -7884,7 +4951,7 @@ async def pull_upstream_endpoint(
         # Fetch upstream
         fetch_result = subprocess.run(
             ["git", "fetch", "upstream"],
-            cwd=APPROVED_DIR,
+            cwd=CODE_DIR,
             capture_output=True,
             text=True,
             timeout=120
@@ -7895,7 +4962,7 @@ async def pull_upstream_endpoint(
         # Merge upstream/main
         merge_result = subprocess.run(
             ["git", "merge", "upstream/main", "--no-edit", "-m", "Merge upstream OpenClaw"],
-            cwd=APPROVED_DIR,
+            cwd=CODE_DIR,
             capture_output=True,
             text=True,
             timeout=60
@@ -7920,7 +4987,7 @@ async def gateway_rebuild_endpoint(
     session: Optional[str] = Cookie(None, alias="clawfactory_session"),
     authorization: Optional[str] = Header(None),
 ):
-    """Rebuild and restart the gateway container (offline mode)."""
+    """Rebuild and restart the gateway container."""
     if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -7934,7 +5001,7 @@ async def gateway_rebuild_endpoint(
             svc_user = f"openclaw-{INSTANCE_NAME}"
             install_result = subprocess.run(
                 ["sudo", "-u", svc_user, "pnpm", "install", "--frozen-lockfile"],
-                cwd=str(APPROVED_DIR),
+                cwd=str(CODE_DIR),
                 capture_output=True, text=True, timeout=300,
             )
             if install_result.returncode != 0:
@@ -7943,7 +5010,7 @@ async def gateway_rebuild_endpoint(
 
             build_result = subprocess.run(
                 ["sudo", "-u", svc_user, "pnpm", "run", "build"],
-                cwd=str(APPROVED_DIR),
+                cwd=str(CODE_DIR),
                 capture_output=True, text=True, timeout=300,
             )
             if build_result.returncode != 0:
@@ -7964,7 +5031,7 @@ async def gateway_rebuild_endpoint(
             # Rebuild the image using docker compose
             rebuild_result = subprocess.run(
                 ["docker", "compose", "build", "--no-cache", "gateway"],
-                cwd=str(APPROVED_DIR.parent.parent.parent),  # Go up to clawfactory root
+                cwd=str(CODE_DIR.parent.parent.parent),  # Go up to clawfactory root
                 capture_output=True,
                 text=True,
                 timeout=600  # 10 minute timeout for build
@@ -7976,7 +5043,7 @@ async def gateway_rebuild_endpoint(
             # Start the gateway container
             start_result = subprocess.run(
                 ["docker", "compose", "up", "-d", "gateway"],
-                cwd=str(APPROVED_DIR.parent.parent.parent),
+                cwd=str(CODE_DIR.parent.parent.parent),
                 capture_output=True,
                 text=True,
                 timeout=60
@@ -7986,68 +5053,6 @@ async def gateway_rebuild_endpoint(
                 return {"error": f"Start failed: {start_result.stderr}"}
 
         return {"message": "Gateway rebuilt and restarted successfully"}
-    except subprocess.TimeoutExpired:
-        return {"error": "Operation timed out"}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@app.get("/local-changes")
-@app.get("/controller/local-changes")
-async def local_changes_endpoint(
-    token: Optional[str] = Query(None),
-    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
-    authorization: Optional[str] = Header(None),
-):
-    """Get uncommitted changes in approved directory."""
-    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    try:
-        # Get git status (porcelain for parsing)
-        status_result = subprocess.run(
-            ["git", "status", "--short"],
-            cwd=APPROVED_DIR,
-            capture_output=True, text=True, timeout=30,
-        )
-        files = [l for l in status_result.stdout.strip().split("\n") if l.strip()] if status_result.stdout.strip() else []
-
-        # Get diff stat
-        stat_result = subprocess.run(
-            ["git", "diff", "--stat"],
-            cwd=APPROVED_DIR,
-            capture_output=True, text=True, timeout=30,
-        )
-
-        # Get full diff
-        diff_result = subprocess.run(
-            ["git", "diff"],
-            cwd=APPROVED_DIR,
-            capture_output=True, text=True, timeout=30,
-        )
-
-        # Also include untracked file contents (new files not yet in git)
-        untracked_result = subprocess.run(
-            ["git", "diff", "--cached"],
-            cwd=APPROVED_DIR,
-            capture_output=True, text=True, timeout=30,
-        )
-
-        # Build combined changes string for backward compat
-        changes = ""
-        if status_result.stdout:
-            changes += "=== Status ===\n" + status_result.stdout + "\n"
-        if stat_result.stdout:
-            changes += "=== Changes ===\n" + stat_result.stdout
-
-        return {
-            "changes": changes.strip(),
-            "files": files,
-            "diff_stat": stat_result.stdout.strip(),
-            "diff": diff_result.stdout,
-            "diff_cached": untracked_result.stdout,
-            "file_count": len(files),
-        }
     except subprocess.TimeoutExpired:
         return {"error": "Operation timed out"}
     except Exception as e:
@@ -8309,10 +5314,7 @@ async def gateway_config_validate(
 # ============================================================
 # Internal Endpoints (gateway auth — GATEWAY_INTERNAL_TOKEN)
 # ============================================================
-# These endpoints are for the gateway (bot) to call.
-# They only expose safe operations (create/list snapshots, push proposals).
-# ============================================================
-# Settings: GitHub connection
+# Internal helpers
 # ============================================================
 
 def _read_env_file(path: Path) -> dict[str, str]:
@@ -8347,140 +5349,6 @@ def _write_env_file(path: Path, env: dict[str, str]):
     path.write_text("\n".join(lines) + "\n")
 
 
-@app.get("/settings/github")
-@app.get("/controller/settings/github")
-async def settings_github_get(
-    token: Optional[str] = Query(None),
-    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
-    authorization: Optional[str] = Header(None),
-):
-    """Get GitHub connection status."""
-    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    github_token = os.environ.get("GITHUB_TOKEN", "")
-    connected = bool(GITHUB_REPO and "/" in GITHUB_REPO and github_token)
-    masked = ""
-    if github_token:
-        masked = github_token[:4] + "..." + github_token[-4:] if len(github_token) > 8 else "***"
-    return {
-        "connected": connected,
-        "repo": GITHUB_REPO if connected else "",
-        "masked_token": masked,
-        "username": GIT_USER_NAME,
-        "email": GIT_USER_EMAIL,
-    }
-
-
-@app.post("/settings/github")
-@app.post("/controller/settings/github")
-async def settings_github_post(
-    request: Request,
-    token: Optional[str] = Query(None),
-    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
-    authorization: Optional[str] = Header(None),
-):
-    """Save GitHub connection settings."""
-    global GITHUB_REPO, OFFLINE_MODE, GIT_USER_NAME, GIT_USER_EMAIL
-
-    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    body = await request.json()
-    gh_token = body.get("token", "").strip()
-    repo = body.get("repo", "").strip()
-    username = body.get("username", "").strip() or "ClawFactory Controller"
-    email = body.get("email", "").strip() or "controller@clawfactory.local"
-
-    # Validate
-    if not gh_token:
-        return {"ok": False, "error": "GitHub token is required"}
-    if not (gh_token.startswith("ghp_") or gh_token.startswith("github_pat_")):
-        return {"ok": False, "error": "Token must start with ghp_ or github_pat_"}
-    if not repo or "/" not in repo:
-        return {"ok": False, "error": "Repo must be in owner/repo format"}
-
-    # Update controller.env on disk
-    env_path = SECRETS_DIR / "controller.env"
-    env = _read_env_file(env_path)
-    env["GITHUB_TOKEN"] = gh_token
-    env["GITHUB_REPO"] = repo
-    env["GIT_USER_NAME"] = username
-    env["GIT_USER_EMAIL"] = email
-    _write_env_file(env_path, env)
-
-    # Update in-memory state
-    os.environ["GITHUB_TOKEN"] = gh_token
-    os.environ["GITHUB_REPO"] = repo
-    GITHUB_REPO = repo
-    OFFLINE_MODE = not repo or "/" not in repo
-    GIT_USER_NAME = username
-    GIT_USER_EMAIL = email
-
-    # Configure git remote origin for the new repo
-    remote_url = f"https://github.com/{repo}.git"
-    try:
-        existing = subprocess.run(
-            ["git", "remote", "get-url", "origin"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-        )
-        if existing.returncode != 0:
-            # origin doesn't exist yet — add it
-            subprocess.run(
-                ["git", "remote", "add", "origin", remote_url],
-                cwd=APPROVED_DIR,
-                capture_output=True,
-                text=True,
-            )
-        elif existing.stdout.strip() != remote_url:
-            # origin exists but points to wrong repo — update it
-            subprocess.run(
-                ["git", "remote", "set-url", "origin", remote_url],
-                cwd=APPROVED_DIR,
-                capture_output=True,
-                text=True,
-            )
-    except Exception:
-        pass  # non-fatal — remote will be set up on next sync
-
-    audit_log("github_connected", {"repo": repo})
-    return {"ok": True}
-
-
-@app.delete("/settings/github")
-@app.delete("/controller/settings/github")
-async def settings_github_delete(
-    token: Optional[str] = Query(None),
-    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
-    authorization: Optional[str] = Header(None),
-):
-    """Disconnect GitHub - remove settings and switch to offline mode."""
-    global GITHUB_REPO, OFFLINE_MODE, GIT_USER_NAME, GIT_USER_EMAIL
-
-    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    # Remove from controller.env
-    env_path = SECRETS_DIR / "controller.env"
-    env = _read_env_file(env_path)
-    for key in ("GITHUB_TOKEN", "GITHUB_REPO", "GIT_USER_NAME", "GIT_USER_EMAIL"):
-        env.pop(key, None)
-    _write_env_file(env_path, env)
-
-    # Update in-memory state
-    os.environ.pop("GITHUB_TOKEN", None)
-    os.environ.pop("GITHUB_REPO", None)
-    GITHUB_REPO = ""
-    OFFLINE_MODE = True
-    GIT_USER_NAME = "ClawFactory Controller"
-    GIT_USER_EMAIL = "controller@clawfactory.local"
-
-    audit_log("github_disconnected", {})
-    return {"ok": True}
-
-
 # Dangerous operations (restore, delete, rebuild) require CONTROLLER_API_TOKEN.
 
 @app.post("/internal/snapshot")
@@ -8499,179 +5367,6 @@ async def internal_snapshot_list():
     return {"snapshots": list_snapshots()}
 
 
-class GitPushRequest(BaseModel):
-    branch: str
-
-
-@app.post("/internal/git/push")
-async def internal_git_push(
-    request: GitPushRequest,
-):
-    """Push a branch to origin - internal endpoint (no auth, localhost only).
-
-    Only allows pushing proposal/* branches for security.
-    The bot commits locally, then calls this to push.
-    """
-    branch = request.branch
-
-    # Security: Only allow proposal branches
-    if not branch.startswith("proposal/"):
-        audit_log("git_push_rejected", {"branch": branch, "reason": "not a proposal branch"})
-        raise HTTPException(
-            status_code=400,
-            detail="Only proposal/* branches can be pushed. Create a branch like 'proposal/my-change'"
-        )
-
-    # Validate branch name (no shell injection)
-    import re
-    if not re.match(r'^proposal/[a-zA-Z0-9_\-/]+$', branch):
-        audit_log("git_push_rejected", {"branch": branch, "reason": "invalid branch name"})
-        raise HTTPException(status_code=400, detail="Invalid branch name")
-
-    audit_log("git_push_requested", {"branch": branch})
-
-    try:
-        # Check if branch exists locally
-        result = subprocess.run(
-            ["git", "rev-parse", "--verify", branch],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            return {"error": f"Branch '{branch}' does not exist locally"}
-
-        # Get GitHub token from environment for authentication
-        github_token = os.environ.get("GITHUB_TOKEN", "")
-
-        # Build environment with credentials if available
-        push_env = os.environ.copy()
-        if github_token:
-            # Use token for HTTPS authentication
-            push_env["GIT_ASKPASS"] = "echo"
-            push_env["GIT_USERNAME"] = "x-access-token"
-            push_env["GIT_PASSWORD"] = github_token
-
-            # Configure git to use the token via credential helper
-            subprocess.run(
-                ["git", "config", "credential.helper", ""],
-                cwd=APPROVED_DIR,
-                capture_output=True,
-            )
-
-            # Get remote URL and inject token
-            remote_result = subprocess.run(
-                ["git", "remote", "get-url", "origin"],
-                cwd=APPROVED_DIR,
-                capture_output=True,
-                text=True,
-            )
-            remote_url = remote_result.stdout.strip()
-
-            # Convert https://github.com/... or git@github.com:... to https://x-access-token:TOKEN@github.com/...
-            if remote_url.startswith("https://github.com/"):
-                auth_url = remote_url.replace(
-                    "https://github.com/",
-                    f"https://x-access-token:{github_token}@github.com/"
-                )
-                # Temporarily set the authenticated URL
-                subprocess.run(
-                    ["git", "remote", "set-url", "origin", auth_url],
-                    cwd=APPROVED_DIR,
-                    capture_output=True,
-                )
-            # Handle SSH URLs (git@github.com:owner/repo.git)
-            elif remote_url.startswith("git@github.com:"):
-                repo_path = remote_url.replace("git@github.com:", "")
-                auth_url = f"https://x-access-token:{github_token}@github.com/{repo_path}"
-                # Temporarily set the authenticated URL
-                subprocess.run(
-                    ["git", "remote", "set-url", "origin", auth_url],
-                    cwd=APPROVED_DIR,
-                    capture_output=True,
-                )
-
-        # Push the branch
-        result = subprocess.run(
-            ["git", "push", "-u", "origin", branch],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-            timeout=60,
-            env=push_env,
-        )
-
-        # Restore original remote URL (remove token from URL)
-        if github_token and remote_url:
-            subprocess.run(
-                ["git", "remote", "set-url", "origin", remote_url],
-                cwd=APPROVED_DIR,
-                capture_output=True,
-            )
-
-        if result.returncode != 0:
-            audit_log("git_push_failed", {"branch": branch, "stderr": result.stderr})
-            return {
-                "error": f"Push failed: {result.stderr}",
-                "hint": "Check if GITHUB_TOKEN is configured in controller.env"
-            }
-
-        audit_log("git_push_success", {"branch": branch})
-        return {
-            "status": "pushed",
-            "branch": branch,
-            "output": result.stdout or result.stderr,
-        }
-
-    except subprocess.TimeoutExpired:
-        audit_log("git_push_timeout", {"branch": branch})
-        return {"error": "Push timed out"}
-    except Exception as e:
-        audit_log("git_push_error", {"branch": branch, "error": str(e)})
-        return {"error": str(e)}
-
-
-@app.get("/internal/git/status")
-async def internal_git_status():
-    """Get git status - internal endpoint (no auth, localhost only)."""
-    try:
-        # Get current branch
-        result = subprocess.run(
-            ["git", "branch", "--show-current"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-        )
-        current_branch = result.stdout.strip()
-
-        # Get status
-        result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-        )
-        changes = result.stdout.strip().split("\n") if result.stdout.strip() else []
-
-        # List local branches
-        result = subprocess.run(
-            ["git", "branch", "--list"],
-            cwd=APPROVED_DIR,
-            capture_output=True,
-            text=True,
-        )
-        branches = [b.strip().lstrip("* ") for b in result.stdout.strip().split("\n") if b.strip()]
-
-        return {
-            "current_branch": current_branch,
-            "changes": changes,
-            "branches": branches,
-            "approved_dir": str(APPROVED_DIR),
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-
 # ============================================================
 # Agent API
 # ============================================================
@@ -8687,9 +5382,9 @@ async def agent_write_file(
     authorization: Optional[str] = Header(None),
     agent_id: Optional[str] = Query(None),
 ):
-    """Write a file to the approved dir — agent-scoped (requires AGENT_API_TOKEN).
+    """Write a file to the code dir — agent-scoped (requires AGENT_API_TOKEN).
 
-    Path is relative to APPROVED_DIR. Only allows writing inside it.
+    Path is relative to CODE_DIR. Only allows writing inside it.
     When agent_id is provided, writes are restricted to that agent's workspace.
     """
     if not check_agent_auth(token, authorization):
@@ -8724,11 +5419,11 @@ async def agent_write_file(
         audit_log("agent_file_rejected", {"path": filepath, "reason": "blocked_directory"})
         raise HTTPException(status_code=400, detail="Cannot write to protected directories (.git, node_modules, .github/workflows)")
 
-    # Block writing outside approved dir (resolve follows symlinks)
-    target = (APPROVED_DIR / filepath).resolve()
-    if not str(target).startswith(str(APPROVED_DIR.resolve())):
-        audit_log("agent_file_rejected", {"path": filepath, "reason": "outside_approved_dir"})
-        raise HTTPException(status_code=400, detail="Path resolves outside approved directory")
+    # Block writing outside code dir (resolve follows symlinks)
+    target = (CODE_DIR / filepath).resolve()
+    if not str(target).startswith(str(CODE_DIR.resolve())):
+        audit_log("agent_file_rejected", {"path": filepath, "reason": "outside_code_dir"})
+        raise HTTPException(status_code=400, detail="Path resolves outside code directory")
 
     # Block sensitive files
     basename = target.name.lower()
@@ -8755,10 +5450,10 @@ async def agent_write_file(
         svc_user = f"openclaw-{INSTANCE_NAME}"
         try:
             shutil.chown(str(target), user=svc_user, group=svc_user)
-            # Also fix any newly-created parent dirs between APPROVED_DIR and target
+            # Also fix any newly-created parent dirs between CODE_DIR and target
             p = target.parent
-            approved_resolved = APPROVED_DIR.resolve()
-            while p.resolve() != approved_resolved and str(p.resolve()).startswith(str(approved_resolved)):
+            code_resolved = CODE_DIR.resolve()
+            while p.resolve() != code_resolved and str(p.resolve()).startswith(str(code_resolved)):
                 shutil.chown(str(p), user=svc_user, group=svc_user)
                 p = p.parent
         except (LookupError, OSError):
@@ -8777,16 +5472,16 @@ async def agent_read_file(
     token: Optional[str] = Query(None),
     authorization: Optional[str] = Header(None),
 ):
-    """Read a file from the approved dir — agent-scoped (requires AGENT_API_TOKEN)."""
+    """Read a file from the code dir — agent-scoped (requires AGENT_API_TOKEN)."""
     if not check_agent_auth(token, authorization):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     if ".." in filepath or filepath.startswith("/"):
         raise HTTPException(status_code=400, detail="Invalid path")
 
-    target = (APPROVED_DIR / filepath).resolve()
-    if not str(target).startswith(str(APPROVED_DIR.resolve())):
-        raise HTTPException(status_code=400, detail="Path resolves outside approved directory")
+    target = (CODE_DIR / filepath).resolve()
+    if not str(target).startswith(str(CODE_DIR.resolve())):
+        raise HTTPException(status_code=400, detail="Path resolves outside code directory")
 
     if not target.exists():
         raise HTTPException(status_code=404, detail="File not found")

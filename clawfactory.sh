@@ -73,55 +73,6 @@ if [[ -f "$CONTROLLER_ENV" ]]; then
 fi
 export GATEWAY_PORT CONTROLLER_PORT
 
-# --- GitHub PAT for bot repo remotes ---
-GITHUB_PAT_FILE="${SCRIPT_DIR}/secrets/github.pat"
-
-# Ensure bot repo remote has credentials embedded
-ensure_bot_remote() {
-    local instance="${1:-$INSTANCE_NAME}"
-    local repo_dir="${SCRIPT_DIR}/bot_repos/${instance}/approved"
-
-    [[ -d "$repo_dir/.git" ]] || return 0
-
-    local current_remote
-    current_remote=$(git -C "$repo_dir" remote get-url origin 2>/dev/null || true)
-    [[ -n "$current_remote" ]] || return 0
-
-    # Already has credentials embedded
-    if [[ "$current_remote" == *"x-access-token:"* ]]; then
-        # Check if the PAT file exists and differs from what's in the URL
-        if [[ -f "$GITHUB_PAT_FILE" ]]; then
-            local stored_pat
-            stored_pat=$(cat "$GITHUB_PAT_FILE")
-            local url_pat
-            url_pat=$(echo "$current_remote" | sed -n 's|.*x-access-token:\([^@]*\)@.*|\1|p')
-            if [[ "$url_pat" != "$stored_pat" ]]; then
-                # Update with newer PAT
-                local clean_url
-                clean_url=$(echo "$current_remote" | sed 's|https://[^@]*@|https://|')
-                local new_url="https://x-access-token:${stored_pat}@${clean_url#https://}"
-                git -C "$repo_dir" remote set-url origin "$new_url"
-                echo "Updated credentials for ${instance} bot repo"
-            fi
-        fi
-        return 0
-    fi
-
-    # No credentials — inject PAT if available
-    if [[ ! -f "$GITHUB_PAT_FILE" ]]; then
-        echo "Warning: ${instance} bot repo has no credentials on remote URL"
-        echo "  Create secrets/github.pat with a PAT that has 'repo' + 'workflow' scopes"
-        echo "  echo 'ghp_your_token_here' > ${GITHUB_PAT_FILE} && chmod 600 ${GITHUB_PAT_FILE}"
-        return 0
-    fi
-
-    local pat
-    pat=$(cat "$GITHUB_PAT_FILE")
-    local new_url="https://x-access-token:${pat}@${current_remote#https://}"
-    git -C "$repo_dir" remote set-url origin "$new_url"
-    echo "Added credentials to ${instance} bot repo remote"
-}
-
 # Source Lima helpers if in lima mode
 if [[ "$SANDBOX_MODE" == "lima" ]]; then
     if [[ -f "${SCRIPT_DIR}/sandbox/lima/vm.sh" ]]; then
@@ -230,7 +181,6 @@ print_urls() {
 # ============================================================
 case "${1:-help}" in
     start)
-        ensure_bot_remote
         if [[ "$SANDBOX_MODE" == "lima" ]]; then
             lima_ensure
             lima_sync
@@ -298,7 +248,6 @@ case "${1:-help}" in
         fi
         ;;
     rebuild)
-        ensure_bot_remote
         if [[ "$SANDBOX_MODE" == "lima" ]]; then
             echo "Rebuilding ClawFactory [${INSTANCE_NAME}] in Lima VM..."
             lima_sync
@@ -482,49 +431,6 @@ case "${1:-help}" in
             echo "Controller token: ${!ctrl_var:-<not set>}"
         fi
         ;;
-    remote)
-        REPO_DIR="${SCRIPT_DIR}/bot_repos/${INSTANCE_NAME}/approved"
-        if [[ ! -d "$REPO_DIR" ]]; then
-            echo "Error: Instance directory not found: $REPO_DIR"
-            exit 1
-        fi
-        SAVED_INSTANCE="${INSTANCE_NAME}"
-        if [[ -f "${SCRIPT_DIR}/.env" ]]; then
-            source "${SCRIPT_DIR}/.env"
-        fi
-        INSTANCE_NAME="${SAVED_INSTANCE}"
-        GITHUB_OWNER="${GITHUB_ORG:-${GITHUB_USERNAME:-}}"
-
-        current_remote=$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null || echo "")
-        echo "Instance: ${INSTANCE_NAME}"
-        echo "Current remote: ${current_remote:-<not set>}"
-
-        if [[ "${2:-}" == "fix" || "${2:-}" == "set" ]]; then
-            if [[ -z "$GITHUB_OWNER" ]]; then
-                echo ""
-                echo "Error: No GITHUB_ORG or GITHUB_USERNAME in .env"
-                echo "Set one in ${SCRIPT_DIR}/.env first"
-                exit 1
-            fi
-            expected_remote="https://github.com/${GITHUB_OWNER}/${INSTANCE_NAME}-bot.git"
-            echo "Setting remote to: $expected_remote"
-            git -C "$REPO_DIR" remote set-url origin "$expected_remote" 2>/dev/null || \
-                git -C "$REPO_DIR" remote add origin "$expected_remote"
-            echo "Remote updated"
-        else
-            if [[ -n "$GITHUB_OWNER" ]]; then
-                expected_remote="https://github.com/${GITHUB_OWNER}/${INSTANCE_NAME}-bot.git"
-                echo "Expected remote: $expected_remote"
-                current_clean=$(echo "$current_remote" | sed 's|https://[^@]*@|https://|')
-                if [[ "$current_clean" != "$expected_remote" && "$current_clean" != "${expected_remote%.git}" ]]; then
-                    echo ""
-                    echo "Remote mismatch! Run './clawfactory.sh -i ${INSTANCE_NAME} remote fix' to correct"
-                else
-                    echo "Remote is correct"
-                fi
-            fi
-        fi
-        ;;
     bots|list)
         echo "=== Saved Bots ==="
         echo ""
@@ -533,7 +439,6 @@ case "${1:-help}" in
             for d in "${SCRIPT_DIR}"/bot_repos/*/; do
                 if [[ -d "$d" ]]; then
                     name=$(basename "$d")
-                    ensure_bot_remote "$name" 2>/dev/null
                     has_secrets="no"
                     has_snapshots="no"
                     gw_port="-"
@@ -574,7 +479,7 @@ case "${1:-help}" in
         fi
         ;;
     update)
-        repo="${SCRIPT_DIR}/bot_repos/${INSTANCE_NAME}/approved"
+        repo="${SCRIPT_DIR}/bot_repos/${INSTANCE_NAME}/code"
         if [[ ! -d "$repo/.git" ]]; then
             echo "Error: No git repo found at $repo" >&2
             exit 1
@@ -616,12 +521,6 @@ case "${1:-help}" in
         fi
         ;;
     init)
-        # Load .env for GITHUB_ORG
-        if [[ -f "${SCRIPT_DIR}/.env" ]]; then
-            source "${SCRIPT_DIR}/.env"
-        fi
-        GITHUB_OWNER="${GITHUB_ORG:-${GITHUB_USERNAME:-}}"
-
         echo "=== ClawFactory Bot Setup ==="
         echo ""
         echo "  1) Create a new bot"
@@ -647,23 +546,16 @@ case "${1:-help}" in
                 echo "Creating instance: ${new_name}"
 
                 # Create directories
-                mkdir -p "${SCRIPT_DIR}/bot_repos/${new_name}/"{approved,state}
+                mkdir -p "${SCRIPT_DIR}/bot_repos/${new_name}/"{code,state}
                 mkdir -p "${SCRIPT_DIR}/secrets/${new_name}"
                 mkdir -p "${SCRIPT_DIR}/snapshots/${new_name}"
 
                 # Clone OpenClaw
                 echo "Cloning OpenClaw..."
-                git clone https://github.com/openclaw/openclaw.git "${SCRIPT_DIR}/bot_repos/${new_name}/approved"
+                git clone https://github.com/openclaw/openclaw.git "${SCRIPT_DIR}/bot_repos/${new_name}/code"
 
-                # Set origin for bot repo
-                if [[ -n "$GITHUB_OWNER" ]]; then
-                    git -C "${SCRIPT_DIR}/bot_repos/${new_name}/approved" remote set-url origin \
-                        "https://github.com/${GITHUB_OWNER}/${new_name}-bot.git"
-                    echo "Origin set to: https://github.com/${GITHUB_OWNER}/${new_name}-bot.git"
-                fi
-
-                # Add upstream remote
-                git -C "${SCRIPT_DIR}/bot_repos/${new_name}/approved" remote add upstream \
+                # Add upstream remote for future updates
+                git -C "${SCRIPT_DIR}/bot_repos/${new_name}/code" remote add upstream \
                     https://github.com/openclaw/openclaw.git 2>/dev/null || true
                 echo "Upstream remote added"
 
@@ -689,9 +581,6 @@ ENVEOF
                 else
                     echo "Warning: age-keygen not found — snapshot encryption key not generated"
                 fi
-
-                # Inject PAT if available
-                ensure_bot_remote "$new_name"
 
                 echo ""
                 echo "Instance '${new_name}' created successfully!"
@@ -761,16 +650,10 @@ ENVEOF
                 echo ""
                 echo "Cloning '${src_name}' → '${clone_name}'..."
 
-                # Copy approved code
+                # Copy code
                 mkdir -p "${SCRIPT_DIR}/bot_repos/${clone_name}"
-                cp -a "${SCRIPT_DIR}/bot_repos/${src_name}/approved" "${SCRIPT_DIR}/bot_repos/${clone_name}/approved"
+                cp -a "${SCRIPT_DIR}/bot_repos/${src_name}/code" "${SCRIPT_DIR}/bot_repos/${clone_name}/code"
                 mkdir -p "${SCRIPT_DIR}/bot_repos/${clone_name}/state"
-
-                # Reset origin for new instance
-                if [[ -n "$GITHUB_OWNER" ]]; then
-                    git -C "${SCRIPT_DIR}/bot_repos/${clone_name}/approved" remote set-url origin \
-                        "https://github.com/${GITHUB_OWNER}/${clone_name}-bot.git"
-                fi
 
                 # Generate fresh secrets
                 mkdir -p "${SCRIPT_DIR}/secrets/${clone_name}"
@@ -801,9 +684,6 @@ ENVEOF
                     echo "CONTROLLER_PORT=${next_ctrl}" >> "${SCRIPT_DIR}/secrets/${clone_name}/controller.env"
                     echo "Assigned ports: Controller=${next_ctrl}, Gateway=${next_gw}"
                 fi
-
-                # Inject PAT
-                ensure_bot_remote "$clone_name"
 
                 # Offer snapshot restore
                 echo ""
@@ -975,7 +855,6 @@ ENVEOF
         echo "  openclaw <args> Run OpenClaw CLI (e.g. openclaw onboard)"
         echo "  init            Interactive new bot / clone setup"
         echo "  info            Show instance info and tokens"
-        echo "  remote [fix]    Show/fix git remote URL"
         echo "  bots            List all saved bots"
         echo "  mount           Manage host mounts (add/remove/list)"
         echo "  tunnels [cmd]   SSH tunnels (start/stop/status)"

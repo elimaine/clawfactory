@@ -88,18 +88,14 @@ lima_sync() {
 
     # Sync bot_repos for this instance
     if [[ -d "${cf_root}/bot_repos/${instance}" ]]; then
-        _lima_exec mkdir -p "${staging}/bot_repos/${instance}/approved"
-
-        # Write git SHA marker so the controller can show the active commit
-        git -C "${cf_root}/bot_repos/${instance}/approved" rev-parse HEAD \
-            > "${cf_root}/bot_repos/${instance}/approved/.git-sha" 2>/dev/null || true
+        _lima_exec mkdir -p "${staging}/bot_repos/${instance}/code"
 
         rsync -av --delete \
             --exclude 'node_modules' \
             --exclude '.DS_Store' \
             -e "$rsh" \
-            "${cf_root}/bot_repos/${instance}/approved/" \
-            "${LIMA_SSH_HOST}:${staging}/bot_repos/${instance}/approved/"
+            "${cf_root}/bot_repos/${instance}/code/" \
+            "${LIMA_SSH_HOST}:${staging}/bot_repos/${instance}/code/"
 
         # State directory is NOT synced from host.
         # Snapshots are the source of truth for bot state.
@@ -128,7 +124,7 @@ lima_sync() {
             --exclude '.pnpm-lock-hash' \
             --exclude 'snapshots' \
             --exclude 'bot_repos/*/state' \
-            --exclude 'bot_repos/*/approved/dist' \
+            --exclude 'bot_repos/*/code/dist' \
             --exclude 'audit' \
             --exclude 'mitm-ca' \
             ${staging}/ ${LIMA_SRV}/
@@ -169,8 +165,8 @@ lima_sync_watch() {
     fi
 
     local watch_dirs=("${SCRIPT_DIR}/controller" "${SCRIPT_DIR}/proxy")
-    if [[ -d "${SCRIPT_DIR}/bot_repos/${instance}/approved" ]]; then
-        watch_dirs+=("${SCRIPT_DIR}/bot_repos/${instance}/approved")
+    if [[ -d "${SCRIPT_DIR}/bot_repos/${instance}/code" ]]; then
+        watch_dirs+=("${SCRIPT_DIR}/bot_repos/${instance}/code")
     fi
 
     echo "[sync] Watching for changes (instance: ${instance})..."
@@ -250,13 +246,13 @@ _lima_fix_docker_paths() {
 lima_build() {
     local instance="${INSTANCE_NAME:-default}"
     local staging="/tmp/cf-sync"
-    local src_dir="${staging}/bot_repos/${instance}/approved"
+    local src_dir="${staging}/bot_repos/${instance}/code"
     echo "Building (instance: ${instance})..."
 
     # --- Node.js dependencies ---
     local needs_install="yes"
     local vm_hash
-    vm_hash=$(_lima_root "cat ${LIMA_SRV}/bot_repos/${instance}/approved/.pnpm-lock-hash 2>/dev/null" 2>/dev/null || true)
+    vm_hash=$(_lima_root "cat ${LIMA_SRV}/bot_repos/${instance}/code/.pnpm-lock-hash 2>/dev/null" 2>/dev/null || true)
     if [[ -n "$vm_hash" ]]; then
         local src_hash
         src_hash=$(_lima_exec bash -c "md5sum ${src_dir}/pnpm-lock.yaml 2>/dev/null | cut -d' ' -f1" 2>/dev/null || true)
@@ -278,11 +274,11 @@ lima_build() {
             _lima_root "
                 rsync -a --delete \
                     ${src_dir}/node_modules/ \
-                    ${LIMA_SRV}/bot_repos/${instance}/approved/node_modules/
+                    ${LIMA_SRV}/bot_repos/${instance}/code/node_modules/
             "
             # Cache lockfile hash
             _lima_exec bash -c "md5sum ${src_dir}/pnpm-lock.yaml 2>/dev/null | cut -d' ' -f1" | \
-                _lima_root "cat > ${LIMA_SRV}/bot_repos/${instance}/approved/.pnpm-lock-hash"
+                _lima_root "cat > ${LIMA_SRV}/bot_repos/${instance}/code/.pnpm-lock-hash"
             echo "[build] Dependencies installed"
         else
             echo "[build] Dependencies up to date (skipped)"
@@ -290,14 +286,14 @@ lima_build() {
 
         echo "[build] Building OpenClaw..."
         _lima_root "
-            cd ${LIMA_SRV}/bot_repos/${instance}/approved
+            cd ${LIMA_SRV}/bot_repos/${instance}/code
             pnpm build 2>/dev/null || npm run build
         "
         echo "[build] OpenClaw built"
 
         echo "[build] Building Control UI..."
         _lima_root "
-            cd ${LIMA_SRV}/bot_repos/${instance}/approved
+            cd ${LIMA_SRV}/bot_repos/${instance}/code
             pnpm ui:build 2>/dev/null || npm run ui:build 2>/dev/null || echo '[build] No ui:build script found (skipped)'
         "
         echo "[build] Control UI built"
@@ -345,7 +341,7 @@ lima_services() {
 
         # Set up isolated directory ownership
         mkdir -p ${LIMA_SRV}/bot_repos/${instance}/state
-        mkdir -p ${LIMA_SRV}/bot_repos/${instance}/approved
+        mkdir -p ${LIMA_SRV}/bot_repos/${instance}/code
         chown -R ${svc_user}:${svc_user} ${LIMA_SRV}/bot_repos/${instance}/
         chmod 700 ${LIMA_SRV}/bot_repos/${instance}/
 
@@ -416,10 +412,6 @@ lima_services() {
         fi
     "
 
-    # Detect GITHUB_REPO from git remote (if available)
-    local github_repo=""
-    github_repo=$(_lima_root "cd ${LIMA_SRV}/bot_repos/${instance}/approved 2>/dev/null && git config --get remote.origin.url 2>/dev/null | sed -E 's|.*github.com[:/]||; s|\.git$||'" 2>/dev/null || true)
-
     # Create instance-specific systemd overrides
     _lima_root "
         # Gateway override — unique port, user, isolated state
@@ -450,11 +442,10 @@ EOF
 [Service]
 EnvironmentFile=${LIMA_SRV}/secrets/${instance}/controller.env
 EnvironmentFile=${LIMA_SRV}/secrets/${instance}/gateway.env
-Environment=APPROVED_DIR=${LIMA_SRV}/bot_repos/${instance}/approved
+Environment=CODE_DIR=${LIMA_SRV}/bot_repos/${instance}/code
 Environment=OPENCLAW_HOME=${LIMA_SRV}/bot_repos/${instance}/state
 Environment=AUDIT_LOG=${LIMA_SRV}/audit/audit.jsonl
 Environment=INSTANCE_NAME=${instance}
-Environment=GITHUB_REPO=${github_repo}
 Environment=GATEWAY_CONTAINER=local
 Environment=SNAPSHOTS_DIR=${LIMA_SRV}/snapshots/${instance}
 Environment=AGE_KEY=${LIMA_SRV}/secrets/${instance}/snapshot.key
@@ -627,7 +618,7 @@ lima_openclaw() {
             env HOME=/home/${svc_user} \
             OPENCLAW_STATE_DIR=${LIMA_SRV}/bot_repos/${instance}/state \
             \$(cat ${LIMA_SRV}/secrets/${instance}/gateway.env 2>/dev/null | grep -v '^#' | xargs) \
-            bash -c 'cd ${LIMA_SRV}/bot_repos/${instance}/approved && node openclaw.mjs $*'
+            bash -c 'cd ${LIMA_SRV}/bot_repos/${instance}/code && node openclaw.mjs $*'
     "
 }
 

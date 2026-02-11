@@ -13,7 +13,7 @@ When sandbox mode is enabled, the gateway container runs with Docker-in-Docker (
 
 ## How It Works
 
-1. The base gateway image is built from `bot_repos/{instance}/approved/Dockerfile`
+1. The base gateway image is built from `bot_repos/{instance}/code/Dockerfile`
 2. This sandbox layer adds Docker to that image
 3. Sysbox runtime provides secure nested container isolation
 4. The entrypoint starts dockerd before running the OpenClaw gateway
