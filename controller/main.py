@@ -1756,6 +1756,10 @@ async def promote_ui(
                     const activeSubTab = document.querySelector('.sub-tab.active');
                     if (activeSubTab && activeSubTab.textContent === 'Traffic') fetchTraffic();
                 }}
+                // Auto-load snapshots when switching to snapshots
+                if (name === 'snapshots') {{
+                    fetchSnapshots();
+                }}
                 // Auto-load GitHub settings when switching to settings
                 if (name === 'settings') {{
                     loadGitHubSettings();
@@ -3403,11 +3407,12 @@ async def promote_ui(
                     function mkAct(label, color, handler) {{
                         const s = document.createElement('span');
                         s.textContent = label;
-                        s.title = label === '\u270e' ? 'Rename' : label === '\u29c9' ? 'Duplicate' : 'Delete';
+                        s.title = label === '\u2b07' ? 'Download' : label === '\u270e' ? 'Rename' : label === '\u29c9' ? 'Duplicate' : 'Delete';
                         s.style.cssText = 'cursor:pointer; color:' + color + '; font-size:0.7rem;';
                         s.onclick = (e) => {{ e.stopPropagation(); handler(); }};
                         return s;
                     }}
+                    acts.appendChild(mkAct('\u2b07', '#4CAF50', () => downloadDir(path)));
                     acts.appendChild(mkAct('\u270e', '#888', () => renameItem(path)));
                     acts.appendChild(mkAct('\u29c9', '#888', () => duplicateItem(path)));
                     acts.appendChild(mkAct('\u2715', '#c62828', () => deleteItem(path)));
@@ -3638,6 +3643,11 @@ async def promote_ui(
             function downloadCurrentFile() {{
                 if (!sbCurrentPath || !sbWorkspaceId) return;
                 const url = basePath + '/snapshot/browse/file/download?workspace_id=' + encodeURIComponent(sbWorkspaceId) + '&path=' + encodeURIComponent(sbCurrentPath);
+                window.open(url, '_blank');
+            }}
+
+            function downloadDir(path) {{
+                const url = basePath + '/snapshot/browse/file/download?workspace_id=' + encodeURIComponent(sbWorkspaceId) + '&path=' + encodeURIComponent(path);
                 window.open(url, '_blank');
             }}
 
@@ -6328,6 +6338,21 @@ def duplicate_workspace_dir(workspace_id: str, src_path: str, dest_path: str) ->
     return {"status": "duplicated"}
 
 
+def download_workspace_dir(workspace_id: str, dir_path: str) -> Path:
+    """Create a temporary .tar.gz of a directory within the workspace."""
+    resolved = _validate_workspace_path(workspace_id, dir_path)
+    if not resolved.exists() or not resolved.is_dir():
+        raise HTTPException(status_code=404, detail="Directory not found")
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False)
+    tmp.close()
+    subprocess.run(
+        ["tar", "-C", str(resolved.parent), "-czf", tmp.name, resolved.name],
+        capture_output=True, text=True,
+    )
+    return Path(tmp.name)
+
+
 def save_workspace_as_snapshot(workspace_id: str, name: str = "") -> dict:
     """Create a new snapshot from workspace contents."""
     if workspace_id not in _snapshot_workspaces:
@@ -6928,9 +6953,18 @@ async def snapshot_browse_file_download(
     if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
         raise HTTPException(status_code=401, detail="Unauthorized")
     resolved = _validate_workspace_path(workspace_id, path)
-    if not resolved.exists() or resolved.is_dir():
+    if not resolved.exists():
         raise HTTPException(status_code=404, detail="File not found")
     from starlette.responses import FileResponse
+    if resolved.is_dir():
+        from starlette.background import BackgroundTask
+        tmp_path = download_workspace_dir(workspace_id, path)
+        return FileResponse(
+            str(tmp_path),
+            media_type="application/gzip",
+            filename=resolved.name + ".tar.gz",
+            background=BackgroundTask(lambda: tmp_path.unlink(missing_ok=True)),
+        )
     return FileResponse(str(resolved), media_type="application/octet-stream", filename=resolved.name)
 
 
