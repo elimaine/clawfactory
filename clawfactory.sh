@@ -208,16 +208,19 @@ print_urls() {
         echo "  Controller: http://localhost:${CONTROLLER_PORT}/controller"
     fi
 
-    # Print Tailscale URLs if available
-    local ts_ip=""
-    ts_ip=$(/Applications/Tailscale.app/Contents/MacOS/Tailscale ip --4 2>/dev/null || true)
-    if [[ -n "$ts_ip" ]]; then
-        if [[ -n "$GATEWAY_TOKEN" ]]; then
-            echo "  Tailnet:    http://${ts_ip}:${GATEWAY_PORT}/?token=${GATEWAY_TOKEN}"
-            echo "  Tailnet:    http://${ts_ip}:${CONTROLLER_PORT}/controller?token=${CONTROLLER_TOKEN}"
-        else
-            echo "  Tailnet:    http://${ts_ip}:${GATEWAY_PORT}"
-            echo "  Tailnet:    http://${ts_ip}:${CONTROLLER_PORT}/controller"
+    # Print Tailscale HTTPS URLs if available
+    local ts_bin="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+    if [[ -x "$ts_bin" ]]; then
+        local ts_hostname
+        ts_hostname=$("$ts_bin" status --self --json 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['Self']['DNSName'].rstrip('.'))" 2>/dev/null || true)
+        if [[ -n "$ts_hostname" ]]; then
+            if [[ -n "$GATEWAY_TOKEN" ]]; then
+                echo "  Tailnet:    https://${ts_hostname}/?token=${GATEWAY_TOKEN}"
+                echo "  Tailnet:    https://${ts_hostname}:8443/controller?token=${CONTROLLER_TOKEN}"
+            else
+                echo "  Tailnet:    https://${ts_hostname}/"
+                echo "  Tailnet:    https://${ts_hostname}:8443/controller"
+            fi
         fi
     fi
 }
@@ -601,6 +604,7 @@ case "${1:-help}" in
             lima_sync
             lima_build
             lima_services restart
+            lima_tunnels start
             echo "Update complete — [${INSTANCE_NAME}] redeployed"
             print_urls
         else
@@ -702,6 +706,7 @@ ENVEOF
                         lima_sync
                         lima_build
                         lima_services start
+                        lima_tunnels start
                         echo ""
                         echo "Running 'openclaw onboard' — follow the prompts to configure your bot..."
                         lima_openclaw onboard
@@ -842,6 +847,7 @@ ENVEOF
                         lima_sync
                         lima_build
                         lima_services start
+                        lima_tunnels start
                         # Restore snapshot if one was selected
                         if [[ -n "${chosen_snap:-}" ]]; then
                             echo "Restoring snapshot..."
@@ -907,6 +913,14 @@ ENVEOF
                 ;;
         esac
         ;;
+    mount)
+        if [[ "$SANDBOX_MODE" != "lima" ]]; then
+            echo "Mounts are only available in Lima sandbox mode"
+            exit 1
+        fi
+        lima_ensure
+        lima_mounts "${@:2}"
+        ;;
     tunnels)
         if [[ "$SANDBOX_MODE" != "lima" ]]; then
             echo "Tunnels are only available in Lima sandbox mode"
@@ -963,6 +977,7 @@ ENVEOF
         echo "  info            Show instance info and tokens"
         echo "  remote [fix]    Show/fix git remote URL"
         echo "  bots            List all saved bots"
+        echo "  mount           Manage host mounts (add/remove/list)"
         echo "  tunnels [cmd]   SSH tunnels (start/stop/status)"
         echo "  sync [watch]    Sync files to VM (watch: auto-sync on changes)"
         echo "  lima            Lima sandbox management"

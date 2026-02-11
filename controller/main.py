@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Optional
 
 import docker
-from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Cookie, Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
@@ -1036,6 +1036,14 @@ async def promote_ui(
         <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/foldgutter.min.js"></script>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/fold/brace-fold.min.js"></script>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/search/searchcursor.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/yaml/yaml.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/markdown/markdown.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/shell/shell.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/toml/toml.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/css/css.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/htmlmixed/htmlmixed.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/xml/xml.min.js"></script>
         <style>
             * {{ box-sizing: border-box; }}
             body {{ font-family: monospace; padding: 0; background: #1a1a1a; color: #e0e0e0; margin: 0; display: flex; min-height: 100vh; }}
@@ -1572,6 +1580,56 @@ async def promote_ui(
         </div>
 
         </div><!-- /page-snapshots -->
+
+        <!-- ==================== SNAPSHOT BROWSER OVERLAY ==================== -->
+        <div id="snapshot-browser-overlay" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:#1a1a1a; z-index:1000; flex-direction:column;">
+            <!-- Top bar -->
+            <div style="display:flex; align-items:center; gap:0.75rem; padding:0.5rem 1rem; background:#151515; border-bottom:1px solid #333; flex-shrink:0;">
+                <span style="color:#4CAF50; font-weight:bold; font-size:1.1rem;">Browse</span>
+                <span id="sb-snapshot-name" style="color:#888; font-size:0.9rem;"></span>
+                <div style="flex:1;"></div>
+                <input type="text" id="sb-save-name" placeholder="New snapshot name" style="width:200px; padding:0.3rem 0.5rem; background:#222; color:#eee; border:1px solid #444; border-radius:3px; font-family:monospace;">
+                <button onclick="saveWorkspaceAsSnapshot()" class="secondary" style="padding:0.3rem 0.75rem; font-size:0.85rem;">Save as New Snapshot</button>
+                <button onclick="closeSnapshotBrowser()" style="background:#c62828; padding:0.3rem 0.75rem; font-size:0.85rem;">Close</button>
+            </div>
+            <!-- Main content -->
+            <div style="display:flex; flex:1; overflow:hidden;">
+                <!-- Left panel: file tree -->
+                <div style="width:280px; min-width:280px; background:#1e1e1e; border-right:1px solid #333; display:flex; flex-direction:column; overflow:hidden;">
+                    <div style="padding:0.4rem 0.75rem; border-bottom:1px solid #333; display:flex; align-items:center; gap:0.5rem;">
+                        <span style="color:#888; font-size:0.8rem; flex:1;">FILES</span>
+                        <button onclick="refreshFileTree()" style="background:none; color:#888; border:none; padding:0.1rem 0.3rem; font-size:0.75rem; cursor:pointer;" title="Refresh">&#x21bb;</button>
+                    </div>
+                    <div id="sb-file-tree" style="flex:1; overflow-y:auto; padding:0.25rem 0; font-size:0.8rem;"></div>
+                    <div id="sb-drop-zone" style="padding:0.75rem; border-top:1px solid #333; text-align:center; color:#666; font-size:0.8rem; cursor:pointer; min-height:50px; display:flex; align-items:center; justify-content:center;"
+                         ondragover="handleDragOver(event)" ondrop="handleFileDrop(event)" ondragleave="this.style.borderColor='#333'; this.style.background='transparent';">
+                        Drop files here to upload
+                    </div>
+                </div>
+                <!-- Right panel: editor -->
+                <div style="flex:1; display:flex; flex-direction:column; overflow:hidden;">
+                    <!-- Editor toolbar -->
+                    <div id="sb-editor-toolbar" style="display:none; padding:0.3rem 0.75rem; background:#252525; border-bottom:1px solid #333; align-items:center; gap:0.5rem;">
+                        <span id="sb-current-file" style="color:#4CAF50; font-size:0.85rem; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"></span>
+                        <button onclick="saveCurrentFile()" id="sb-save-btn" style="padding:0.2rem 0.6rem; font-size:0.8rem;">Save File</button>
+                        <button onclick="downloadCurrentFile()" class="secondary" style="padding:0.2rem 0.6rem; font-size:0.8rem;">Download</button>
+                    </div>
+                    <!-- Editor area -->
+                    <div id="sb-editor-area" style="flex:1; overflow:hidden; display:flex; align-items:center; justify-content:center;">
+                        <div id="sb-welcome" style="color:#555; text-align:center;">
+                            <div style="font-size:1.5rem; margin-bottom:0.5rem;">&#128193;</div>
+                            <div>Select a file from the tree to view or edit</div>
+                        </div>
+                        <div id="sb-binary-msg" style="display:none; color:#888; text-align:center;">
+                            <div style="font-size:1.5rem; margin-bottom:0.5rem;">&#128230;</div>
+                            <div>Binary file — cannot edit</div>
+                            <button onclick="downloadCurrentFile()" class="secondary" style="margin-top:0.75rem;">Download</button>
+                        </div>
+                        <div id="sb-codemirror-wrap" style="display:none; width:100%; height:100%;"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
 
         <!-- ==================== SETTINGS PAGE ==================== -->
         <div id="page-settings" class="page">
@@ -3051,6 +3109,7 @@ async def promote_ui(
                                 <div><code style="font-size: 0.75rem; color: #666;">${{s.name}}</code> · <small style="color: #888;">${{formatSize(s.size)}}</small></div>
                             </div>
                             <div style="display: flex; gap: 0.3rem; flex-shrink: 0;">
+                                <button onclick="openSnapshotBrowser('${{s.name}}')" style="background: #2196F3; color: white; border: none; padding: 0.2rem 0.5rem; border-radius: 3px; cursor: pointer; font-size: 0.75rem;">Browse</button>
                                 <button onclick="renameSnapshot('${{s.name}}')" style="background: #555; color: white; border: none; padding: 0.2rem 0.5rem; border-radius: 3px; cursor: pointer; font-size: 0.75rem;">Rename</button>
                                 <button onclick="deleteSnapshot('${{s.name}}')" style="background: #c62828; color: white; border: none; padding: 0.2rem 0.5rem; border-radius: 3px; cursor: pointer; font-size: 0.75rem;">Delete</button>
                             </div>
@@ -3186,6 +3245,412 @@ async def promote_ui(
                 if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
                 return (bytes/(1024*1024)).toFixed(1) + ' MB';
             }}
+
+            // ==================== Snapshot Browser ====================
+            let sbWorkspaceId = null;
+            let sbEditor = null;
+            let sbCurrentPath = null;
+            let sbDirty = false;
+            let sbCollapsedDirs = {{}};
+
+            function getModeForFile(filename) {{
+                const ext = filename.split('.').pop().toLowerCase();
+                const modes = {{
+                    'js': 'javascript', 'mjs': 'javascript', 'cjs': 'javascript',
+                    'json': {{name: 'javascript', json: true}},
+                    'ts': 'javascript', 'tsx': 'javascript', 'jsx': 'javascript',
+                    'py': 'python', 'pyw': 'python',
+                    'sh': 'shell', 'bash': 'shell', 'zsh': 'shell',
+                    'yml': 'yaml', 'yaml': 'yaml',
+                    'md': 'markdown', 'markdown': 'markdown',
+                    'toml': 'toml',
+                    'css': 'css', 'scss': 'css', 'less': 'css',
+                    'html': 'htmlmixed', 'htm': 'htmlmixed',
+                    'xml': 'xml', 'svg': 'xml',
+                }};
+                return modes[ext] || null;
+            }}
+
+            async function openSnapshotBrowser(name) {{
+                const result = document.getElementById('snapshot-result');
+                result.style.display = 'block';
+                result.textContent = 'Opening snapshot browser...';
+                try {{
+                    const resp = await fetch(basePath + '/snapshot/browse/open', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ snapshot: name }})
+                    }});
+                    const data = await resp.json();
+                    if (data.detail) throw new Error(data.detail);
+                    sbWorkspaceId = data.workspace_id;
+                    document.getElementById('sb-snapshot-name').textContent = data.snapshot_name;
+                    document.getElementById('sb-save-name').value = '';
+                    document.getElementById('snapshot-browser-overlay').style.display = 'flex';
+                    result.style.display = 'none';
+                    sbCurrentPath = null;
+                    sbDirty = false;
+                    sbCollapsedDirs = {{}};
+                    showWelcome();
+                    await refreshFileTree();
+                    // Init CodeMirror if needed
+                    if (!sbEditor) {{
+                        const wrap = document.getElementById('sb-codemirror-wrap');
+                        sbEditor = CodeMirror(wrap, {{
+                            theme: 'material-darker',
+                            lineNumbers: true,
+                            matchBrackets: true,
+                            autoCloseBrackets: true,
+                            foldGutter: true,
+                            gutters: ['CodeMirror-linenumbers', 'CodeMirror-foldgutter'],
+                            readOnly: false,
+                            lineWrapping: true,
+                        }});
+                        sbEditor.on('change', () => {{ sbDirty = true; }});
+                    }}
+                }} catch(e) {{
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
+                }}
+            }}
+
+            async function closeSnapshotBrowser() {{
+                if (sbDirty && !confirm('You have unsaved changes. Close anyway?')) return;
+                if (sbWorkspaceId) {{
+                    try {{
+                        navigator.sendBeacon(basePath + '/snapshot/browse/close?token=' + encodeURIComponent(new URLSearchParams(window.location.search).get('token') || ''),
+                            new Blob([JSON.stringify({{workspace_id: sbWorkspaceId}})], {{type: 'application/json'}}));
+                    }} catch(e) {{}}
+                }}
+                sbWorkspaceId = null;
+                sbCurrentPath = null;
+                sbDirty = false;
+                document.getElementById('snapshot-browser-overlay').style.display = 'none';
+                fetchSnapshots();
+            }}
+
+            function showWelcome() {{
+                document.getElementById('sb-welcome').style.display = '';
+                document.getElementById('sb-binary-msg').style.display = 'none';
+                document.getElementById('sb-codemirror-wrap').style.display = 'none';
+                document.getElementById('sb-editor-toolbar').style.display = 'none';
+            }}
+
+            async function refreshFileTree() {{
+                if (!sbWorkspaceId) return;
+                const tree = document.getElementById('sb-file-tree');
+                tree.innerHTML = '<div style="padding:0.5rem; color:#888;">Loading...</div>';
+                try {{
+                    const resp = await fetch(basePath + '/snapshot/browse/files?workspace_id=' + encodeURIComponent(sbWorkspaceId));
+                    const data = await resp.json();
+                    if (data.detail) throw new Error(data.detail);
+                    const root = buildFileTree(data.files);
+                    tree.innerHTML = '';
+                    renderTree(root, tree, 0);
+                }} catch(e) {{
+                    tree.innerHTML = '<div style="padding:0.5rem; color:#ef9a9a;">Error: ' + e.message + '</div>';
+                }}
+            }}
+
+            function buildFileTree(files) {{
+                const root = {{ children: {{}}, files: [] }};
+                files.forEach(f => {{
+                    const parts = f.path.split('/');
+                    let node = root;
+                    if (f.is_dir) {{
+                        parts.forEach(p => {{
+                            if (!node.children[p]) node.children[p] = {{ children: {{}}, files: [] }};
+                            node = node.children[p];
+                        }});
+                        node._meta = f;
+                    }} else {{
+                        const dir = parts.slice(0, -1);
+                        dir.forEach(p => {{
+                            if (!node.children[p]) node.children[p] = {{ children: {{}}, files: [] }};
+                            node = node.children[p];
+                        }});
+                        node.files.push(f);
+                    }}
+                }});
+                return root;
+            }}
+
+            function renderTree(node, container, depth) {{
+                // Dirs first, sorted
+                const dirs = Object.keys(node.children).sort();
+                dirs.forEach(name => {{
+                    const child = node.children[name];
+                    const path = child._meta ? child._meta.path : name;
+                    const collapsed = sbCollapsedDirs[path];
+                    const div = document.createElement('div');
+                    const row = document.createElement('div');
+                    row.style.cssText = 'display:flex; align-items:center; padding:0.15rem 0.5rem; padding-left:' + (depth * 16 + 8) + 'px; cursor:pointer; color:#e0e0e0; white-space:nowrap;';
+                    row.onmouseover = () => {{ row.style.background = '#2a2a2a'; acts.style.visibility = 'visible'; }};
+                    row.onmouseout = () => {{ row.style.background = ''; acts.style.visibility = 'hidden'; }};
+
+                    const arrow = document.createElement('span');
+                    arrow.style.cssText = 'width:16px; text-align:center; flex-shrink:0; color:#888; font-size:0.7rem;';
+                    arrow.textContent = collapsed ? '\u25b6' : '\u25bc';
+                    row.appendChild(arrow);
+
+                    const label = document.createElement('span');
+                    label.style.cssText = 'flex:1; overflow:hidden; text-overflow:ellipsis; color:#90CAF9;';
+                    label.textContent = name;
+                    row.appendChild(label);
+
+                    const acts = document.createElement('span');
+                    acts.style.cssText = 'visibility:hidden; display:flex; gap:0.2rem; flex-shrink:0;';
+                    function mkAct(label, color, handler) {{
+                        const s = document.createElement('span');
+                        s.textContent = label;
+                        s.title = label === '\u270e' ? 'Rename' : label === '\u29c9' ? 'Duplicate' : 'Delete';
+                        s.style.cssText = 'cursor:pointer; color:' + color + '; font-size:0.7rem;';
+                        s.onclick = (e) => {{ e.stopPropagation(); handler(); }};
+                        return s;
+                    }}
+                    acts.appendChild(mkAct('\u270e', '#888', () => renameItem(path)));
+                    acts.appendChild(mkAct('\u29c9', '#888', () => duplicateItem(path)));
+                    acts.appendChild(mkAct('\u2715', '#c62828', () => deleteItem(path)));
+                    row.appendChild(acts);
+
+                    row.onclick = () => {{
+                        sbCollapsedDirs[path] = !sbCollapsedDirs[path];
+                        refreshFileTree();
+                    }};
+                    div.appendChild(row);
+
+                    if (!collapsed) {{
+                        const sub = document.createElement('div');
+                        renderTree(child, sub, depth + 1);
+                        div.appendChild(sub);
+                    }}
+                    container.appendChild(div);
+                }});
+
+                // Files, sorted
+                const files = (node.files || []).sort((a, b) => a.path.localeCompare(b.path));
+                files.forEach(f => {{
+                    const fname = f.path.split('/').pop();
+                    const row = document.createElement('div');
+                    row.style.cssText = 'display:flex; align-items:center; padding:0.15rem 0.5rem; padding-left:' + (depth * 16 + 24) + 'px; cursor:pointer; color:#e0e0e0; white-space:nowrap;';
+                    if (f.path === sbCurrentPath) row.style.background = '#2a3a2a';
+                    row.onmouseover = () => {{ if (f.path !== sbCurrentPath) row.style.background = '#2a2a2a'; acts.style.visibility = 'visible'; }};
+                    row.onmouseout = () => {{ if (f.path !== sbCurrentPath) row.style.background = ''; acts.style.visibility = 'hidden'; }};
+
+                    const icon = document.createElement('span');
+                    icon.style.cssText = 'width:16px; text-align:center; flex-shrink:0; color:#888; font-size:0.65rem;';
+                    icon.textContent = f.is_binary ? '\u25a0' : '\u25a1';
+                    row.appendChild(icon);
+
+                    const label = document.createElement('span');
+                    label.style.cssText = 'flex:1; overflow:hidden; text-overflow:ellipsis;';
+                    label.textContent = fname;
+                    row.appendChild(label);
+
+                    const size = document.createElement('span');
+                    size.style.cssText = 'color:#666; font-size:0.7rem; margin-left:0.5rem; flex-shrink:0;';
+                    size.textContent = formatSize(f.size);
+                    row.appendChild(size);
+
+                    const acts = document.createElement('span');
+                    acts.style.cssText = 'visibility:hidden; display:flex; gap:0.2rem; flex-shrink:0; margin-left:0.3rem;';
+                    const renBtn = document.createElement('span');
+                    renBtn.textContent = '\u270e';
+                    renBtn.title = 'Rename';
+                    renBtn.style.cssText = 'cursor:pointer; color:#888; font-size:0.7rem;';
+                    renBtn.onclick = (e) => {{ e.stopPropagation(); renameItem(f.path); }};
+                    acts.appendChild(renBtn);
+                    const delBtn = document.createElement('span');
+                    delBtn.textContent = '\u2715';
+                    delBtn.title = 'Delete';
+                    delBtn.style.cssText = 'cursor:pointer; color:#c62828; font-size:0.7rem;';
+                    delBtn.onclick = (e) => {{ e.stopPropagation(); deleteItem(f.path); }};
+                    acts.appendChild(delBtn);
+                    row.appendChild(acts);
+
+                    row.onclick = () => openFile(f.path);
+                    container.appendChild(row);
+                }});
+            }}
+
+            async function openFile(path) {{
+                if (sbDirty && sbCurrentPath && !confirm('Discard unsaved changes to ' + sbCurrentPath + '?')) return;
+                try {{
+                    const resp = await fetch(basePath + '/snapshot/browse/file?workspace_id=' + encodeURIComponent(sbWorkspaceId) + '&path=' + encodeURIComponent(path));
+                    const data = await resp.json();
+                    if (data.detail) throw new Error(data.detail);
+
+                    sbCurrentPath = path;
+                    document.getElementById('sb-current-file').textContent = path;
+                    document.getElementById('sb-editor-toolbar').style.display = 'flex';
+                    document.getElementById('sb-welcome').style.display = 'none';
+
+                    if (data.binary) {{
+                        document.getElementById('sb-binary-msg').style.display = '';
+                        document.getElementById('sb-codemirror-wrap').style.display = 'none';
+                        document.getElementById('sb-save-btn').style.display = 'none';
+                    }} else {{
+                        document.getElementById('sb-binary-msg').style.display = 'none';
+                        document.getElementById('sb-codemirror-wrap').style.display = '';
+                        document.getElementById('sb-save-btn').style.display = '';
+                        const mode = getModeForFile(path);
+                        sbEditor.setOption('mode', mode);
+                        sbEditor.setValue(data.content || '');
+                        sbDirty = false;
+                        setTimeout(() => sbEditor.refresh(), 10);
+                    }}
+                    refreshFileTree();
+                }} catch(e) {{
+                    alert('Error opening file: ' + e.message);
+                }}
+            }}
+
+            async function saveCurrentFile() {{
+                if (!sbCurrentPath || !sbWorkspaceId) return;
+                try {{
+                    const resp = await fetch(basePath + '/snapshot/browse/file', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ workspace_id: sbWorkspaceId, path: sbCurrentPath, content: sbEditor.getValue() }})
+                    }});
+                    const data = await resp.json();
+                    if (data.detail) throw new Error(data.detail);
+                    sbDirty = false;
+                    const btn = document.getElementById('sb-save-btn');
+                    const orig = btn.textContent;
+                    btn.textContent = 'Saved!';
+                    btn.style.background = '#2E7D32';
+                    setTimeout(() => {{ btn.textContent = orig; btn.style.background = ''; }}, 1500);
+                }} catch(e) {{
+                    alert('Save failed: ' + e.message);
+                }}
+            }}
+
+            async function renameItem(path) {{
+                const oldName = path.split('/').pop();
+                const newName = prompt('Rename "' + oldName + '" to:', oldName);
+                if (!newName || newName === oldName) return;
+                try {{
+                    const resp = await fetch(basePath + '/snapshot/browse/rename', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ workspace_id: sbWorkspaceId, path: path, new_name: newName }})
+                    }});
+                    const data = await resp.json();
+                    if (data.detail) throw new Error(data.detail);
+                    if (sbCurrentPath === path) {{ sbCurrentPath = null; showWelcome(); }}
+                    refreshFileTree();
+                }} catch(e) {{
+                    alert('Rename failed: ' + e.message);
+                }}
+            }}
+
+            async function duplicateItem(path) {{
+                const name = path.split('/').pop();
+                const ext = name.includes('.') ? '.' + name.split('.').pop() : '';
+                const base = ext ? name.slice(0, -ext.length) : name;
+                const destName = prompt('Duplicate "' + name + '" as:', base + '-copy' + ext);
+                if (!destName) return;
+                try {{
+                    const resp = await fetch(basePath + '/snapshot/browse/duplicate', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ workspace_id: sbWorkspaceId, path: path, dest_name: destName }})
+                    }});
+                    const data = await resp.json();
+                    if (data.detail) throw new Error(data.detail);
+                    refreshFileTree();
+                }} catch(e) {{
+                    alert('Duplicate failed: ' + e.message);
+                }}
+            }}
+
+            async function deleteItem(path) {{
+                if (!confirm('Delete "' + path.split('/').pop() + '"?')) return;
+                try {{
+                    const resp = await fetch(basePath + '/snapshot/browse/delete-file', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ workspace_id: sbWorkspaceId, path: path }})
+                    }});
+                    const data = await resp.json();
+                    if (data.detail) throw new Error(data.detail);
+                    if (sbCurrentPath === path) {{ sbCurrentPath = null; showWelcome(); }}
+                    refreshFileTree();
+                }} catch(e) {{
+                    alert('Delete failed: ' + e.message);
+                }}
+            }}
+
+            function handleDragOver(e) {{
+                e.preventDefault();
+                e.stopPropagation();
+                e.currentTarget.style.borderColor = '#4CAF50';
+                e.currentTarget.style.background = '#1a2a1a';
+            }}
+
+            async function handleFileDrop(e) {{
+                e.preventDefault();
+                e.stopPropagation();
+                e.currentTarget.style.borderColor = '#333';
+                e.currentTarget.style.background = 'transparent';
+                if (!sbWorkspaceId) return;
+                const files = e.dataTransfer.files;
+                for (let i = 0; i < files.length; i++) {{
+                    const file = files[i];
+                    const formData = new FormData();
+                    formData.append('workspace_id', sbWorkspaceId);
+                    formData.append('path', '');
+                    formData.append('file', file);
+                    try {{
+                        const resp = await fetch(basePath + '/snapshot/browse/upload', {{
+                            method: 'POST',
+                            body: formData
+                        }});
+                        const data = await resp.json();
+                        if (data.detail) throw new Error(data.detail);
+                    }} catch(err) {{
+                        alert('Upload failed for ' + file.name + ': ' + err.message);
+                    }}
+                }}
+                refreshFileTree();
+            }}
+
+            async function saveWorkspaceAsSnapshot() {{
+                if (!sbWorkspaceId) return;
+                const name = document.getElementById('sb-save-name').value.trim();
+                try {{
+                    const resp = await fetch(basePath + '/snapshot/browse/save', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ workspace_id: sbWorkspaceId, name: name }})
+                    }});
+                    const data = await resp.json();
+                    if (data.detail) throw new Error(data.detail);
+                    let msg = 'Snapshot created: ' + data.name + ' (' + formatSize(data.size) + ')';
+                    if (data.synced) msg += ' — synced to host';
+                    alert(msg);
+                }} catch(e) {{
+                    alert('Save failed: ' + e.message);
+                }}
+            }}
+
+            function downloadCurrentFile() {{
+                if (!sbCurrentPath || !sbWorkspaceId) return;
+                const url = basePath + '/snapshot/browse/file/download?workspace_id=' + encodeURIComponent(sbWorkspaceId) + '&path=' + encodeURIComponent(sbCurrentPath);
+                window.open(url, '_blank');
+            }}
+
+            window.addEventListener('beforeunload', (e) => {{
+                if (sbWorkspaceId) {{
+                    e.preventDefault();
+                    e.returnValue = '';
+                    try {{
+                        navigator.sendBeacon(basePath + '/snapshot/browse/close?token=' + encodeURIComponent(new URLSearchParams(window.location.search).get('token') || ''),
+                            new Blob([JSON.stringify({{workspace_id: sbWorkspaceId}})], {{type: 'application/json'}}));
+                    }} catch(ex) {{}}
+                }}
+            }});
 
             // Store config path for editor links
             let configHostPath = '';
@@ -3675,7 +4140,7 @@ async def promote_ui(
                 if (!config.models.providers) config.models.providers = {{}};
                 if (!config.models.providers.ollama) {{
                     config.models.providers.ollama = {{
-                        baseUrl: "{"http://localhost:11434/v1" if IS_LIMA_MODE else "http://host.docker.internal:11434/v1"}",
+                        baseUrl: "{"http://host.lima.internal:11434/v1" if IS_LIMA_MODE else "http://host.docker.internal:11434/v1"}",
                         apiKey: "ollama-local",
                         models: []
                     }};
@@ -5618,6 +6083,325 @@ def list_snapshots() -> list:
     return snapshots
 
 
+# ============================================================
+# Snapshot Workspace Browser
+# ============================================================
+
+import re as _re
+import uuid as _uuid
+import time as _time
+
+_snapshot_workspaces: dict[str, dict] = {}  # {uuid: {path, snapshot_name, created_at}}
+SNAPSHOT_WORKSPACE_TIMEOUT = 3600  # 1hr auto-cleanup
+
+
+def _validate_workspace_path(workspace_id: str, file_path: str) -> Path:
+    """Resolve path within workspace, raise HTTPException on traversal."""
+    if workspace_id not in _snapshot_workspaces:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    workspace_root = Path(_snapshot_workspaces[workspace_id]["path"])
+
+    # Reject null bytes, control characters
+    if '\x00' in file_path or any(ord(c) < 32 for c in file_path):
+        raise HTTPException(status_code=400, detail="Invalid path characters")
+
+    # Strip leading slash, reject ..
+    file_path = file_path.lstrip("/")
+    if ".." in file_path.split("/"):
+        raise HTTPException(status_code=400, detail="Path traversal not allowed")
+
+    # Whitelist characters
+    if not _re.match(r'^[a-zA-Z0-9._\-/]+$', file_path):
+        raise HTTPException(status_code=400, detail="Path contains invalid characters")
+
+    resolved = (workspace_root / file_path).resolve()
+    if not str(resolved).startswith(str(workspace_root.resolve())):
+        raise HTTPException(status_code=400, detail="Path traversal not allowed")
+
+    return resolved
+
+
+def cleanup_stale_workspaces():
+    """Remove workspaces older than timeout."""
+    now = _time.time()
+    stale = [wid for wid, w in _snapshot_workspaces.items()
+             if now - w["created_at"] > SNAPSHOT_WORKSPACE_TIMEOUT]
+    for wid in stale:
+        workspace_path = Path(_snapshot_workspaces[wid]["path"])
+        if workspace_path.exists():
+            shutil.rmtree(str(workspace_path), ignore_errors=True)
+        del _snapshot_workspaces[wid]
+        audit_log("snapshot_workspace_expired", {"workspace_id": wid})
+
+
+def open_snapshot_workspace(snapshot_name: str) -> dict:
+    """Decrypt+extract snapshot to a temp workspace."""
+    cleanup_stale_workspaces()
+
+    if not AGE_KEY.exists():
+        raise HTTPException(status_code=500, detail="No decryption key found")
+
+    # Resolve snapshot path
+    if snapshot_name == "latest":
+        snapshot_path = SNAPSHOTS_DIR / "latest.tar.age"
+        if snapshot_path.is_symlink():
+            snapshot_path = snapshot_path.resolve()
+    else:
+        snapshot_path = SNAPSHOTS_DIR / snapshot_name
+        if not snapshot_path.exists():
+            snapshot_path = SNAPSHOTS_DIR / f"{snapshot_name}.tar.age"
+
+    if not snapshot_path.exists():
+        raise HTTPException(status_code=404, detail=f"Snapshot not found: {snapshot_name}")
+
+    workspace_id = str(_uuid.uuid4())
+    workspace_path = Path(f"/tmp/cf-snapshot-edit-{workspace_id}")
+    workspace_path.mkdir(mode=0o700, parents=True)
+
+    try:
+        result = subprocess.run(
+            f"age -d -i {AGE_KEY} {snapshot_path} | tar -C {workspace_path} -xf -",
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            shutil.rmtree(str(workspace_path), ignore_errors=True)
+            raise HTTPException(status_code=500, detail=f"Decrypt/extract failed: {result.stderr}")
+    except subprocess.TimeoutExpired:
+        shutil.rmtree(str(workspace_path), ignore_errors=True)
+        raise HTTPException(status_code=500, detail="Decrypt/extract timed out")
+
+    _snapshot_workspaces[workspace_id] = {
+        "path": str(workspace_path),
+        "snapshot_name": snapshot_name,
+        "created_at": _time.time(),
+    }
+    audit_log("snapshot_workspace_opened", {"workspace_id": workspace_id, "snapshot": snapshot_name})
+    return {"workspace_id": workspace_id, "snapshot_name": snapshot_name}
+
+
+def close_snapshot_workspace(workspace_id: str) -> dict:
+    """Clean up a workspace."""
+    if workspace_id not in _snapshot_workspaces:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    workspace_path = Path(_snapshot_workspaces[workspace_id]["path"])
+    if workspace_path.exists():
+        shutil.rmtree(str(workspace_path), ignore_errors=True)
+    del _snapshot_workspaces[workspace_id]
+    audit_log("snapshot_workspace_closed", {"workspace_id": workspace_id})
+    return {"status": "closed"}
+
+
+def list_workspace_files(workspace_id: str) -> list:
+    """List all files in a workspace."""
+    if workspace_id not in _snapshot_workspaces:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    workspace_root = Path(_snapshot_workspaces[workspace_id]["path"])
+    files = []
+
+    for dirpath, dirnames, filenames in os.walk(workspace_root):
+        rel_dir = os.path.relpath(dirpath, workspace_root)
+        if rel_dir == ".":
+            rel_dir = ""
+
+        # Add directories
+        for d in sorted(dirnames):
+            rel_path = f"{rel_dir}/{d}" if rel_dir else d
+            files.append({"path": rel_path, "size": 0, "is_dir": True, "is_binary": False})
+
+        # Add files
+        for fname in sorted(filenames):
+            full_path = Path(dirpath) / fname
+            rel_path = f"{rel_dir}/{fname}" if rel_dir else fname
+            size = full_path.stat().st_size if full_path.exists() else 0
+
+            # Detect binary via null byte check in first 8KB
+            is_binary = False
+            try:
+                with open(full_path, "rb") as f:
+                    chunk = f.read(8192)
+                    if b'\x00' in chunk:
+                        is_binary = True
+            except (OSError, IOError):
+                is_binary = True
+
+            files.append({"path": rel_path, "size": size, "is_dir": False, "is_binary": is_binary})
+
+    return files
+
+
+def read_workspace_file(workspace_id: str, file_path: str) -> dict:
+    """Read a file from the workspace."""
+    resolved = _validate_workspace_path(workspace_id, file_path)
+
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    if resolved.is_dir():
+        raise HTTPException(status_code=400, detail="Cannot read a directory")
+
+    size = resolved.stat().st_size
+
+    # Check binary
+    try:
+        with open(resolved, "rb") as f:
+            chunk = f.read(8192)
+            if b'\x00' in chunk:
+                return {"binary": True, "size": size}
+    except (OSError, IOError):
+        return {"binary": True, "size": size}
+
+    if size > 2 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File too large (>2MB)")
+
+    content = resolved.read_text(errors="replace")
+    return {"content": content, "size": size}
+
+
+def write_workspace_file(workspace_id: str, file_path: str, content: str) -> dict:
+    """Write text content to a file in the workspace."""
+    resolved = _validate_workspace_path(workspace_id, file_path)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved.write_text(content)
+    return {"status": "saved", "size": len(content.encode())}
+
+
+def upload_workspace_file(workspace_id: str, file_path: str, data: bytes) -> dict:
+    """Write binary data to a file in the workspace."""
+    resolved = _validate_workspace_path(workspace_id, file_path)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved.write_bytes(data)
+    return {"status": "uploaded", "size": len(data)}
+
+
+def delete_workspace_file(workspace_id: str, file_path: str) -> dict:
+    """Delete a file or directory in the workspace."""
+    resolved = _validate_workspace_path(workspace_id, file_path)
+
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    if resolved.is_dir():
+        shutil.rmtree(str(resolved))
+    else:
+        resolved.unlink()
+
+    return {"status": "deleted"}
+
+
+def rename_workspace_file(workspace_id: str, old_path: str, new_path: str) -> dict:
+    """Rename/move a file or directory within the workspace."""
+    resolved_old = _validate_workspace_path(workspace_id, old_path)
+    resolved_new = _validate_workspace_path(workspace_id, new_path)
+
+    if not resolved_old.exists():
+        raise HTTPException(status_code=404, detail="Source not found")
+    if resolved_new.exists():
+        raise HTTPException(status_code=400, detail="Destination already exists")
+
+    resolved_new.parent.mkdir(parents=True, exist_ok=True)
+    resolved_old.rename(resolved_new)
+    return {"status": "renamed"}
+
+
+def duplicate_workspace_dir(workspace_id: str, src_path: str, dest_path: str) -> dict:
+    """Copy a file or directory within the workspace."""
+    resolved_src = _validate_workspace_path(workspace_id, src_path)
+    resolved_dest = _validate_workspace_path(workspace_id, dest_path)
+
+    if not resolved_src.exists():
+        raise HTTPException(status_code=404, detail="Source not found")
+    if resolved_dest.exists():
+        raise HTTPException(status_code=400, detail="Destination already exists")
+
+    resolved_dest.parent.mkdir(parents=True, exist_ok=True)
+
+    if resolved_src.is_dir():
+        shutil.copytree(str(resolved_src), str(resolved_dest))
+    else:
+        shutil.copy2(str(resolved_src), str(resolved_dest))
+
+    return {"status": "duplicated"}
+
+
+def save_workspace_as_snapshot(workspace_id: str, name: str = "") -> dict:
+    """Create a new snapshot from workspace contents."""
+    if workspace_id not in _snapshot_workspaces:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    workspace_path = Path(_snapshot_workspaces[workspace_id]["path"])
+
+    if not ensure_snapshot_key():
+        raise HTTPException(status_code=500, detail="No encryption key found and failed to generate one")
+
+    # Get public key
+    pubkey = None
+    with open(AGE_KEY) as f:
+        for line in f:
+            if "public key:" in line:
+                pubkey = line.split(": ")[1].strip()
+                break
+    if not pubkey:
+        raise HTTPException(status_code=500, detail="Could not read public key")
+
+    SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+    if name:
+        sanitized = sanitize_snapshot_name(name)
+        snapshot_name = f"{sanitized}--{timestamp}.tar.age"
+    else:
+        snapshot_name = f"snapshot--{timestamp}.tar.age"
+    snapshot_path = SNAPSHOTS_DIR / snapshot_name
+
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    try:
+        result = subprocess.run(
+            ["tar", "-C", str(workspace_path), "-cf", tmp_path, "."],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            raise HTTPException(status_code=500, detail=f"Failed to create tarball: {result.stderr}")
+
+        result = subprocess.run(
+            ["age", "-r", pubkey, "-o", str(snapshot_path), tmp_path],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            raise HTTPException(status_code=500, detail=f"Failed to encrypt: {result.stderr}")
+
+        # Update latest symlink
+        latest_link = SNAPSHOTS_DIR / "latest.tar.age"
+        if latest_link.is_symlink():
+            latest_link.unlink()
+        latest_link.symlink_to(snapshot_name)
+
+        size = snapshot_path.stat().st_size
+        audit_log("snapshot_created_from_workspace", {"name": snapshot_name, "size": size, "workspace_id": workspace_id})
+
+        # Auto-sync to host
+        synced = False
+        if IS_LIMA_MODE:
+            try:
+                pickup_dir = Path("/tmp/clawfactory-snapshot-sync")
+                pickup_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(snapshot_path), str(pickup_dir / snapshot_name))
+                synced = True
+            except Exception as e:
+                audit_log("snapshot_sync_failed", {"error": str(e)})
+
+        return {"status": "created", "name": snapshot_name, "size": size, "synced": synced}
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
 class SnapshotCreateRequest(BaseModel):
     name: str = ""
 
@@ -6040,6 +6824,210 @@ async def snapshot_restore_endpoint(
 
 
 # ============================================================
+# Snapshot Browse API Endpoints
+# ============================================================
+
+class SnapshotBrowseOpenRequest(BaseModel):
+    snapshot: str
+
+
+class SnapshotBrowseCloseRequest(BaseModel):
+    workspace_id: str
+
+
+class SnapshotBrowseFileWriteRequest(BaseModel):
+    workspace_id: str
+    path: str
+    content: str
+
+
+class SnapshotBrowseDeleteRequest(BaseModel):
+    workspace_id: str
+    path: str
+
+
+class SnapshotBrowseRenameRequest(BaseModel):
+    workspace_id: str
+    path: str
+    new_name: str
+
+
+class SnapshotBrowseDuplicateRequest(BaseModel):
+    workspace_id: str
+    path: str
+    dest_name: str
+
+
+class SnapshotBrowseSaveRequest(BaseModel):
+    workspace_id: str
+    name: str = ""
+
+
+@app.post("/snapshot/browse/open")
+@app.post("/controller/snapshot/browse/open")
+async def snapshot_browse_open(
+    request: SnapshotBrowseOpenRequest,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return open_snapshot_workspace(request.snapshot)
+
+
+@app.post("/snapshot/browse/close")
+@app.post("/controller/snapshot/browse/close")
+async def snapshot_browse_close(
+    request: SnapshotBrowseCloseRequest,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return close_snapshot_workspace(request.workspace_id)
+
+
+@app.get("/snapshot/browse/files")
+@app.get("/controller/snapshot/browse/files")
+async def snapshot_browse_files(
+    workspace_id: str = Query(...),
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return {"files": list_workspace_files(workspace_id)}
+
+
+@app.get("/snapshot/browse/file")
+@app.get("/controller/snapshot/browse/file")
+async def snapshot_browse_file_read(
+    workspace_id: str = Query(...),
+    path: str = Query(...),
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return read_workspace_file(workspace_id, path)
+
+
+@app.get("/snapshot/browse/file/download")
+@app.get("/controller/snapshot/browse/file/download")
+async def snapshot_browse_file_download(
+    workspace_id: str = Query(...),
+    path: str = Query(...),
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    resolved = _validate_workspace_path(workspace_id, path)
+    if not resolved.exists() or resolved.is_dir():
+        raise HTTPException(status_code=404, detail="File not found")
+    from starlette.responses import FileResponse
+    return FileResponse(str(resolved), media_type="application/octet-stream", filename=resolved.name)
+
+
+@app.post("/snapshot/browse/file")
+@app.post("/controller/snapshot/browse/file")
+async def snapshot_browse_file_write(
+    request: SnapshotBrowseFileWriteRequest,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return write_workspace_file(request.workspace_id, request.path, request.content)
+
+
+@app.post("/snapshot/browse/upload")
+@app.post("/controller/snapshot/browse/upload")
+async def snapshot_browse_upload(
+    workspace_id: str = Form(...),
+    path: str = Form(""),
+    file: UploadFile = File(...),
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    # Sanitize filename
+    filename = _re.sub(r'[^a-zA-Z0-9._\-]', '_', file.filename or "upload") if file.filename else "upload"
+    upload_path = f"{path}/{filename}" if path else filename
+    data = await file.read()
+    return upload_workspace_file(workspace_id, upload_path, data)
+
+
+@app.post("/snapshot/browse/delete-file")
+@app.post("/controller/snapshot/browse/delete-file")
+async def snapshot_browse_delete(
+    request: SnapshotBrowseDeleteRequest,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return delete_workspace_file(request.workspace_id, request.path)
+
+
+@app.post("/snapshot/browse/rename")
+@app.post("/controller/snapshot/browse/rename")
+async def snapshot_browse_rename(
+    request: SnapshotBrowseRenameRequest,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    # Build new path: same parent dir, new name
+    old_parts = request.path.rstrip("/").rsplit("/", 1)
+    parent = old_parts[0] if len(old_parts) > 1 else ""
+    new_name_sanitized = _re.sub(r'[^a-zA-Z0-9._\-]', '_', request.new_name)
+    new_path = f"{parent}/{new_name_sanitized}" if parent else new_name_sanitized
+    return rename_workspace_file(request.workspace_id, request.path, new_path)
+
+
+@app.post("/snapshot/browse/duplicate")
+@app.post("/controller/snapshot/browse/duplicate")
+async def snapshot_browse_duplicate(
+    request: SnapshotBrowseDuplicateRequest,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    old_parts = request.path.rstrip("/").rsplit("/", 1)
+    parent = old_parts[0] if len(old_parts) > 1 else ""
+    dest_sanitized = _re.sub(r'[^a-zA-Z0-9._\-]', '_', request.dest_name)
+    dest_path = f"{parent}/{dest_sanitized}" if parent else dest_sanitized
+    return duplicate_workspace_dir(request.workspace_id, request.path, dest_path)
+
+
+@app.post("/snapshot/browse/save")
+@app.post("/controller/snapshot/browse/save")
+async def snapshot_browse_save(
+    request: SnapshotBrowseSaveRequest,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return save_workspace_as_snapshot(request.workspace_id, request.name)
+
+
+# ============================================================
 # Gateway Config Editor
 # ============================================================
 
@@ -6130,8 +7118,21 @@ def fetch_ollama_models() -> list:
     import urllib.request
     import urllib.error
 
-    # Try common Ollama endpoints (localhost first in Lima mode, Docker hostname first otherwise)
-    base_urls = [
+    # Read Ollama baseUrl from gateway config if available
+    config_base = None
+    try:
+        with open(GATEWAY_CONFIG_PATH) as f:
+            cfg = json.load(f)
+        ollama_url = cfg.get("models", {}).get("providers", {}).get("ollama", {}).get("baseUrl", "")
+        if ollama_url:
+            # Strip /v1 suffix — Ollama native API doesn't use it
+            config_base = ollama_url.rstrip("/").removesuffix("/v1")
+    except Exception:
+        pass
+
+    # Try config URL first, then common fallbacks
+    fallback_urls = [
+        "http://192.168.5.2:11434",
         "http://localhost:11434",
         "http://ollama:11434",
     ] if IS_LIMA_MODE else [
@@ -6139,6 +7140,8 @@ def fetch_ollama_models() -> list:
         "http://localhost:11434",
         "http://ollama:11434",
     ]
+
+    base_urls = ([config_base] if config_base else []) + [u for u in fallback_urls if u != config_base]
 
     working_base = None
     models_list = []
@@ -6532,12 +7535,20 @@ async def apply_proposed_config(
     except Exception as e:
         return {"error": f"Failed to read current config: {e}"}
 
-    # Deep merge
-    def _deep_merge(base: dict, patch: dict) -> dict:
+    # Deep merge with list-aware handling for agents.list (merge by id)
+    def _deep_merge(base: dict, patch: dict, path: str = "") -> dict:
         out = {**base}
         for k, v in patch.items():
+            key_path = f"{path}.{k}" if path else k
             if isinstance(v, dict) and isinstance(out.get(k), dict):
-                out[k] = _deep_merge(out[k], v)
+                out[k] = _deep_merge(out[k], v, key_path)
+            elif isinstance(v, list) and isinstance(out.get(k), list) and key_path == "agents.list":
+                # Merge agent lists by id: update existing, append new
+                existing = {item["id"]: item for item in out[k] if isinstance(item, dict) and "id" in item}
+                for item in v:
+                    if isinstance(item, dict) and "id" in item:
+                        existing[item["id"]] = item
+                out[k] = list(existing.values())
             else:
                 out[k] = v
         return out
@@ -6609,11 +7620,18 @@ def _auto_apply_proposed_config() -> dict:
     except Exception as e:
         return {"error": f"Failed to read config: {e}"}
 
-    def _deep_merge(base: dict, patch: dict) -> dict:
+    def _deep_merge(base: dict, patch: dict, path: str = "") -> dict:
         out = {**base}
         for k, v in patch.items():
+            key_path = f"{path}.{k}" if path else k
             if isinstance(v, dict) and isinstance(out.get(k), dict):
-                out[k] = _deep_merge(out[k], v)
+                out[k] = _deep_merge(out[k], v, key_path)
+            elif isinstance(v, list) and isinstance(out.get(k), list) and key_path == "agents.list":
+                existing = {item["id"]: item for item in out[k] if isinstance(item, dict) and "id" in item}
+                for item in v:
+                    if isinstance(item, dict) and "id" in item:
+                        existing[item["id"]] = item
+                out[k] = list(existing.values())
             else:
                 out[k] = v
         return out
@@ -7845,3 +8863,17 @@ async def agent_gateway_config(
         return {"error": "Config file not found"}
     except Exception as e:
         return {"error": str(e)}
+
+
+# ============================================================
+# Startup / Shutdown
+# ============================================================
+
+@app.on_event("shutdown")
+async def _cleanup_snapshot_workspaces():
+    """Clean up all snapshot browse workspaces on shutdown."""
+    for wid, w in list(_snapshot_workspaces.items()):
+        workspace_path = Path(w["path"])
+        if workspace_path.exists():
+            shutil.rmtree(str(workspace_path), ignore_errors=True)
+    _snapshot_workspaces.clear()

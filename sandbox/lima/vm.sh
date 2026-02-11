@@ -9,7 +9,8 @@
 # No Firecracker, no TAP networking — fast VZ networking.
 #
 # Provides: lima_ensure, lima_sync, lima_sync_watch, lima_build,
-#           lima_services, lima_tunnels, lima_openclaw, lima_status, lima_shell
+#           lima_services, lima_tunnels, lima_openclaw, lima_status, lima_shell,
+#           lima_mounts
 
 # --- Configuration ---
 LIMA_VM_NAME="clawfactory"
@@ -571,6 +572,20 @@ lima_tunnels() {
 
             echo "  Tunnels: localhost (${gw_port}, ${ctrl_port}, ${proxy_port})"
             [[ -n "$ts_ip" ]] && echo "  Tailnet: ${ts_ip} (${gw_port}, ${ctrl_port}, ${proxy_port})"
+
+            # Set up Tailscale HTTPS serve (auto-certs via MagicDNS)
+            local ts_bin="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+            if [[ -x "$ts_bin" ]]; then
+                "$ts_bin" serve reset 2>/dev/null || true
+                "$ts_bin" serve --bg --https=443 --set-path / "http://127.0.0.1:${gw_port}" 2>/dev/null || true
+                "$ts_bin" serve --bg --https=8443 --set-path / "http://127.0.0.1:${ctrl_port}" 2>/dev/null || true
+                local ts_hostname
+                ts_hostname=$("$ts_bin" status --self --json 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['Self']['DNSName'].rstrip('.'))" 2>/dev/null || true)
+                if [[ -n "$ts_hostname" ]]; then
+                    echo "  HTTPS:   https://${ts_hostname}/ (gateway)"
+                    echo "  HTTPS:   https://${ts_hostname}:8443/ (controller)"
+                fi
+            fi
             ;;
         stop)
             if [[ -f "$pidfile" ]]; then
@@ -581,12 +596,21 @@ lima_tunnels() {
             fi
             # Also kill any orphaned tunnel processes for this VM
             pkill -f "ssh.*-N.*-f.*${LIMA_SSH_HOST}" 2>/dev/null || true
+            # Tear down Tailscale serve
+            local ts_bin="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+            if [[ -x "$ts_bin" ]]; then
+                "$ts_bin" serve reset 2>/dev/null || true
+            fi
             ;;
         status)
             if [[ -f "$pidfile" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
                 echo "Tunnels: running (PID $(cat "$pidfile"))"
             else
                 echo "Tunnels: not running"
+            fi
+            local ts_bin="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+            if [[ -x "$ts_bin" ]]; then
+                "$ts_bin" serve status 2>/dev/null || true
             fi
             ;;
     esac
@@ -827,6 +851,219 @@ PLIST
                 echo "[snapshots] Auto-pull: disabled"
                 echo "  Enable: ./clawfactory.sh snapshot autopull enable"
             fi
+            ;;
+    esac
+}
+
+# ============================================================
+# lima_mounts — Manage host directory mounts in the Lima VM
+# ============================================================
+
+_lima_mount_restart() {
+    local yq_expr="$1"
+    local instance="${INSTANCE_NAME:-default}"
+
+    echo "Stopping tunnels..."
+    lima_tunnels stop 2>/dev/null || true
+
+    echo "Stopping services..."
+    _lima_root "
+        systemctl stop openclaw-gateway@${instance} 2>/dev/null || true
+        systemctl stop clawfactory-llm-proxy 2>/dev/null || true
+        systemctl stop clawfactory-controller 2>/dev/null || true
+        systemctl stop nginx 2>/dev/null || true
+    "
+
+    echo "Stopping VM..."
+    limactl stop "$LIMA_VM_NAME"
+
+    echo "Applying mount change..."
+    limactl edit "$LIMA_VM_NAME" --set "$yq_expr"
+
+    echo "Starting VM..."
+    limactl start "$LIMA_VM_NAME" 2>/dev/null || true
+
+    echo "Syncing files..."
+    lima_sync
+    lima_build
+
+    echo "Starting services..."
+    lima_services start
+    lima_tunnels start 2>/dev/null || true
+}
+
+_lima_mount_fix_perms() {
+    local vm_path="$1"
+    local instance="${INSTANCE_NAME:-default}"
+    local svc_user="openclaw-${instance}"
+
+    _lima_root "
+        command -v setfacl >/dev/null 2>&1 || apt-get install -y acl >/dev/null 2>&1
+        setfacl -R -m u:${svc_user}:rwX '${vm_path}' 2>/dev/null || true
+        setfacl -R -d -m u:${svc_user}:rwX '${vm_path}' 2>/dev/null || true
+    "
+}
+
+lima_mounts() {
+    local action="${1:-list}"
+    local lima_yaml="${HOME}/.lima/${LIMA_VM_NAME}/lima.yaml"
+
+    case "$action" in
+        list)
+            if [[ ! -f "$lima_yaml" ]]; then
+                echo "No Lima config found at ${lima_yaml}" >&2
+                return 1
+            fi
+
+            local output
+            output=$(python3 -c "
+import yaml, sys
+with open('${lima_yaml}') as f:
+    cfg = yaml.safe_load(f)
+mounts = cfg.get('mounts') or []
+if not mounts:
+    print('No mounts configured')
+    sys.exit(0)
+for m in mounts:
+    loc = m.get('location', '?')
+    mp = m.get('mountPoint', '?')
+    wr = 'rw' if m.get('writable', False) else 'ro'
+    print(f'  {loc} -> {mp} ({wr})')
+" 2>&1)
+            echo "$output"
+            ;;
+
+        add)
+            shift
+            local host_path=""
+            local vm_name=""
+
+            # Parse args
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --name)
+                        vm_name="$2"
+                        shift 2
+                        ;;
+                    *)
+                        if [[ -z "$host_path" ]]; then
+                            host_path="$1"
+                        fi
+                        shift
+                        ;;
+                esac
+            done
+
+            if [[ -z "$host_path" ]]; then
+                echo "Usage: ./clawfactory.sh mount add <host-path> [--name <vm-name>]" >&2
+                return 1
+            fi
+
+            # Resolve to absolute path
+            host_path="$(cd "$host_path" 2>/dev/null && pwd || echo "$host_path")"
+
+            if [[ ! -e "$host_path" ]]; then
+                echo "Error: Path does not exist: ${host_path}" >&2
+                return 1
+            fi
+
+            # Compute VM mount point
+            local basename
+            basename="$(basename "$host_path")"
+            local mount_point="/mnt/${vm_name:-$basename}"
+
+            # Check for duplicates
+            if [[ -f "$lima_yaml" ]]; then
+                local dup
+                dup=$(python3 -c "
+import yaml, sys
+with open('${lima_yaml}') as f:
+    cfg = yaml.safe_load(f)
+for m in (cfg.get('mounts') or []):
+    if m.get('location') == '${host_path}' or m.get('mountPoint') == '${mount_point}':
+        print('dup')
+        break
+" 2>/dev/null)
+                if [[ "$dup" == "dup" ]]; then
+                    echo "Error: Mount already exists for ${host_path} or ${mount_point}" >&2
+                    return 1
+                fi
+            fi
+
+            echo "This will mount:"
+            echo "  ${host_path} -> ${mount_point} (writable)"
+            echo ""
+            echo "The VM must restart. Continue? [y/N]"
+            read -r confirm
+            if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+                echo "Cancelled"
+                return 0
+            fi
+
+            local yq_expr=".mounts += [{\"location\": \"${host_path}\", \"mountPoint\": \"${mount_point}\", \"writable\": true}]"
+            _lima_mount_restart "$yq_expr"
+
+            echo "Fixing permissions for ${mount_point}..."
+            _lima_mount_fix_perms "$mount_point"
+
+            echo "Mounted: ${host_path} -> ${mount_point}"
+            ;;
+
+        remove)
+            shift
+            local target="${1:-}"
+
+            if [[ -z "$target" ]]; then
+                echo "Usage: ./clawfactory.sh mount remove <host-path-or-vm-path>" >&2
+                return 1
+            fi
+
+            if [[ ! -f "$lima_yaml" ]]; then
+                echo "No Lima config found" >&2
+                return 1
+            fi
+
+            # Build new mounts list excluding the target
+            local new_mounts
+            new_mounts=$(python3 -c "
+import yaml, json, sys
+with open('${lima_yaml}') as f:
+    cfg = yaml.safe_load(f)
+mounts = cfg.get('mounts') or []
+target = '${target}'
+filtered = [m for m in mounts if m.get('location') != target and m.get('mountPoint') != target]
+if len(filtered) == len(mounts):
+    print('NOT_FOUND')
+    sys.exit(0)
+# Output as JSON for yq
+print(json.dumps(filtered))
+" 2>&1)
+
+            if [[ "$new_mounts" == "NOT_FOUND" ]]; then
+                echo "Error: No mount found matching '${target}'" >&2
+                return 1
+            fi
+
+            echo "This will remove the mount for '${target}'."
+            echo "The VM must restart. Continue? [y/N]"
+            read -r confirm
+            if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+                echo "Cancelled"
+                return 0
+            fi
+
+            local yq_expr=".mounts = ${new_mounts}"
+            _lima_mount_restart "$yq_expr"
+
+            echo "Mount removed: ${target}"
+            ;;
+
+        *)
+            echo "Usage: ./clawfactory.sh mount <list|add|remove>"
+            echo ""
+            echo "  list                              Show current mounts"
+            echo "  add <host-path> [--name <name>]   Mount host directory into VM"
+            echo "  remove <host-path-or-vm-path>     Remove a mount"
             ;;
     esac
 }
