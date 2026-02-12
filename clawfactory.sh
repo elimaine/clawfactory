@@ -808,6 +808,22 @@ ENVEOF
         fi
         lima_tunnels "${2:-status}"
         ;;
+    code)
+        if [[ "$SANDBOX_MODE" != "lima" ]]; then
+            echo "Code commands are only available in Lima sandbox mode"
+            exit 1
+        fi
+        subcmd="${2:-pull}"
+        case "$subcmd" in
+            pull)
+                lima_ensure
+                _lima_code_pull "$INSTANCE_NAME"
+                ;;
+            *)
+                echo "Usage: ./clawfactory.sh code pull"
+                ;;
+        esac
+        ;;
     sync)
         if [[ "$SANDBOX_MODE" == "lima" ]]; then
             lima_ensure
@@ -856,6 +872,7 @@ ENVEOF
         echo "  init            Interactive new bot / clone setup"
         echo "  info            Show instance info and tokens"
         echo "  bots            List all saved bots"
+        echo "  code pull       Pull code changes from VM to host"
         echo "  mount           Manage host mounts (add/remove/list)"
         echo "  tunnels [cmd]   SSH tunnels (start/stop/status)"
         echo "  sync [watch]    Sync files to VM (watch: auto-sync on changes)"
