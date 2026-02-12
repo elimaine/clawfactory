@@ -68,6 +68,9 @@ lima_sync() {
     # Pull snapshots from VM before syncing (so we don't lose any)
     _lima_snapshot_pull "$instance"
 
+    # Pull workspace changes from VM before syncing (so --delete doesn't wipe them)
+    _lima_workspace_pull "$instance"
+
     echo "Syncing files to Lima VM (instance: ${instance})..."
 
     local cf_root="${SCRIPT_DIR}"
@@ -692,6 +695,58 @@ _lima_snapshot_pull() {
     if [[ "$count" -gt 0 ]]; then
         echo "[snapshots] Pulled ${count} snapshot(s) to host"
     fi
+
+    # Also pull state alongside snapshots
+    _lima_state_pull "$instance"
+}
+
+# ============================================================
+# _lima_state_pull — Sync bot state from VM back to host
+# ============================================================
+_lima_state_pull() {
+    local instance="${1:-${INSTANCE_NAME:-default}}"
+    local host_dir="${SCRIPT_DIR}/bot_repos/${instance}/state"
+    local rsh="ssh -F ${LIMA_SSH_CONFIG}"
+
+    if ! _lima_exec test -d "${LIMA_SRV}/bot_repos/${instance}/state" 2>/dev/null; then
+        return 0
+    fi
+
+    mkdir -p "$host_dir"
+    rsync -a \
+        --exclude 'installed' \
+        --exclude 'installed/*' \
+        --exclude 'sandboxes' \
+        --exclude 'subagents' \
+        --exclude 'media' \
+        --exclude '*.tmp*' \
+        -e "$rsh" \
+        "${LIMA_SSH_HOST}:${LIMA_SRV}/bot_repos/${instance}/state/" \
+        "${host_dir}/"
+
+    echo "[state] Pulled state to host"
+}
+
+# ============================================================
+# _lima_workspace_pull — Sync workspace from VM back to host
+# ============================================================
+_lima_workspace_pull() {
+    local instance="${1:-${INSTANCE_NAME:-default}}"
+    local host_dir="${SCRIPT_DIR}/bot_repos/${instance}/code/workspace"
+    local rsh="ssh -F ${LIMA_SSH_CONFIG}"
+
+    if ! _lima_exec test -d "${LIMA_SRV}/bot_repos/${instance}/code/workspace" 2>/dev/null; then
+        return 0
+    fi
+
+    mkdir -p "$host_dir"
+    rsync -a \
+        --exclude '.git' \
+        -e "$rsh" \
+        "${LIMA_SSH_HOST}:${LIMA_SRV}/bot_repos/${instance}/code/workspace/" \
+        "${host_dir}/"
+
+    echo "[workspace] Pulled workspace to host"
 }
 
 # ============================================================
@@ -778,6 +833,7 @@ _lima_restore_snapshot() {
 lima_stop() {
     local instance="${INSTANCE_NAME:-default}"
     _lima_snapshot_pull "$instance"
+    _lima_workspace_pull "$instance"
     echo "Stopping ClawFactory services..."
     _lima_root "
         systemctl stop openclaw-gateway@${instance} 2>/dev/null || true
