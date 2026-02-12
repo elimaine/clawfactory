@@ -716,7 +716,6 @@ _lima_state_pull() {
     rsync -a \
         --exclude 'installed' \
         --exclude 'installed/*' \
-        --exclude 'sandboxes' \
         --exclude 'subagents' \
         --exclude 'media' \
         --exclude '*.tmp*' \
@@ -794,7 +793,6 @@ _lima_backup_state() {
             --exclude='installed' \
             --exclude='installed/*' \
             --exclude='workspace/*/.git' \
-            --exclude='sandboxes' \
             --exclude='subagents' \
             --exclude='media' \
             -cf - . | age -r \"\$pubkey\" -o \"${snapshot_dir}/\$backup_name\"

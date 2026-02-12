@@ -3525,7 +3525,6 @@ def create_snapshot(name: str = "") -> dict:
                 "--exclude=installed",
                 "--exclude=installed/*",
                 "--exclude=workspace/*/.git",
-                "--exclude=sandboxes",
                 "--exclude=subagents",
                 "--exclude=media",
                 "."
