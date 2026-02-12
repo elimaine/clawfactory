@@ -1728,6 +1728,12 @@ async def promote_ui(
                 return (bytes/(1024*1024)).toFixed(1) + ' MB';
             }}
 
+            function escapeHtml(str) {{
+                const d = document.createElement('div');
+                d.textContent = str;
+                return d.innerHTML;
+            }}
+
             // ==================== Snapshot Browser ====================
             let sbWorkspaceId = null;
             let sbEditor = null;
@@ -2792,6 +2798,53 @@ async def promote_ui(
                         html += '<p style="color: #a5d6a7;">No findings.</p>';
                     }}
                     result.innerHTML = html;
+                }} catch(e) {{
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
+                }}
+            }}
+
+            async function restartGateway() {{
+                const result = document.getElementById('promote-result');
+                result.style.display = 'block';
+                result.className = 'result';
+                result.textContent = 'Restarting gateway...';
+                try {{
+                    const resp = await fetch(basePath + '/gateway/restart', {{ method: 'POST' }});
+                    const data = await resp.json();
+                    result.textContent = data.status || JSON.stringify(data);
+                    setTimeout(fetchHealth, 3000);
+                }} catch(e) {{
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
+                }}
+            }}
+
+            async function rebuildGateway() {{
+                const result = document.getElementById('promote-result');
+                result.style.display = 'block';
+                result.className = 'result';
+                result.textContent = 'Rebuilding gateway...';
+                try {{
+                    const resp = await fetch(basePath + '/gateway/rebuild', {{ method: 'POST' }});
+                    const data = await resp.json();
+                    result.textContent = data.status || JSON.stringify(data);
+                    setTimeout(fetchHealth, 5000);
+                }} catch(e) {{
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
+                }}
+            }}
+
+            async function pullUpstream() {{
+                const result = document.getElementById('promote-result');
+                result.style.display = 'block';
+                result.className = 'result';
+                result.textContent = 'Pulling latest OpenClaw...';
+                try {{
+                    const resp = await fetch(basePath + '/pull-upstream', {{ method: 'POST' }});
+                    const data = await resp.json();
+                    result.textContent = data.output || data.status || JSON.stringify(data);
                 }} catch(e) {{
                     result.className = 'result error';
                     result.textContent = 'Error: ' + e.message;
