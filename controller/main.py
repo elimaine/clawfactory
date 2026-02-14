@@ -17,7 +17,7 @@ import os
 import secrets
 import shutil
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -438,9 +438,10 @@ async def promote_ui(
             .stat-label {{ font-size: 0.75rem; color: #888; }}
             a {{ color: #2196F3; }}
             #audit-log {{ max-height: 300px; overflow-y: auto; }}
-            .pending-item {{ background: #333; padding: 0.5rem; margin: 0.5rem 0; border-radius: 4px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem; }}
-            .pending-item-info {{ flex: 1; min-width: 150px; }}
-            .pending-item-actions {{ display: flex; gap: 0.3rem; }}
+            .pending-item {{ background: #333; padding: 0.5rem; margin: 0.5rem 0; border-radius: 4px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem; max-width: 100%; overflow: hidden; box-sizing: border-box; }}
+            .pending-item-info {{ flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }}
+            .pending-item-info strong, .pending-item-info small {{ display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+            .pending-item-actions {{ display: flex; gap: 0.3rem; flex-shrink: 0; }}
             .tab-buttons {{ display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; }}
             .tab-button {{ background: #333; border: none; padding: 0.5rem 1rem; color: #888; cursor: pointer; border-radius: 4px 4px 0 0; }}
             .tab-button.active {{ background: #252525; color: #4CAF50; }}
@@ -3522,9 +3523,14 @@ def create_snapshot(name: str = "") -> dict:
                 "tar", "-C", str(OPENCLAW_HOME), "-cf", tmp_path,
                 "--exclude=*.tmp*",
                 "--exclude=agents/*/sessions/*.jsonl",
+                "--exclude=agents/*/sessions/*.jsonl.deleted.*",
                 "--exclude=installed",
                 "--exclude=installed/*",
                 "--exclude=workspace/*/.git",
+                "--exclude=*/venv",
+                "--exclude=*/node_modules",
+                "--exclude=*/__pycache__",
+                "--exclude=*/.venv",
                 "--exclude=subagents",
                 "--exclude=media",
                 "."
@@ -3555,6 +3561,9 @@ def create_snapshot(name: str = "") -> dict:
 
         audit_log("snapshot_created", {"name": snapshot_name, "size": size})
 
+        # Prune old auto-snapshots (keep 24 hours)
+        _prune_old_snapshots()
+
         return {
             "status": "created",
             "name": snapshot_name,
@@ -3564,6 +3573,56 @@ def create_snapshot(name: str = "") -> dict:
     finally:
         # Clean up temp file
         Path(tmp_path).unlink(missing_ok=True)
+
+
+def _prune_old_snapshots(max_age_hours: int = 24):
+    """Remove auto-snapshots older than max_age_hours.
+
+    Only prunes snapshots with default names (snapshot-- and pre-start--).
+    User-named snapshots and the current 'latest' target are always kept.
+    """
+    if not SNAPSHOTS_DIR.exists():
+        return
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+
+    # Resolve the latest symlink target so we never delete it
+    latest_link = SNAPSHOTS_DIR / "latest.tar.age"
+    latest_target = None
+    if latest_link.is_symlink():
+        latest_target = latest_link.resolve().name
+
+    auto_prefixes = ("snapshot--", "pre-start--")
+    pruned = 0
+
+    for f in SNAPSHOTS_DIR.glob("*.tar.age"):
+        if f.name == "latest.tar.age":
+            continue
+        if f.name == latest_target:
+            continue
+
+        # Only prune auto-generated snapshots
+        if not any(f.name.startswith(p) for p in auto_prefixes):
+            continue
+
+        # Parse timestamp from name--YYYY-MM-DDTHH-MM-SSZ.tar.age
+        stem = f.name.replace(".tar.age", "")
+        if "--" not in stem:
+            continue
+        ts_str = stem.rsplit("--", 1)[1]
+        try:
+            ts = datetime.strptime(ts_str, "%Y-%m-%dT%H-%M-%SZ").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+
+        if ts < cutoff:
+            size = f.stat().st_size
+            f.unlink()
+            pruned += 1
+            audit_log("snapshot_pruned", {"name": f.name, "size": size, "age_hours": max_age_hours})
+
+    if pruned:
+        audit_log("snapshots_pruned", {"count": pruned, "max_age_hours": max_age_hours})
 
 
 def list_snapshots() -> list:
@@ -4929,8 +4988,21 @@ def run_gateway_command(cmd: list[str], timeout: int = 30) -> tuple[bool, str]:
     try:
         if IS_LIMA_MODE:
             svc_user = f"openclaw-{INSTANCE_NAME}"
+            env = {
+                "OPENCLAW_STATE_DIR": f"/srv/clawfactory/bot_repos/{INSTANCE_NAME}/state",
+                "HOME": f"/home/{svc_user}",
+                "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            }
+            gateway_env_file = SECRETS_DIR / "gateway.env"
+            if gateway_env_file.exists():
+                with open(gateway_env_file) as ef:
+                    for line in ef:
+                        line = line.strip()
+                        if line and not line.startswith("#") and "=" in line:
+                            k, v = line.split("=", 1)
+                            env[k] = v
             result = subprocess.run(
-                ["sudo", "-u", svc_user] + cmd,
+                ["sudo", "-u", svc_user, "env"] + [f"{k}={v}" for k, v in env.items()] + cmd,
                 cwd=str(CODE_DIR),
                 capture_output=True, text=True, timeout=timeout,
             )

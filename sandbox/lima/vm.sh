@@ -18,11 +18,11 @@ LIMA_SRV="/srv/clawfactory"
 
 # --- Internal helpers ---
 _lima_exec() {
-    limactl shell "$LIMA_VM_NAME" -- "$@"
+    limactl shell --workdir /tmp "$LIMA_VM_NAME" -- "$@"
 }
 
 _lima_root() {
-    limactl shell "$LIMA_VM_NAME" -- sudo bash -c "$1"
+    limactl shell --workdir /tmp "$LIMA_VM_NAME" -- sudo bash -c "$1"
 }
 
 # SSH config for host-to-VM rsync (not running rsync inside the VM)
@@ -109,6 +109,7 @@ lima_sync() {
     # Push workspace edits from host to VM (so local edits reach the gateway)
     if [[ -d "${cf_root}/bot_repos/${instance}/state/workspace" ]]; then
         rsync -a \
+            --rsync-path="sudo rsync" \
             --exclude '.git' \
             -e "$rsh" \
             "${cf_root}/bot_repos/${instance}/state/workspace/" \
@@ -580,15 +581,30 @@ lima_tunnels() {
             # Set up Tailscale HTTPS serve (auto-certs via MagicDNS)
             local ts_bin="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
             if [[ -x "$ts_bin" ]]; then
-                "$ts_bin" serve reset 2>/dev/null || true
-                "$ts_bin" serve --bg --https=443 --set-path / "http://127.0.0.1:${gw_port}" 2>/dev/null || true
-                "$ts_bin" serve --bg --https=8443 --set-path / "http://127.0.0.1:${ctrl_port}" 2>/dev/null || true
-                local ts_hostname
-                ts_hostname=$("$ts_bin" status --self --json 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['Self']['DNSName'].rstrip('.'))" 2>/dev/null || true)
-                if [[ -n "$ts_hostname" ]]; then
-                    echo "  HTTPS:   https://${ts_hostname}/ (gateway)"
-                    echo "  HTTPS:   https://${ts_hostname}:8443/ (controller)"
+                # Reset only our paths (not all serves)
+                "$ts_bin" serve off --https=443 --set-path / 2>/dev/null || true
+                "$ts_bin" serve off --https=8443 --set-path / 2>/dev/null || true
+
+                local serve_err
+                serve_err=$("$ts_bin" serve --bg --https=443 --set-path / "http://127.0.0.1:${gw_port}" 2>&1)
+                if [[ $? -ne 0 ]]; then
+                    echo "  Tailscale HTTPS (gateway): FAILED — $serve_err"
+                    echo "  Hint: ensure MagicDNS + HTTPS are enabled in Tailscale admin"
+                else
+                    serve_err=$("$ts_bin" serve --bg --https=8443 --set-path / "http://127.0.0.1:${ctrl_port}" 2>&1)
+                    if [[ $? -ne 0 ]]; then
+                        echo "  Tailscale HTTPS (controller): FAILED — $serve_err"
+                    fi
+
+                    local ts_hostname
+                    ts_hostname=$("$ts_bin" status --self --json 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['Self']['DNSName'].rstrip('.'))" 2>/dev/null || true)
+                    if [[ -n "$ts_hostname" ]]; then
+                        echo "  HTTPS:   https://${ts_hostname}/ (gateway)"
+                        echo "  HTTPS:   https://${ts_hostname}:8443/ (controller)"
+                    fi
                 fi
+            else
+                echo "  Tailscale: not found (install Tailscale.app for HTTPS)"
             fi
             ;;
         stop)
@@ -599,11 +615,13 @@ lima_tunnels() {
                 rm -f "$pidfile"
             fi
             # Also kill any orphaned tunnel processes for this VM
-            pkill -f "ssh.*-N.*-f.*${LIMA_SSH_HOST}" 2>/dev/null || true
-            # Tear down Tailscale serve
+            pkill -f "ssh.*-N.*${LIMA_SSH_HOST}" 2>/dev/null || true
+            rm -f "${HOME}/.lima/${LIMA_VM_NAME}/ssh.sock"
+            # Tear down Tailscale serve (our paths only)
             local ts_bin="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
             if [[ -x "$ts_bin" ]]; then
-                "$ts_bin" serve reset 2>/dev/null || true
+                "$ts_bin" serve off --https=443 --set-path / 2>/dev/null || true
+                "$ts_bin" serve off --https=8443 --set-path / 2>/dev/null || true
             fi
             ;;
         status)
@@ -693,9 +711,13 @@ _lima_snapshot_pull() {
         return 0
     fi
 
+    # Prune old auto-snapshots in VM before pulling
+    _lima_prune_snapshots "$instance"
+
     mkdir -p "$host_dir"
     rsync -a \
         --exclude 'latest.tar.age' \
+        --delete \
         -e "$rsh" \
         "${LIMA_SSH_HOST}:${LIMA_SRV}/snapshots/${instance}/" \
         "${host_dir}/"
@@ -724,6 +746,7 @@ _lima_state_pull() {
 
     mkdir -p "$host_dir"
     rsync -a \
+        --rsync-path="sudo rsync" \
         --exclude 'installed' \
         --exclude 'installed/*' \
         --exclude 'subagents' \
@@ -750,6 +773,7 @@ _lima_code_pull() {
 
     mkdir -p "$host_dir"
     rsync -a \
+        --rsync-path="sudo rsync" \
         --exclude 'node_modules' \
         --exclude 'dist' \
         --exclude '.pnpm-lock-hash' \
@@ -803,14 +827,43 @@ _lima_backup_state() {
         cd ${state_dir}
         tar --exclude='*.tmp*' \
             --exclude='agents/*/sessions/*.jsonl' \
+            --exclude='agents/*/sessions/*.jsonl.deleted.*' \
             --exclude='installed' \
             --exclude='installed/*' \
             --exclude='workspace/*/.git' \
+            --exclude='*/venv' \
+            --exclude='*/node_modules' \
+            --exclude='*/__pycache__' \
+            --exclude='*/.venv' \
             --exclude='subagents' \
             --exclude='media' \
             -cf - . | age -r \"\$pubkey\" -o \"${snapshot_dir}/\$backup_name\"
 
         echo \"\$backup_name\"
+    " 2>/dev/null
+}
+
+# Prune auto-snapshots older than 24 hours (runs in VM)
+_lima_prune_snapshots() {
+    local instance="${1:-${INSTANCE_NAME:-default}}"
+    local snapshot_dir="${LIMA_SRV}/snapshots/${instance}"
+
+    _lima_root "
+        cutoff=\$(date -u -d '24 hours ago' +%Y-%m-%dT%H-%M-%SZ 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H-%M-%SZ)
+        latest_target=\$(readlink -f ${snapshot_dir}/latest.tar.age 2>/dev/null | xargs basename 2>/dev/null)
+        pruned=0
+
+        for f in ${snapshot_dir}/snapshot--*.tar.age ${snapshot_dir}/pre-start--*.tar.age; do
+            [ -f \"\$f\" ] || continue
+            fname=\$(basename \"\$f\")
+            [ \"\$fname\" = \"\$latest_target\" ] && continue
+
+            # Extract timestamp from name--YYYY-MM-DDTHH-MM-SSZ.tar.age
+            ts=\$(echo \"\$fname\" | sed 's/.*--\\(.*\\)\\.tar\\.age/\\1/')
+            [ \"\$ts\" \\< \"\$cutoff\" ] && rm -f \"\$f\" && pruned=\$((pruned + 1))
+        done
+
+        [ \$pruned -gt 0 ] && echo \"[snapshots] Pruned \$pruned old snapshot(s)\"
     " 2>/dev/null
 }
 
