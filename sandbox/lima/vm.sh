@@ -10,7 +10,7 @@
 #
 # Provides: lima_ensure, lima_sync, lima_sync_watch, lima_build,
 #           lima_services, lima_tunnels, lima_openclaw, lima_status, lima_shell,
-#           lima_mounts
+#           lima_mounts, lima_killswitch_watch, lima_killswitch_stop
 
 # --- Configuration ---
 LIMA_VM_NAME="clawfactory"
@@ -279,6 +279,7 @@ lima_build() {
         if [[ "$needs_install" == "yes" ]]; then
             echo "[build] Installing Node.js dependencies..."
             _lima_exec bash -c "
+                export CI=true
                 cd ${src_dir}
                 pnpm install --reporter=silent --frozen-lockfile 2>/dev/null || \
                     pnpm install --reporter=silent 2>/dev/null || \
@@ -300,6 +301,7 @@ lima_build() {
 
         echo "[build] Building OpenClaw..."
         _lima_root "
+            export CI=true
             cd ${LIMA_SRV}/bot_repos/${instance}/code
             pnpm build 2>/dev/null || npm run build
         "
@@ -307,6 +309,7 @@ lima_build() {
 
         echo "[build] Building Control UI..."
         _lima_root "
+            export CI=true
             cd ${LIMA_SRV}/bot_repos/${instance}/code
             pnpm ui:build 2>/dev/null || npm run ui:build 2>/dev/null || echo '[build] No ui:build script found (skipped)'
         "
@@ -495,6 +498,16 @@ Environment=SCRUB_RULES_PATH=${LIMA_SRV}/audit/scrub_rules.json
 Environment=CAPTURE_STATE_FILE=${LIMA_SRV}/audit/capture_enabled
 EOF
 
+        # Temporal Worker override
+        mkdir -p /etc/systemd/system/clawfactory-temporal-worker.service.d
+        cat > /etc/systemd/system/clawfactory-temporal-worker.service.d/override.conf <<EOF
+[Service]
+Environment=GATEWAY_PORT=${gw_port}
+Environment=GATEWAY_INTERNAL_TOKEN=$(grep -s GATEWAY_INTERNAL_TOKEN ${LIMA_SRV}/secrets/${instance}/gateway.env | cut -d= -f2-)
+Environment=INSTANCE_NAME=${instance}
+Environment=TEMPORAL_HOST=127.0.0.1:7233
+EOF
+
         systemctl daemon-reload
     "
 
@@ -514,21 +527,21 @@ EOF
     case "$action" in
         start)
             echo "Starting ClawFactory services..."
-            _lima_root "systemctl start openclaw-gateway@${instance} clawfactory-llm-proxy clawfactory-controller nginx docker"
+            _lima_root "systemctl start clawfactory-temporal clawfactory-temporal-worker openclaw-gateway@${instance} clawfactory-llm-proxy clawfactory-controller nginx docker"
             echo "Services started"
             ;;
         stop)
             echo "Stopping ClawFactory services..."
-            _lima_root "systemctl stop openclaw-gateway@${instance} clawfactory-llm-proxy clawfactory-controller nginx" 2>/dev/null || true
+            _lima_root "systemctl stop clawfactory-temporal-worker clawfactory-temporal openclaw-gateway@${instance} clawfactory-llm-proxy clawfactory-controller nginx" 2>/dev/null || true
             echo "Services stopped"
             ;;
         restart)
             echo "Restarting ClawFactory services..."
-            _lima_root "systemctl restart openclaw-gateway@${instance} clawfactory-llm-proxy clawfactory-controller nginx"
+            _lima_root "systemctl restart clawfactory-temporal clawfactory-temporal-worker openclaw-gateway@${instance} clawfactory-llm-proxy clawfactory-controller nginx"
             echo "Services restarted"
             ;;
         status)
-            _lima_root "systemctl status --no-pager openclaw-gateway@${instance} clawfactory-llm-proxy clawfactory-controller nginx docker" 2>/dev/null || true
+            _lima_root "systemctl status --no-pager clawfactory-temporal clawfactory-temporal-worker openclaw-gateway@${instance} clawfactory-llm-proxy clawfactory-controller nginx docker" 2>/dev/null || true
             ;;
         *)
             echo "Usage: lima_services {start|stop|restart|status}" >&2
@@ -557,17 +570,21 @@ lima_tunnels() {
             local ts_ip=""
             ts_ip=$(/Applications/Tailscale.app/Contents/MacOS/Tailscale ip --4 2>/dev/null || true)
 
+            local temporal_port=8082
+
             # Build forward args — always localhost (use array for safe expansion)
             local fwd=()
             fwd+=(-L "127.0.0.1:${gw_port}:127.0.0.1:${gw_port}")
             fwd+=(-L "127.0.0.1:${ctrl_port}:127.0.0.1:${ctrl_port}")
             fwd+=(-L "127.0.0.1:${proxy_port}:127.0.0.1:${proxy_port}")
+            fwd+=(-L "127.0.0.1:${temporal_port}:127.0.0.1:${temporal_port}")
 
             # Add Tailscale binds if available
             if [[ -n "$ts_ip" ]]; then
                 fwd+=(-L "${ts_ip}:${gw_port}:127.0.0.1:${gw_port}")
                 fwd+=(-L "${ts_ip}:${ctrl_port}:127.0.0.1:${ctrl_port}")
                 fwd+=(-L "${ts_ip}:${proxy_port}:127.0.0.1:${proxy_port}")
+                fwd+=(-L "${ts_ip}:${temporal_port}:127.0.0.1:${temporal_port}")
             fi
 
             # Launch background SSH tunnel
@@ -575,8 +592,8 @@ lima_tunnels() {
             # Find the SSH PID we just spawned
             pgrep -nf "ssh.*-N.*${LIMA_SSH_HOST}" > "$pidfile" 2>/dev/null || true
 
-            echo "  Tunnels: localhost (${gw_port}, ${ctrl_port}, ${proxy_port})"
-            [[ -n "$ts_ip" ]] && echo "  Tailnet: ${ts_ip} (${gw_port}, ${ctrl_port}, ${proxy_port})"
+            echo "  Tunnels: localhost (${gw_port}, ${ctrl_port}, ${proxy_port}, ${temporal_port})"
+            [[ -n "$ts_ip" ]] && echo "  Tailnet: ${ts_ip} (${gw_port}, ${ctrl_port}, ${proxy_port}, ${temporal_port})"
 
             # Set up Tailscale HTTPS serve (auto-certs via MagicDNS)
             local ts_bin="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
@@ -584,6 +601,7 @@ lima_tunnels() {
                 # Reset only our paths (not all serves)
                 "$ts_bin" serve off --https=443 --set-path / 2>/dev/null || true
                 "$ts_bin" serve off --https=8443 --set-path / 2>/dev/null || true
+                "$ts_bin" serve off --https=8444 --set-path / 2>/dev/null || true
 
                 local serve_err
                 serve_err=$("$ts_bin" serve --bg --https=443 --set-path / "http://127.0.0.1:${gw_port}" 2>&1)
@@ -596,11 +614,17 @@ lima_tunnels() {
                         echo "  Tailscale HTTPS (controller): FAILED — $serve_err"
                     fi
 
+                    serve_err=$("$ts_bin" serve --bg --https=8444 --set-path / "http://127.0.0.1:${temporal_port}" 2>&1)
+                    if [[ $? -ne 0 ]]; then
+                        echo "  Tailscale HTTPS (temporal): FAILED — $serve_err"
+                    fi
+
                     local ts_hostname
                     ts_hostname=$("$ts_bin" status --self --json 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['Self']['DNSName'].rstrip('.'))" 2>/dev/null || true)
                     if [[ -n "$ts_hostname" ]]; then
                         echo "  HTTPS:   https://${ts_hostname}/ (gateway)"
                         echo "  HTTPS:   https://${ts_hostname}:8443/ (controller)"
+                        echo "  HTTPS:   https://${ts_hostname}:8444/ (temporal)"
                     fi
                 fi
             else
@@ -622,6 +646,7 @@ lima_tunnels() {
             if [[ -x "$ts_bin" ]]; then
                 "$ts_bin" serve off --https=443 --set-path / 2>/dev/null || true
                 "$ts_bin" serve off --https=8443 --set-path / 2>/dev/null || true
+                "$ts_bin" serve off --https=8444 --set-path / 2>/dev/null || true
             fi
             ;;
         status)
@@ -685,7 +710,7 @@ for vm in json.loads(sys.stdin.read().rstrip().replace('}\n{', '},{')):
     # Service status
     echo ""
     echo "Services:"
-    for svc in openclaw-gateway@"${INSTANCE_NAME:-default}" clawfactory-llm-proxy clawfactory-controller nginx docker; do
+    for svc in openclaw-gateway@"${INSTANCE_NAME:-default}" clawfactory-temporal clawfactory-temporal-worker clawfactory-llm-proxy clawfactory-controller nginx docker; do
         local svc_status
         svc_status=$(_lima_root "systemctl is-active $svc" 2>/dev/null || echo "unknown")
         printf "  %-40s %s\n" "$svc" "$svc_status"
@@ -696,6 +721,7 @@ for vm in json.loads(sys.stdin.read().rstrip().replace('}\n{', '},{')):
     echo "Access:"
     echo "  Gateway:    http://localhost:${GATEWAY_PORT:-18789}"
     echo "  Controller: http://localhost:${CONTROLLER_PORT:-8080}"
+    echo "  Temporal:   http://localhost:8082"
 }
 
 # ============================================================
@@ -851,10 +877,22 @@ _lima_prune_snapshots() {
     _lima_root "
         cutoff=\$(date -u -d '24 hours ago' +%Y-%m-%dT%H-%M-%SZ 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H-%M-%SZ)
         latest_target=\$(readlink -f ${snapshot_dir}/latest.tar.age 2>/dev/null | xargs basename 2>/dev/null)
-        pruned=0
+        min_keep=2
 
+        # Count total auto-snapshots
+        total=0
         for f in ${snapshot_dir}/snapshot--*.tar.age ${snapshot_dir}/pre-start--*.tar.age; do
             [ -f \"\$f\" ] || continue
+            total=\$((total + 1))
+        done
+
+        pruned=0
+        # Iterate oldest first (ls -t gives newest first, use -tr for oldest first)
+        for f in \$(ls -tr ${snapshot_dir}/snapshot--*.tar.age ${snapshot_dir}/pre-start--*.tar.age 2>/dev/null); do
+            [ -f \"\$f\" ] || continue
+            remaining=\$((total - pruned))
+            [ \$remaining -le \$min_keep ] && break
+
             fname=\$(basename \"\$f\")
             [ \"\$fname\" = \"\$latest_target\" ] && continue
 
@@ -864,6 +902,7 @@ _lima_prune_snapshots() {
         done
 
         [ \$pruned -gt 0 ] && echo \"[snapshots] Pruned \$pruned old snapshot(s)\"
+        true
     " 2>/dev/null
 }
 
@@ -899,12 +938,59 @@ lima_stop() {
     _lima_snapshot_pull "$instance"
     echo "Stopping ClawFactory services..."
     _lima_root "
+        systemctl stop clawfactory-temporal-worker 2>/dev/null || true
+        systemctl stop clawfactory-temporal 2>/dev/null || true
         systemctl stop openclaw-gateway@${instance} 2>/dev/null || true
         systemctl stop clawfactory-llm-proxy 2>/dev/null || true
         systemctl stop clawfactory-controller 2>/dev/null || true
         systemctl stop nginx 2>/dev/null || true
     "
     echo "Services stopped"
+}
+
+# ============================================================
+# lima_killswitch_watch — Poll for killswitch signal from controller
+# ============================================================
+lima_killswitch_watch() {
+    local pidfile="/tmp/clawfactory-killswitch.pid"
+    local signal_dir="/tmp/clawfactory-snapshot-sync"
+
+    # Kill any existing watcher
+    lima_killswitch_stop 2>/dev/null
+
+    (
+        while true; do
+            for signal_file in "${signal_dir}"/KILLSWITCH_*; do
+                [ -f "$signal_file" ] || continue
+                instance=$(cat "$signal_file" 2>/dev/null)
+                if [ -z "$instance" ]; then
+                    instance=$(basename "$signal_file" | sed 's/^KILLSWITCH_//')
+                fi
+                echo "[killswitch] Signal received for instance: ${instance}"
+                rm -f "$signal_file"
+
+                # Run stop sequence on the host
+                export INSTANCE_NAME="$instance"
+                lima_stop
+                lima_tunnels stop
+                echo "[killswitch] Instance ${instance} stopped"
+            done
+            sleep 5
+        done
+    ) &
+    echo $! > "$pidfile"
+    echo "[killswitch] Watcher started (PID $(cat "$pidfile"))"
+}
+
+lima_killswitch_stop() {
+    local pidfile="/tmp/clawfactory-killswitch.pid"
+    if [ -f "$pidfile" ]; then
+        local pid
+        pid=$(cat "$pidfile")
+        kill "$pid" 2>/dev/null || true
+        rm -f "$pidfile"
+        echo "[killswitch] Watcher stopped"
+    fi
 }
 
 # ============================================================
@@ -978,6 +1064,8 @@ _lima_mount_restart() {
 
     echo "Stopping services..."
     _lima_root "
+        systemctl stop clawfactory-temporal-worker 2>/dev/null || true
+        systemctl stop clawfactory-temporal 2>/dev/null || true
         systemctl stop openclaw-gateway@${instance} 2>/dev/null || true
         systemctl stop clawfactory-llm-proxy 2>/dev/null || true
         systemctl stop clawfactory-controller 2>/dev/null || true

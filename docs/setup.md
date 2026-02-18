@@ -105,12 +105,13 @@ For detailed API key instructions, see [API Keys](API-KEYS.md).
 The simplest way to reach your agents from anywhere on your tailnet.
 
 ```bash
-# Expose gateway and controller on your tailnet
+# Expose gateway, controller, and Temporal on your tailnet
 tailscale serve --bg --set-path /<instance> http://127.0.0.1:18789
 tailscale serve --bg --set-path /<instance>/controller http://127.0.0.1:8080
+tailscale serve --bg --https=8444 --set-path / http://127.0.0.1:8082
 ```
 
-Then access via `https://your-machine.tailnet.ts.net/<instance>/` from any device on your network.
+Then access via `https://your-machine.tailnet.ts.net/<instance>/` from any device on your network. Temporal UI is available at `https://your-machine.tailnet.ts.net:8444/`.
 
 ### Cloudflare Zero Trust
 

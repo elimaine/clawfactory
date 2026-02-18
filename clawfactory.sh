@@ -158,6 +158,7 @@ print_urls() {
         echo "  Gateway:    http://localhost:${GATEWAY_PORT}"
         echo "  Controller: http://localhost:${CONTROLLER_PORT}/controller"
     fi
+    echo "  Temporal:   http://localhost:8082"
 
     # Print Tailscale HTTPS URLs if available
     local ts_bin="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
@@ -172,6 +173,7 @@ print_urls() {
                 echo "  Tailnet:    https://${ts_hostname}/"
                 echo "  Tailnet:    https://${ts_hostname}:8443/controller"
             fi
+            echo "  Tailnet:    https://${ts_hostname}:8444/ (temporal)"
         fi
     fi
 }
@@ -217,6 +219,7 @@ case "${1:-help}" in
 
             lima_services start
             lima_tunnels start
+            lima_killswitch_watch
             echo ""
             echo "ClawFactory [${INSTANCE_NAME}] started (Lima VM)"
             print_urls
@@ -229,6 +232,7 @@ case "${1:-help}" in
         ;;
     stop)
         if [[ "$SANDBOX_MODE" == "lima" ]]; then
+            lima_killswitch_stop
             lima_tunnels stop
             lima_stop
             echo "ClawFactory [${INSTANCE_NAME}] stopped (Lima VM)"
@@ -279,6 +283,8 @@ case "${1:-help}" in
                 controller) _lima_root "journalctl -u clawfactory-controller -f --no-pager" ;;
                 proxy)      _lima_root "journalctl -u nginx -f --no-pager" ;;
                 docker)     _lima_root "journalctl -u docker -f --no-pager" ;;
+                temporal)   _lima_root "journalctl -u clawfactory-temporal -f --no-pager" ;;
+                worker)     _lima_root "journalctl -u clawfactory-temporal-worker -f --no-pager" ;;
                 *)          _lima_root "journalctl -u $service -f --no-pager" ;;
             esac
         else

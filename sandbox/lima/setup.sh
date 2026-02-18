@@ -188,7 +188,7 @@ install_dependencies() {
     echo ""
 
     # Step 1: Base packages
-    echo -n "  [1/6] Base packages (ca-certificates, git, rsync, iptables)... "
+    echo -n "  [1/8] Base packages (ca-certificates, git, rsync, iptables)... "
     lima_root "
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq >/dev/null 2>&1
@@ -212,7 +212,7 @@ install_dependencies() {
     " >/dev/null 2>&1
 
     # Step 2: Node.js
-    echo -n "  [2/6] Node.js 22 + pnpm... "
+    echo -n "  [2/8] Node.js 22 + pnpm... "
     lima_root "
         export DEBIAN_FRONTEND=noninteractive
         if ! command -v node >/dev/null 2>&1; then
@@ -224,7 +224,7 @@ install_dependencies() {
     echo "done ($(lima_exec node --version 2>/dev/null || echo '?'))"
 
     # Step 3: Python + controller deps
-    echo -n "  [3/6] Python 3 + controller dependencies... "
+    echo -n "  [3/8] Python 3 + controller dependencies... "
     lima_root "
         export DEBIAN_FRONTEND=noninteractive
         apt-get install -y -qq python3 python3-pip python3-venv >/dev/null 2>&1
@@ -236,7 +236,7 @@ install_dependencies() {
     echo "done"
 
     # Step 4: Nginx
-    echo -n "  [4/6] Nginx... "
+    echo -n "  [4/8] Nginx... "
     lima_root "
         export DEBIAN_FRONTEND=noninteractive
         apt-get install -y -qq nginx >/dev/null 2>&1
@@ -244,7 +244,7 @@ install_dependencies() {
     echo "done"
 
     # Step 5: Docker CE
-    echo -n "  [5/6] Docker CE... "
+    echo -n "  [5/8] Docker CE... "
     lima_root "
         export DEBIAN_FRONTEND=noninteractive
         if ! command -v docker >/dev/null 2>&1; then
@@ -259,10 +259,32 @@ install_dependencies() {
     "
     echo "done ($(lima_exec docker --version 2>/dev/null | cut -d' ' -f3 || echo '?'))"
 
-    # Step 6: Enable services
-    echo -n "  [6/6] Enabling services... "
+    # Step 6: Temporal CLI
+    echo -n "  [6/8] Temporal CLI... "
+    lima_root "
+        if ! command -v temporal >/dev/null 2>&1; then
+            curl -sSf https://temporal.download/cli.sh | sh -s -- --dir /usr/local/bin 2>/dev/null || {
+                # Fallback: download from GitHub releases for ARM64
+                ARCH=\$(dpkg --print-architecture)
+                VER=\$(curl -sSf https://api.github.com/repos/temporalio/cli/releases/latest 2>/dev/null | grep -o '\"tag_name\": *\"[^\"]*\"' | cut -d'\"' -f4)
+                VER=\${VER#v}
+                curl -sSfL \"https://github.com/temporalio/cli/releases/download/v\${VER}/temporal_cli_\${VER}_linux_\${ARCH}.tar.gz\" -o /tmp/temporal.tar.gz
+                tar -xzf /tmp/temporal.tar.gz -C /usr/local/bin/ temporal
+                rm -f /tmp/temporal.tar.gz
+            }
+        fi
+    "
+    echo "done ($(lima_exec temporal --version 2>/dev/null || echo '?'))"
+
+    # Step 7: Enable services
+    echo -n "  [7/8] Enabling services... "
     lima_root "systemctl enable docker nginx >/dev/null 2>&1"
     lima_root "apt-get clean >/dev/null 2>&1 && rm -rf /var/lib/apt/lists/*"
+    echo "done"
+
+    # Step 8: Temporal directory
+    echo -n "  [8/8] Temporal data directory... "
+    lima_root "mkdir -p /srv/clawfactory/temporal"
     echo "done"
 
     echo ""
@@ -277,7 +299,7 @@ configure_services() {
 
     lima_root "
         # ---- Directory structure ----
-        mkdir -p /srv/clawfactory/{controller,proxy,bot_repos,secrets,audit,snapshots}
+        mkdir -p /srv/clawfactory/{controller,proxy,bot_repos,secrets,audit,snapshots,temporal}
 
         # ---- Systemd unit: OpenClaw Gateway (template) ----
         # Port and state dir are set per-instance via overrides in lima_services()
@@ -293,7 +315,7 @@ WorkingDirectory=/srv/clawfactory/bot_repos/%i/code
 EnvironmentFile=/srv/clawfactory/secrets/%i/gateway.env
 Environment=OPENCLAW_STATE_DIR=/srv/clawfactory/bot_repos/%i/state
 ExecStart=/usr/bin/node dist/index.js gateway --bind lan
-Restart=on-failure
+Restart=always
 RestartSec=5
 
 [Install]
@@ -354,6 +376,44 @@ RestartSec=5
 WantedBy=multi-user.target
 SVC
 
+        # ---- Systemd unit: Temporal Server (dev mode, SQLite) ----
+        cat > /etc/systemd/system/clawfactory-temporal.service <<'SVC'
+[Unit]
+Description=Temporal Server (dev mode, SQLite)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/temporal server start-dev \
+    --port 7233 --http-port 7243 --ui-port 8233 \
+    --ip 0.0.0.0 \
+    --db-filename /srv/clawfactory/temporal/temporal.db \
+    --log-format json --namespace default
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SVC
+
+        # ---- Systemd unit: Temporal Worker ----
+        cat > /etc/systemd/system/clawfactory-temporal-worker.service <<'SVC'
+[Unit]
+Description=ClawFactory Temporal Worker
+After=network.target clawfactory-temporal.service
+Wants=clawfactory-temporal.service
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/clawfactory/controller
+ExecStart=/usr/bin/python3 temporal_worker.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SVC
+
         # ---- Default nginx config ----
         cat > /etc/nginx/sites-available/clawfactory <<'NGINX'
 log_format json_access escape=json '{\"timestamp\":\"\$time_iso8601\",\"remote_addr\":\"\$remote_addr\",\"method\":\"\$request_method\",\"uri\":\"\$request_uri\",\"status\":\$status,\"bytes\":\$body_bytes_sent,\"duration\":\$request_time,\"upstream_time\":\"\$upstream_response_time\",\"user_agent\":\"\$http_user_agent\",\"server_port\":\"\$server_port\"}';
@@ -400,6 +460,22 @@ server {
 
     location /health {
         proxy_pass http://127.0.0.1:8080/health;
+    }
+}
+
+server {
+    listen 8082;
+    server_name _;
+
+    location / {
+        proxy_pass http://127.0.0.1:8233;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \"upgrade\";
     }
 }
 NGINX

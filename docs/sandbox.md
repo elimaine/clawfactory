@@ -46,14 +46,19 @@ The heavy-duty option. The entire agent stack runs as systemd services inside a 
 │  │  │  nginx  │──►│   Gateway    │──►│    LLM Proxy     │   │  │
 │  │  │  :80    │   │  (OpenClaw)  │   │  :9090           │   │  │
 │  │  │  :8081  │─┐ │  :18789      │   │                  │   │  │
-│  │  └─────────┘ │ └──────────────┘   │ Anthropic ──► api.anthropic.com
-│  │              │                    │ OpenAI   ──► api.openai.com
-│  │              │ ┌──────────────┐   │ Gemini   ──► googleapis.com
-│  │              └►│  Controller  │   └──────────────────┘   │  │
-│  │                │  (FastAPI)   │         │                │  │
-│  │                │  :8080       │         ▼                │  │
-│  │                └──────────────┘   /srv/clawfactory/      │  │
-│  │                                  audit/traffic.jsonl     │  │
+│  │  │  :8082  │┐│ └──────────────┘   │ Anthropic ──► api.anthropic.com
+│  │  └─────────┘││                    │ OpenAI   ──► api.openai.com
+│  │             ││ ┌──────────────┐   │ Gemini   ──► googleapis.com
+│  │             │└►│  Controller  │   └──────────────────┘   │  │
+│  │             │  │  (FastAPI)   │         │                │  │
+│  │             │  │  :8080       │         ▼                │  │
+│  │             │  └──────────────┘   /srv/clawfactory/      │  │
+│  │             │                    audit/traffic.jsonl     │  │
+│  │             │  ┌──────────────┐                          │  │
+│  │             └─►│  Temporal    │  workflow orchestration   │  │
+│  │                │  :7233 gRPC  │  retries, scheduling     │  │
+│  │                │  :8233 UI   │──► temporal/temporal.db   │  │
+│  │                └──────────────┘                          │  │
 │  │                ┌──────────────┐                          │  │
 │  │                │  MITM Proxy │  (opt-in, off by default) │  │
 │  │                │  mitmproxy  │  iptables REDIRECT        │  │

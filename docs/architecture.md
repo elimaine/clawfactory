@@ -56,7 +56,7 @@ code/   (OpenClaw source + workspace)
 
 ### Lima Mode (macOS)
 
-When `SANDBOX_MODE=lima`, the entire agent stack runs as systemd services inside a Lima VM with near-native VZ framework networking. Files sync from host to VM via rsync over SSH. No Docker overhead for the core services — Docker only runs inside the VM for OpenClaw's built-in tool sandbox. See [Sandbox](sandbox.md) for the full breakdown.
+When `SANDBOX_MODE=lima`, the entire agent stack runs as systemd services inside a Lima VM with near-native VZ framework networking. Files sync from host to VM via rsync over SSH. No Docker overhead for the core services — Docker only runs inside the VM for OpenClaw's built-in tool sandbox. Temporal provides durable workflow orchestration with automatic retries and a web UI. See [Sandbox](sandbox.md) for the full breakdown.
 
 ## Subsystems
 
@@ -69,6 +69,8 @@ Each subsystem has strict boundaries — they can only write to what they own.
 | **LLM Proxy** | Logs outbound AI API calls | Internal :9090 | audit/traffic.jsonl |
 | **MITM Proxy** | Transparent TLS capture (opt-in) | Internal :8888 | audit/traffic.enc.jsonl (encrypted) |
 | **Controller** | Management & monitoring | Internal network | code/ (pull upstream), snapshots/ |
+| **Temporal** | Workflow orchestration (retries, scheduling) | Internal :7233 (gRPC), :8233 (UI) | temporal/temporal.db |
+| **Temporal Worker** | Executes workflow activities | Internal | None |
 
 ## Directory Layout
 

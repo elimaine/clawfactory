@@ -20,7 +20,7 @@ Bring agents online, take them offline, or cycle them.
 Peek under the hood when you need to see what your agent is up to.
 
 ```bash
-./clawfactory.sh logs [service]     # Tail live logs (gateway/proxy/controller)
+./clawfactory.sh logs [service]     # Tail live logs (gateway/proxy/controller/temporal/worker)
 ./clawfactory.sh shell [service]    # Drop into a container shell
 ./clawfactory.sh controller         # Print the Controller dashboard URL
 ./clawfactory.sh audit              # Review the recent audit trail
@@ -74,6 +74,26 @@ Talk directly to the OpenClaw runtime inside the sandbox — useful for first-ti
 
 ```bash
 ./clawfactory.sh openclaw           # Launch the OpenClaw interactive CLI
+```
+
+## Temporal Workflows
+
+Temporal provides durable workflow orchestration with automatic retries, scheduling, and a web UI for visibility.
+
+```bash
+./clawfactory.sh logs temporal      # Tail Temporal server logs
+./clawfactory.sh logs worker        # Tail Temporal worker logs
+```
+
+Access the Temporal UI:
+- **Local:** `http://localhost:8082`
+- **Tailnet:** `https://<hostname>:8444/`
+
+Set up workflow schedules (run once after deployment):
+```bash
+# Inside the Lima VM
+cd /srv/clawfactory/controller
+python3 temporal_schedules.py
 ```
 
 ## Kill Switch
