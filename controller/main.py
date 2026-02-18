@@ -523,6 +523,7 @@ async def promote_ui(
                         <button onclick="pullUpstream()">Pull Latest OpenClaw</button>
                         <button onclick="rebuildGateway()" class="secondary">Rebuild Gateway</button>
                         <button onclick="restartGateway()" class="danger">Restart Gateway</button>
+                        <button onclick="killswitch()" class="danger" style="background: #b71c1c;">Killswitch</button>
                     </div>
                     <div id="promote-result" class="result"></div>
                 </div>
@@ -2821,6 +2822,22 @@ async def promote_ui(
                 }}
             }}
 
+            async function killswitch() {{
+                if (!confirm('KILLSWITCH: This will snapshot, stop the gateway, and signal the host to shut down this instance. Continue?')) return;
+                const result = document.getElementById('promote-result');
+                result.style.display = 'block';
+                result.className = 'result';
+                result.textContent = 'Killswitch activated — shutting down...';
+                try {{
+                    const resp = await fetch(basePath + '/killswitch', {{ method: 'POST' }});
+                    const data = await resp.json();
+                    result.textContent = data.status || JSON.stringify(data);
+                }} catch(e) {{
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
+                }}
+            }}
+
             async function rebuildGateway() {{
                 const result = document.getElementById('promote-result');
                 result.style.display = 'block';
@@ -3593,19 +3610,15 @@ def _prune_old_snapshots(max_age_hours: int = 24):
         latest_target = latest_link.resolve().name
 
     auto_prefixes = ("snapshot--", "pre-start--")
-    pruned = 0
+    min_keep = 2
 
+    # Collect all auto-snapshots with their parsed timestamps
+    auto_snapshots = []
     for f in SNAPSHOTS_DIR.glob("*.tar.age"):
         if f.name == "latest.tar.age":
             continue
-        if f.name == latest_target:
-            continue
-
-        # Only prune auto-generated snapshots
         if not any(f.name.startswith(p) for p in auto_prefixes):
             continue
-
-        # Parse timestamp from name--YYYY-MM-DDTHH-MM-SSZ.tar.age
         stem = f.name.replace(".tar.age", "")
         if "--" not in stem:
             continue
@@ -3614,7 +3627,19 @@ def _prune_old_snapshots(max_age_hours: int = 24):
             ts = datetime.strptime(ts_str, "%Y-%m-%dT%H-%M-%SZ").replace(tzinfo=timezone.utc)
         except ValueError:
             continue
+        auto_snapshots.append((ts, f))
 
+    # Sort oldest first so we prune oldest first
+    auto_snapshots.sort(key=lambda x: x[0])
+
+    pruned = 0
+    for ts, f in auto_snapshots:
+        # Stop if we'd go below the minimum keep count
+        remaining = len(auto_snapshots) - pruned
+        if remaining <= min_keep:
+            break
+        if f.name == latest_target:
+            continue
         if ts < cutoff:
             size = f.stat().st_size
             f.unlink()
@@ -5034,6 +5059,40 @@ async def gateway_restart_endpoint(
         raise HTTPException(status_code=500, detail="Failed to restart gateway")
 
     return {"status": "restarting", "container": GATEWAY_CONTAINER}
+
+
+@app.post("/killswitch")
+@app.post("/controller/killswitch")
+async def killswitch_endpoint(
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Killswitch: snapshot, signal host to stop, then stop gateway."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    audit_log("killswitch_triggered", {"instance": INSTANCE_NAME})
+
+    # Best-effort snapshot before shutdown
+    try:
+        create_snapshot(name="killswitch")
+    except Exception as e:
+        audit_log("killswitch_snapshot_failed", {"error": str(e)})
+
+    # Write signal file for host-side watcher
+    signal_dir = Path("/tmp/clawfactory-snapshot-sync")
+    signal_dir.mkdir(parents=True, exist_ok=True)
+    signal_file = signal_dir / f"KILLSWITCH_{INSTANCE_NAME}"
+    signal_file.write_text(INSTANCE_NAME)
+
+    # Stop the gateway
+    try:
+        gateway_stop()
+    except Exception:
+        pass
+
+    return {"status": "killswitch_triggered"}
 
 
 @app.post("/pull-upstream")
