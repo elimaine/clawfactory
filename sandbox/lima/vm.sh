@@ -141,6 +141,7 @@ lima_sync() {
             --exclude 'bot_repos/*/code/dist' \
             --exclude 'audit' \
             --exclude 'mitm-ca' \
+            --exclude 'temporal' \
             ${staging}/ ${LIMA_SRV}/
 
         # Ensure directory structure
@@ -405,6 +406,9 @@ lima_services() {
             fi
         fi
 
+        # Workflow definitions directory (shared across instances)
+        mkdir -p ${LIMA_SRV}/workflows
+
         # Snapshots owned by instance user
         mkdir -p ${LIMA_SRV}/snapshots/${instance}
         chown -R ${svc_user}:${svc_user} ${LIMA_SRV}/snapshots/${instance}/
@@ -474,6 +478,8 @@ Environment=ENCRYPTED_TRAFFIC_LOG=${LIMA_SRV}/audit/traffic.enc.jsonl
 Environment=FERNET_KEY_FILE=${LIMA_SRV}/audit/traffic.fernet.key
 Environment=FERNET_KEY_AGE=${LIMA_SRV}/audit/traffic.fernet.key.age
 Environment=MITM_CA_DIR=${LIMA_SRV}/mitm-ca
+Environment=TEMPORAL_HOST=127.0.0.1:7233
+Environment=WORKFLOWS_DIR=${LIMA_SRV}/workflows
 ExecStart=
 ExecStart=/usr/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port ${CONTROLLER_PORT:-8080}
 EOF

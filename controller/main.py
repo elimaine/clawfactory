@@ -14,6 +14,7 @@ Responsibilities:
 import asyncio
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -29,6 +30,13 @@ from pydantic import BaseModel
 import traffic_log
 import scrub
 
+# Temporal (optional — graceful fallback if unavailable)
+try:
+    from temporalio.client import Client as TemporalClient
+    HAS_TEMPORALIO = True
+except ImportError:
+    HAS_TEMPORALIO = False
+
 # Configuration from environment
 CODE_DIR = Path(os.environ.get("CODE_DIR", os.environ.get("APPROVED_DIR", "/srv/bot/code")))
 OPENCLAW_HOME = Path(os.environ.get("OPENCLAW_HOME", "/srv/bot/state"))
@@ -42,6 +50,8 @@ AGENT_API_TOKEN = os.environ.get("AGENT_API_TOKEN", "")
 SNAPSHOTS_DIR = Path(os.environ.get("SNAPSHOTS_DIR", "/srv/snapshots"))
 AGE_KEY = Path(os.environ.get("AGE_KEY", "/srv/secrets/snapshot.key"))
 SECRETS_DIR = Path(os.environ.get("SECRETS_DIR", f"/srv/clawfactory/secrets/{INSTANCE_NAME}"))
+TEMPORAL_HOST = os.environ.get("TEMPORAL_HOST", "127.0.0.1:7233")
+WORKFLOWS_DIR = Path(os.environ.get("WORKFLOWS_DIR", "/srv/clawfactory/workflows"))
 
 # Lima mode: GATEWAY_CONTAINER=local means systemd, not Docker
 IS_LIMA_MODE = GATEWAY_CONTAINER == "local"
@@ -73,6 +83,25 @@ def gateway_start():
         container.start()
 
 app = FastAPI(title="ClawFactory Controller", version="1.0.0")
+
+# Temporal client (connected on startup)
+temporal_client = None
+
+
+@app.on_event("startup")
+async def _connect_temporal():
+    """Connect to Temporal server on startup. Non-fatal if unavailable."""
+    global temporal_client
+    if not HAS_TEMPORALIO:
+        print("[temporal] temporalio package not installed — Temporal endpoints disabled")
+        return
+    try:
+        temporal_client = await TemporalClient.connect(TEMPORAL_HOST)
+        print(f"[temporal] Connected to {TEMPORAL_HOST}")
+    except Exception as e:
+        temporal_client = None
+        print(f"[temporal] Could not connect to {TEMPORAL_HOST}: {e} — Temporal endpoints disabled")
+
 
 # Session storage (persisted to file)
 SESSIONS_FILE = Path("/srv/audit/sessions.json")
@@ -498,6 +527,7 @@ async def promote_ui(
             <a href="#logs" onclick="switchPage('logs')">Logs</a>
             <a href="#snapshots" onclick="switchPage('snapshots')">Snapshots</a>
             <a href="#settings" onclick="switchPage('settings')">Settings</a>
+            <a href="http://localhost:8082" target="_blank">Temporal &#8599;</a>
         </nav>
 
         <main id="content">
@@ -5775,6 +5805,302 @@ async def agent_gateway_config(
         return {"error": "Config file not found"}
     except Exception as e:
         return {"error": str(e)}
+
+
+# ============================================================
+# Temporal Workflows
+# ============================================================
+
+class TemporalStartRequest(BaseModel):
+    workflow_type: str
+    input: Optional[str] = None
+    workflow_id: Optional[str] = None
+
+
+async def _start_temporal_workflow(body: TemporalStartRequest):
+    """Start a Temporal workflow. Shared logic for agent and controller endpoints."""
+    if temporal_client is None:
+        raise HTTPException(status_code=503, detail="Temporal is not connected")
+
+    wf_id = body.workflow_id or f"{body.workflow_type}-{int(datetime.now(timezone.utc).timestamp())}"
+
+    try:
+        handle = await temporal_client.start_workflow(
+            body.workflow_type,
+            body.input if body.input is not None else None,
+            id=wf_id,
+            task_queue="clawfactory",
+        )
+        audit_log("temporal_workflow_started", {
+            "workflow_type": body.workflow_type,
+            "workflow_id": handle.id,
+            "run_id": handle.result_run_id,
+        })
+        return {"workflow_id": handle.id, "run_id": handle.result_run_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/agent/temporal/start")
+async def agent_temporal_start(
+    body: TemporalStartRequest,
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    """Start a Temporal workflow — agent-scoped (requires AGENT_API_TOKEN)."""
+    if not check_agent_auth(token, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return await _start_temporal_workflow(body)
+
+
+@app.get("/agent/temporal/status/{workflow_id}")
+async def agent_temporal_status(
+    workflow_id: str,
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    """Get workflow status — agent-scoped (requires AGENT_API_TOKEN)."""
+    if not check_agent_auth(token, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if temporal_client is None:
+        raise HTTPException(status_code=503, detail="Temporal is not connected")
+
+    try:
+        handle = temporal_client.get_workflow_handle(workflow_id)
+        desc = await handle.describe()
+        info = {
+            "workflow_id": desc.id,
+            "run_id": desc.run_id,
+            "status": desc.status.name if desc.status else None,
+        }
+        if desc.status and desc.status.name == "COMPLETED":
+            try:
+                info["result"] = await handle.result()
+            except Exception:
+                pass
+        return info
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/temporal/start")
+async def controller_temporal_start(
+    body: TemporalStartRequest,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Start a Temporal workflow — controller auth."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return await _start_temporal_workflow(body)
+
+
+@app.get("/temporal/workflows")
+async def controller_temporal_list(
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """List recent workflow executions — controller auth."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if temporal_client is None:
+        raise HTTPException(status_code=503, detail="Temporal is not connected")
+
+    try:
+        workflows = []
+        async for wf in temporal_client.list_workflows(query="ORDER BY StartTime DESC"):
+            workflows.append({
+                "workflow_id": wf.id,
+                "run_id": wf.run_id,
+                "type": wf.workflow_type,
+                "status": wf.status.name if wf.status else None,
+                "start_time": wf.start_time.isoformat() if wf.start_time else None,
+                "close_time": wf.close_time.isoformat() if wf.close_time else None,
+            })
+            if len(workflows) >= limit:
+                break
+        return {"workflows": workflows}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/temporal/workflow/{workflow_id}")
+async def controller_temporal_get(
+    workflow_id: str,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Get status/result of a specific workflow — controller auth."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if temporal_client is None:
+        raise HTTPException(status_code=503, detail="Temporal is not connected")
+
+    try:
+        handle = temporal_client.get_workflow_handle(workflow_id)
+        desc = await handle.describe()
+        info = {
+            "workflow_id": desc.id,
+            "run_id": desc.run_id,
+            "type": desc.workflow_type,
+            "status": desc.status.name if desc.status else None,
+            "start_time": desc.start_time.isoformat() if desc.start_time else None,
+            "close_time": desc.close_time.isoformat() if desc.close_time else None,
+        }
+        # Try to get result if completed
+        if desc.status and desc.status.name == "COMPLETED":
+            try:
+                info["result"] = await handle.result()
+            except Exception:
+                pass
+        return info
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================
+# Workflow Definitions (CRUD + run-by-name)
+# ============================================================
+
+
+def _load_workflow_definition(name: str) -> dict:
+    """Load a workflow definition by name. Raises HTTPException if not found."""
+    safe_name = Path(name).name  # prevent path traversal
+    path = WORKFLOWS_DIR / f"{safe_name}.json"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"Workflow definition '{name}' not found")
+    return json.loads(path.read_text())
+
+
+@app.get("/temporal/definitions")
+async def controller_workflow_definitions_list(
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """List all saved workflow definitions — controller auth."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    WORKFLOWS_DIR.mkdir(parents=True, exist_ok=True)
+    definitions = []
+    for f in sorted(WORKFLOWS_DIR.glob("*.json")):
+        try:
+            defn = json.loads(f.read_text())
+            definitions.append({
+                "name": defn.get("name", f.stem),
+                "description": defn.get("description", ""),
+                "steps": len(defn.get("steps", [])),
+            })
+        except Exception:
+            pass
+    return {"definitions": definitions}
+
+
+@app.get("/temporal/definition/{name}")
+async def controller_workflow_definition_get(
+    name: str,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Get a specific workflow definition — controller auth."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return _load_workflow_definition(name)
+
+
+@app.post("/temporal/definition")
+async def controller_workflow_definition_save(
+    request: Request,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Create or update a workflow definition — controller auth."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    body = await request.json()
+    name = body.get("name")
+    if not name or not re.match(r"^[a-zA-Z0-9_-]+$", name):
+        raise HTTPException(status_code=400, detail="Invalid or missing 'name' (alphanumeric, hyphens, underscores)")
+    if not body.get("steps"):
+        raise HTTPException(status_code=400, detail="Definition must have at least one step")
+    WORKFLOWS_DIR.mkdir(parents=True, exist_ok=True)
+    path = WORKFLOWS_DIR / f"{name}.json"
+    path.write_text(json.dumps(body, indent=2))
+    audit_log("workflow_definition_saved", {"name": name})
+    return {"status": "saved", "name": name}
+
+
+@app.delete("/temporal/definition/{name}")
+async def controller_workflow_definition_delete(
+    name: str,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Delete a workflow definition — controller auth."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    safe_name = Path(name).name
+    path = WORKFLOWS_DIR / f"{safe_name}.json"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"Workflow definition '{name}' not found")
+    path.unlink()
+    audit_log("workflow_definition_deleted", {"name": name})
+    return {"status": "deleted", "name": name}
+
+
+async def _run_workflow_definition(name: str):
+    """Start a CustomWorkflow with a saved definition. Shared logic."""
+    if temporal_client is None:
+        raise HTTPException(status_code=503, detail="Temporal is not connected")
+    defn = _load_workflow_definition(name)
+    wf_id = f"custom-{name}-{int(datetime.now(timezone.utc).timestamp())}"
+    try:
+        handle = await temporal_client.start_workflow(
+            "CustomWorkflow",
+            json.dumps(defn),
+            id=wf_id,
+            task_queue="clawfactory",
+        )
+        audit_log("custom_workflow_started", {
+            "definition": name,
+            "workflow_id": handle.id,
+            "run_id": handle.result_run_id,
+        })
+        return {"workflow_id": handle.id, "run_id": handle.result_run_id, "definition": name}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/temporal/definition/{name}/run")
+async def controller_workflow_definition_run(
+    name: str,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Run a saved workflow definition — controller auth."""
+    if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return await _run_workflow_definition(name)
+
+
+@app.post("/agent/temporal/run/{name}")
+async def agent_workflow_definition_run(
+    name: str,
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    """Run a saved workflow definition — agent auth."""
+    if not check_agent_auth(token, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return await _run_workflow_definition(name)
 
 
 # ============================================================
