@@ -149,9 +149,10 @@ lima_sync() {
                  ${LIMA_SRV}/audit \
                  ${LIMA_SRV}/snapshots/${instance}
 
-        # Lock down secrets — only root can read controller env
+        # Lock down secrets — only root can read controller env and credential files
         chmod 700 ${LIMA_SRV}/secrets/${instance}/ 2>/dev/null || true
         chmod 600 ${LIMA_SRV}/secrets/${instance}/*.env 2>/dev/null || true
+        chmod 600 ${LIMA_SRV}/secrets/${instance}/*.json 2>/dev/null || true
 
         # Fix ownership so gateway user can access deployed files
         svc_user=openclaw-${instance}
@@ -390,6 +391,13 @@ lima_services() {
                 chown root:${svc_user} ${LIMA_SRV}/secrets/${instance}/snapshot.key
                 chmod 640 ${LIMA_SRV}/secrets/${instance}/snapshot.key
             fi
+
+            # JSON credential files (e.g. Google service account): root-only
+            for jf in ${LIMA_SRV}/secrets/${instance}/*.json; do
+                [ -f \"\${jf}\" ] || continue
+                chown root:root \"\${jf}\"
+                chmod 600 \"\${jf}\"
+            done
 
             # Generate GATEWAY_INTERNAL_TOKEN if missing
             if ! grep -q 'GATEWAY_INTERNAL_TOKEN' ${LIMA_SRV}/secrets/${instance}/gateway.env 2>/dev/null; then
