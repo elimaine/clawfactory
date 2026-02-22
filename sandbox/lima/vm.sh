@@ -870,8 +870,8 @@ _lima_backup_state() {
             --exclude='agents/*/sessions/*.jsonl.deleted.*' \
             --exclude='installed' \
             --exclude='installed/*' \
-            --exclude='workspace/*/.git' \
-            --exclude='*/venv' \
+            --exclude='*/.git' \
+            --exclude='**/venv' \
             --exclude='*/node_modules' \
             --exclude='*/__pycache__' \
             --exclude='*/.venv' \
