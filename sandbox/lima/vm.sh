@@ -149,14 +149,20 @@ lima_sync() {
                  ${LIMA_SRV}/audit \
                  ${LIMA_SRV}/snapshots/${instance}
 
-        # Lock down secrets — only root can read controller env and credential files
-        chmod 700 ${LIMA_SRV}/secrets/${instance}/ 2>/dev/null || true
-        chmod 600 ${LIMA_SRV}/secrets/${instance}/*.env 2>/dev/null || true
-        chmod 600 ${LIMA_SRV}/secrets/${instance}/*.json 2>/dev/null || true
-
-        # Fix ownership so gateway user can access deployed files
+        # Lock down secrets
         svc_user=openclaw-${instance}
+        chmod 750 ${LIMA_SRV}/secrets/${instance}/ 2>/dev/null || true
+        chmod 600 ${LIMA_SRV}/secrets/${instance}/*.env 2>/dev/null || true
         if id \${svc_user} >/dev/null 2>&1; then
+            chown root:\${svc_user} ${LIMA_SRV}/secrets/${instance}/ 2>/dev/null || true
+            # gateway.env + JSON credentials: readable by gateway user
+            chown root:\${svc_user} ${LIMA_SRV}/secrets/${instance}/gateway.env 2>/dev/null || true
+            chmod 640 ${LIMA_SRV}/secrets/${instance}/gateway.env 2>/dev/null || true
+            for jf in ${LIMA_SRV}/secrets/${instance}/*.json; do
+                [ -f \"\${jf}\" ] || continue
+                chown root:\${svc_user} \"\${jf}\"
+                chmod 640 \"\${jf}\"
+            done
             chown -R \${svc_user}:\${svc_user} ${LIMA_SRV}/bot_repos/${instance}/ 2>/dev/null || true
         fi
     "
@@ -392,11 +398,11 @@ lima_services() {
                 chmod 640 ${LIMA_SRV}/secrets/${instance}/snapshot.key
             fi
 
-            # JSON credential files (e.g. Google service account): root-only
+            # JSON credential files (e.g. Google service account): readable by gateway user
             for jf in ${LIMA_SRV}/secrets/${instance}/*.json; do
                 [ -f \"\${jf}\" ] || continue
-                chown root:root \"\${jf}\"
-                chmod 600 \"\${jf}\"
+                chown root:${svc_user} \"\${jf}\"
+                chmod 640 \"\${jf}\"
             done
 
             # Generate GATEWAY_INTERNAL_TOKEN if missing
@@ -586,28 +592,9 @@ lima_tunnels() {
 
             local temporal_port=8082
 
-            # Build forward args — always localhost (use array for safe expansion)
-            local fwd=()
-            fwd+=(-L "127.0.0.1:${gw_port}:127.0.0.1:${gw_port}")
-            fwd+=(-L "127.0.0.1:${ctrl_port}:127.0.0.1:${ctrl_port}")
-            fwd+=(-L "127.0.0.1:${proxy_port}:127.0.0.1:${proxy_port}")
-            fwd+=(-L "127.0.0.1:${temporal_port}:127.0.0.1:${temporal_port}")
-
-            # Add Tailscale binds if available
-            if [[ -n "$ts_ip" ]]; then
-                fwd+=(-L "${ts_ip}:${gw_port}:127.0.0.1:${gw_port}")
-                fwd+=(-L "${ts_ip}:${ctrl_port}:127.0.0.1:${ctrl_port}")
-                fwd+=(-L "${ts_ip}:${proxy_port}:127.0.0.1:${proxy_port}")
-                fwd+=(-L "${ts_ip}:${temporal_port}:127.0.0.1:${temporal_port}")
-            fi
-
-            # Launch background SSH tunnel
-            ssh -F "${LIMA_SSH_CONFIG}" "${fwd[@]}" -N -f "${LIMA_SSH_HOST}"
-            # Find the SSH PID we just spawned
-            pgrep -nf "ssh.*-N.*${LIMA_SSH_HOST}" > "$pidfile" 2>/dev/null || true
-
-            echo "  Tunnels: localhost (${gw_port}, ${ctrl_port}, ${proxy_port}, ${temporal_port})"
-            [[ -n "$ts_ip" ]] && echo "  Tailnet: ${ts_ip} (${gw_port}, ${ctrl_port}, ${proxy_port}, ${temporal_port})"
+            # Lima VZ auto-forwards VM ports to localhost — no SSH tunnels needed.
+            # Tailscale serve handles Tailscale IP → localhost proxying with HTTPS.
+            echo "  Ports: localhost (${gw_port}, ${ctrl_port}, ${proxy_port}, ${temporal_port}) [lima]"
 
             # Set up Tailscale HTTPS serve (auto-certs via MagicDNS)
             local ts_bin="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
