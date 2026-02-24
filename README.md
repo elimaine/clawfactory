@@ -1,4 +1,5 @@
 # ClawFactory
+<img width="853" height="497" alt="Screenshot 2026-02-24 at 2 15 17 PM" src="https://github.com/user-attachments/assets/9cea71cf-061d-4353-8d9c-77fc80ac6353" />
 
 > **Status**: Likely unstable for new installs. I haven't tested the newer openclaw commandline install flow, new users will likely need to either ssh into the lima to complete install or use the lima cli. This was built on latest osx on m4 apple silicon. I also recommend you use tails and forward ports to your tailnet so you can access the gateway and controller (and killswitch!) from your phone anywhere.
 >
@@ -9,7 +10,7 @@
 - The added controller can be used as a non code way of managing your openclaw gateway. Main features of the controller is the restart gateway button (important since openclaw made it so by default gateway cant restart itself anymore, a good idea), as well as memory snapshots (probably my favorite feature). Some features may not be currently working (like mitm web traffic capture), or are working poorly like the snapshot file editor and temporal integration. As far as I know there aren't any super difficult blockers to fixing those.. I just ran out of claude credits and haven't came around to fixing those. If you need them fixing it and setting it up for your use cases probably wont be difficult (plz open PR!). The controller is also a great scaffolding for whatever you want to add to your own openclaw. 
 - Multiple running openclaw instances / VMs has not been tested a while, probably some wires crossed somewhere.. no promises.
 - Security still has a lot of tradeoffs.. I would not use this in production yet.
-- Syncing and snapshoting have the worst kinks worked out but can still be fussy for edge cases. Keep an eye out for ballooning snapshot sizes and add appropriate filetype ignores to snapshot creation.
+- Syncing, controller config chages, and snapshoting have the worst kinks worked out but can still be fussy for edge cases. Keep an eye out for ballooning snapshot sizes and add appropriate filetype ignores to snapshot creation.
 
 OK heres the rest of the docs, hopefully not out of date..
 
