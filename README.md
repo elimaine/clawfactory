@@ -43,9 +43,6 @@ The installer generates all auth tokens automatically. Run `./clawfactory.sh inf
 
 ## Requirements
 
-- **Docker** with Docker Compose
-- **Git**
-- **GitHub CLI** (`gh`) — authenticated with `gh auth login`
 - API keys for your chosen AI providers — see the [API Key Guide](docs/API-KEYS.md)
 
 ## How It Works
