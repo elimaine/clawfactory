@@ -56,24 +56,11 @@ Three subsystems behind a reverse proxy, each with a distinct role:
 | **Gateway** (OpenClaw) | The agent brain — channels, LLM calls, tool execution, memory |
 | **Controller** (FastAPI) | Mission control — webhooks, promotion authority, snapshots, device pairing |
 
-The bot proposes changes via git branches. Humans approve via PR merge or the Controller UI. The gateway cannot promote itself — ever.
-
-## Containment Protocols
-
-These invariants hold at all times, no exceptions:
-
-1. Bots propose via git branches — they cannot merge to main
-2. No self-promotion — requires human merge or explicit UI action
-3. Sandbox boundaries are enforced (Sysbox on Linux, Lima VM on macOS)
-4. Chat messages carry zero authority
-5. The kill switch always wins
-6. All sensitive state is encrypted at rest (age encryption)
-7. Private keys never touch GitHub
-8. Tool execution is isolated when sandbox mode is active
-
 ## Emergency Shutdown
 
 If an agent goes sideways, pull the plug instantly:
+
+Either use the GUI and hit the big red killswitch button or use the CLI:
 
 ```bash
 ./killswitch.sh lock      # Everything stops. Now.
