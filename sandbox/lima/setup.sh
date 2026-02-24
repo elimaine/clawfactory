@@ -231,7 +231,8 @@ install_dependencies() {
         pip3 install --break-system-packages --ignore-installed -q \
             fastapi uvicorn python-multipart httpx \
             PyGithub pyyaml docker python-jose \
-            mitmproxy cryptography 2>/dev/null
+            mitmproxy cryptography \
+            google-api-python-client google-auth google-auth-httplib2 google-auth-oauthlib 2>/dev/null
     "
     echo "done"
 
