@@ -1,12 +1,19 @@
 # ClawFactory
 
-> **Status**: Work in progress - major hurdles overcome! this is midstage looking good, but still unstable for new installs. i recommend installing with claude. this was built on latest osx on m4 apple silicon. 
+> **Status**: Likely unstable for new installs. I haven't tested the newer openclaw commandline install flow, new users will likely need to either ssh into the lima to complete install or use the lima cli. This was built on latest osx on m4 apple silicon. I also recommend you use tails and forward ports to your tailnet so you can access the gateway and controller (and killswitch!) from your phone anywhere.
+>
+> Is this a vibecoded mess? You got me there. Is it still helpful? Absolutely
 
-## Yo Dogg I heard you like OpenClaw Agents
-> so we put a VM in your VM, spun up 5 of them, and added a controller.
+## NO FLUFF "What this is actually good for"
+- Installing openclaw for local use in a lima VM on mac. I have included solutions to sync to and from the VM to make managing your agent less of a hassle in a VM (which is a very good idea for the security layer!).
+- The added controller can be used as a non code way of managing your openclaw gateway. Main features of the controller is the restart gateway button (important since openclaw made it so by default gateway cant restart itself anymore, a good idea), as well as memory snapshots (probably my favorite feature). Some features may not be currently working (like mitm web traffic capture), or are working poorly like the snapshot file editor and temporal integration. As far as I know there aren't any super difficult blockers to fixing those.. I just ran out of claude credits and haven't came around to fixing those. If you need them fixing it and setting it up for your use cases probably wont be difficult (plz open PR!). The controller is also a great scaffolding for whatever you want to add to your own openclaw. 
+- Multiple running openclaw instances / VMs has not been tested a while, probably some wires crossed somewhere.. no promises.
+- Security still has a lot of tradeoffs.. I would not use this in production yet.
+- Syncing and snapshoting have the worst kinks worked out but can still be fussy for edge cases. Keep an eye out for ballooning snapshot sizes and add appropriate filetype ignores to snapshot creation.
+
+OK heres the rest of the docs, hopefully not out of date..
 
 ## Vms all the way down.
-> The bot may propose, but can never silently promote or persist changes.
 
 This project has 3 modes: 
 
