@@ -867,7 +867,7 @@ _lima_backup_state() {
             -cf - . | age -r \"\$pubkey\" -o \"${snapshot_dir}/\$backup_name\"
 
         echo \"\$backup_name\"
-    " 2>/dev/null
+    "
 }
 
 # Prune auto-snapshots older than 24 hours (runs in VM)

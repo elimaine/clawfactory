@@ -41,6 +41,27 @@ export COMPOSE_PROJECT_NAME="clawfactory-${INSTANCE_NAME}"
 COMPOSE_CMD="docker compose -f ${SCRIPT_DIR}/docker-compose.yml"
 CONTAINER_PREFIX="clawfactory-${INSTANCE_NAME}"
 
+# Validate INSTANCE_NAME for commands that require an existing instance
+case "${1:-help}" in
+    bots|list|init|lima|help|"")
+        ;; # These don't need a valid instance
+    *)
+        if [[ "$INSTANCE_NAME" == "default" && ! -d "${SCRIPT_DIR}/bot_repos/default" ]]; then
+            echo "Error: No instance specified and no 'default' instance exists." >&2
+            echo "  Use -i <name> to specify an instance, or run './clawfactory.sh bots' to list available instances." >&2
+            exit 1
+        fi
+        if [[ ! -d "${SCRIPT_DIR}/bot_repos/${INSTANCE_NAME}" ]]; then
+            echo "Error: Instance '${INSTANCE_NAME}' not found." >&2
+            echo "  Available instances:"
+            for d in "${SCRIPT_DIR}"/bot_repos/*/; do
+                [[ -d "$d" ]] && echo "    $(basename "$d")"
+            done
+            exit 1
+        fi
+        ;;
+esac
+
 # Load tokens for URLs
 # Priority: secrets/tokens.env overrides > instance env files
 TOKEN_FILE="${SCRIPT_DIR}/secrets/tokens.env"
@@ -199,13 +220,25 @@ case "${1:-help}" in
                     if [[ "${answer,,}" != "n" ]]; then
                         echo "  Backing up current state..."
                         backup_name=$(_lima_backup_state)
+                        backup_name="${backup_name%%[[:space:]]}"  # trim whitespace
                         if [[ -n "$backup_name" && "$backup_name" != "ERROR" ]]; then
-                            echo "  Current state saved → ${backup_name}"
+                            # Verify the backup file actually exists in the VM
+                            if _lima_root "test -f ${LIMA_SRV}/snapshots/${INSTANCE_NAME}/${backup_name}" 2>/dev/null; then
+                                echo "  Current state saved → ${backup_name}"
+                            else
+                                echo "  Warning: Backup failed (file not created). Aborting restore." >&2
+                                echo "  Create a snapshot manually before restoring: ./clawfactory.sh -i ${INSTANCE_NAME} snapshot create safety" >&2
+                                backup_name=""
+                            fi
+                        else
+                            echo "  Warning: Backup failed. Aborting restore." >&2
+                            echo "  Create a snapshot manually before restoring: ./clawfactory.sh -i ${INSTANCE_NAME} snapshot create safety" >&2
+                            backup_name=""
                         fi
-                        _lima_restore_snapshot
-                        echo "  Restored from: ${snapshot_name}"
-                        if [[ -n "${backup_name:-}" && "$backup_name" != "ERROR" ]]; then
-                            echo "  Rollback: ./clawfactory.sh snapshot restore ${backup_name}"
+                        if [[ -n "$backup_name" ]]; then
+                            _lima_restore_snapshot
+                            echo "  Restored from: ${snapshot_name}"
+                            echo "  Rollback: ./clawfactory.sh -i ${INSTANCE_NAME} snapshot restore ${backup_name}"
                         fi
                     else
                         echo "  Keeping current state"
@@ -315,7 +348,7 @@ case "${1:-help}" in
         case "$subcmd" in
             list)
                 curl -s "http://localhost:${CONTROLLER_PORT}/controller/snapshot" | \
-                    jq -r '.snapshots[] | "\(.label // "snapshot")\t\(.created)\t\(.name)\t\(.size)"' | \
+                    jq -r '(.snapshots // [])[] | "\(.label // "snapshot")\t\(.created)\t\(.name)\t\(.size)"' | \
                     while IFS=$'\t' read -r label created name size; do
                         if [[ "$label" == "snapshot" ]]; then
                             printf "  %-20s  %s  (%s bytes)\n" "$created" "$name" "$size"
@@ -485,6 +518,14 @@ case "${1:-help}" in
         fi
         ;;
     update)
+        # Parse update flags
+        use_theirs=false
+        for arg in "${@:2}"; do
+            case "$arg" in
+                --theirs|--force) use_theirs=true ;;
+            esac
+        done
+
         repo="${SCRIPT_DIR}/bot_repos/${INSTANCE_NAME}/code"
         if [[ ! -d "$repo/.git" ]]; then
             echo "Error: No git repo found at $repo" >&2
@@ -501,12 +542,36 @@ case "${1:-help}" in
         echo "Fetching upstream for [${INSTANCE_NAME}]..."
         git -C "$repo" fetch upstream
 
-        echo "Merging upstream/main..."
-        if ! git -C "$repo" merge upstream/main --no-edit; then
+        # Auto-stash dirty working tree
+        stashed=false
+        if ! git -C "$repo" diff --quiet || ! git -C "$repo" diff --cached --quiet || \
+           [[ -n "$(git -C "$repo" ls-files --others --exclude-standard)" ]]; then
+            echo "Stashing local changes..."
+            git -C "$repo" stash --include-untracked
+            stashed=true
+        fi
+
+        # Merge with optional --theirs
+        merge_args=(upstream/main --no-edit)
+        if $use_theirs; then
+            merge_args+=(-X theirs)
+            echo "Merging upstream/main (preferring upstream on conflicts)..."
+        else
+            echo "Merging upstream/main..."
+        fi
+
+        if ! git -C "$repo" merge "${merge_args[@]}"; then
             git -C "$repo" merge --abort
-            echo "Merge conflict — resolve manually in: $repo" >&2
+            if $stashed; then git -C "$repo" stash pop; fi
+            echo "Merge conflict — resolve manually or retry with: ./clawfactory.sh -i ${INSTANCE_NAME} update --theirs" >&2
             exit 1
         fi
+
+        # Pop stash
+        if $stashed; then
+            git -C "$repo" stash pop || echo "Warning: stash pop had conflicts (check $repo)"
+        fi
+
         echo "Merged upstream into [${INSTANCE_NAME}]"
 
         # Redeploy
@@ -514,6 +579,9 @@ case "${1:-help}" in
             echo "Redeploying to Lima VM..."
             lima_sync
             lima_build
+            # Post-update config migration
+            echo "Running doctor --fix..."
+            lima_openclaw doctor --fix 2>&1 || echo "Warning: doctor --fix returned non-zero (check config)"
             lima_services restart
             lima_tunnels start
             echo "Update complete — [${INSTANCE_NAME}] redeployed"
@@ -521,6 +589,9 @@ case "${1:-help}" in
         else
             echo "Redeploying via Docker..."
             ${COMPOSE_CMD} build
+            # Post-update config migration
+            echo "Running doctor --fix..."
+            docker exec "${CONTAINER_PREFIX}-gateway" ./openclaw.mjs doctor --fix 2>&1 || echo "Warning: doctor --fix returned non-zero (check config)"
             ${COMPOSE_CMD} up -d
             echo "Update complete — [${INSTANCE_NAME}] redeployed"
             print_urls
@@ -854,6 +925,39 @@ ENVEOF
             echo "Sync is only available in Lima sandbox mode"
         fi
         ;;
+    delete|remove)
+        if [[ "$INSTANCE_NAME" == "default" ]]; then
+            echo "Error: Specify an instance with -i <name>" >&2
+            exit 1
+        fi
+
+        echo "This will permanently delete instance [${INSTANCE_NAME}]:"
+        echo "  Host: bot_repos/${INSTANCE_NAME}/, secrets/${INSTANCE_NAME}/, snapshots/${INSTANCE_NAME}/"
+        if [[ "$SANDBOX_MODE" == "lima" ]]; then
+            echo "  VM:   ${LIMA_SRV}/bot_repos/${INSTANCE_NAME}/, secrets, snapshots"
+        fi
+        read -p "Are you sure? [y/N]: " confirm
+        [[ "$confirm" =~ ^[Yy] ]] || { echo "Cancelled"; exit 0; }
+
+        # Stop gateway if running (Lima)
+        if [[ "$SANDBOX_MODE" == "lima" ]]; then
+            echo "Stopping gateway..."
+            _lima_root "systemctl stop openclaw-gateway@${INSTANCE_NAME} 2>/dev/null || true"
+            echo "Removing VM data..."
+            _lima_root "rm -rf ${LIMA_SRV}/bot_repos/${INSTANCE_NAME} ${LIMA_SRV}/secrets/${INSTANCE_NAME} ${LIMA_SRV}/snapshots/${INSTANCE_NAME}"
+            # Remove systemd user
+            _lima_root "userdel openclaw-${INSTANCE_NAME} 2>/dev/null || true"
+        fi
+
+        echo "Removing host data..."
+        # Clear macOS ACLs that may block deletion
+        chmod -RN "${SCRIPT_DIR}/bot_repos/${INSTANCE_NAME}" 2>/dev/null || true
+        rm -rf "${SCRIPT_DIR}/bot_repos/${INSTANCE_NAME}" \
+               "${SCRIPT_DIR}/secrets/${INSTANCE_NAME}" \
+               "${SCRIPT_DIR}/snapshots/${INSTANCE_NAME}"
+
+        echo "Instance [${INSTANCE_NAME}] deleted"
+        ;;
     *)
         echo "ClawFactory - Agent Runtime"
         echo ""
@@ -867,7 +971,8 @@ ENVEOF
         echo "  stop            Stop all services"
         echo "  restart         Restart services"
         echo "  rebuild         Rebuild and restart"
-        echo "  update          Pull upstream changes and redeploy"
+        echo "  update [--theirs]  Pull upstream changes and redeploy"
+        echo "  delete          Delete an instance and all its data"
         echo "  status          Show service status"
         echo "  logs [service]  Follow logs (gateway/proxy/controller)"
         echo "  shell [service] Open shell (Lima: VM shell)"
