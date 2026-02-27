@@ -326,7 +326,7 @@ case "${1:-help}" in
         ;;
     shell)
         if [[ "$SANDBOX_MODE" == "lima" ]]; then
-            lima_shell
+            limactl shell "$LIMA_VM_NAME" -- sudo -iu "openclaw-${INSTANCE_NAME}"
         else
             container="${2:-gateway}"
             docker exec -it "${CONTAINER_PREFIX}-${container}" /bin/bash

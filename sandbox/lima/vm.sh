@@ -744,7 +744,6 @@ _lima_snapshot_pull() {
     mkdir -p "$host_dir"
     rsync -a \
         --exclude 'latest.tar.age' \
-        --delete \
         -e "$rsh" \
         "${LIMA_SSH_HOST}:${LIMA_SRV}/snapshots/${instance}/" \
         "${host_dir}/"
@@ -753,6 +752,21 @@ _lima_snapshot_pull() {
     count=$(ls "$host_dir"/*.tar.age 2>/dev/null | wc -l | tr -d ' ')
     if [[ "$count" -gt 0 ]]; then
         echo "[snapshots] Pulled ${count} snapshot(s) to host"
+    fi
+
+    # Prune host snapshots: keep the 20 most recent
+    local max_keep=20
+    local all_snaps
+    all_snaps=$(ls -t "$host_dir"/*.tar.age 2>/dev/null)
+    local total
+    total=$(echo "$all_snaps" | grep -c . 2>/dev/null || echo 0)
+    if [[ "$total" -gt "$max_keep" ]]; then
+        local pruned=0
+        echo "$all_snaps" | tail -n +$((max_keep + 1)) | while read -r old_snap; do
+            rm -f "$old_snap"
+            ((pruned++))
+        done
+        echo "[snapshots] Pruned $((total - max_keep)) old snapshot(s) from host"
     fi
 
     # Also pull state alongside snapshots
@@ -866,6 +880,7 @@ _lima_backup_state() {
             --exclude='media' \
             -cf - . | age -r \"\$pubkey\" -o \"${snapshot_dir}/\$backup_name\"
 
+        chown openclaw-${instance}:openclaw-${instance} \"${snapshot_dir}/\$backup_name\"
         echo \"\$backup_name\"
     "
 }
