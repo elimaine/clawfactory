@@ -347,7 +347,7 @@ case "${1:-help}" in
         subcmd="${2:-list}"
         case "$subcmd" in
             list)
-                curl -s "http://localhost:${CONTROLLER_PORT}/controller/snapshot" | \
+                curl -s "http://localhost:${CONTROLLER_PORT}/controller/snapshot?token=${CONTROLLER_TOKEN}" | \
                     jq -r '(.snapshots // [])[] | "\(.label // "snapshot")\t\(.created)\t\(.name)\t\(.size)"' | \
                     while IFS=$'\t' read -r label created name size; do
                         if [[ "$label" == "snapshot" ]]; then
@@ -360,11 +360,11 @@ case "${1:-help}" in
             create)
                 snap_name="${3:-}"
                 if [[ -n "$snap_name" ]]; then
-                    curl -s -X POST "http://localhost:${CONTROLLER_PORT}/controller/snapshot" \
+                    curl -s -X POST "http://localhost:${CONTROLLER_PORT}/controller/snapshot?token=${CONTROLLER_TOKEN}" \
                         -H "Content-Type: application/json" \
                         -d "{\"name\": \"${snap_name}\"}" | jq '.'
                 else
-                    curl -s -X POST "http://localhost:${CONTROLLER_PORT}/controller/snapshot" \
+                    curl -s -X POST "http://localhost:${CONTROLLER_PORT}/controller/snapshot?token=${CONTROLLER_TOKEN}" \
                         -H "Content-Type: application/json" \
                         -d '{"name": ""}' | jq '.'
                 fi
@@ -397,7 +397,7 @@ case "${1:-help}" in
                     echo "  <new-name>   New display name (e.g. \"before big change\")"
                     exit 1
                 fi
-                curl -s -X POST "http://localhost:${CONTROLLER_PORT}/controller/snapshot/rename" \
+                curl -s -X POST "http://localhost:${CONTROLLER_PORT}/controller/snapshot/rename?token=${CONTROLLER_TOKEN}" \
                     -H "Content-Type: application/json" \
                     -d "{\"snapshot\": \"${old_snap}\", \"new_name\": \"${new_name}\"}" | jq '.'
                 ;;
@@ -414,7 +414,7 @@ case "${1:-help}" in
                     read -p "Delete ALL snapshots for [${INSTANCE_NAME}]? [y/N]: " confirm
                     [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Cancelled"; exit 0; }
                 fi
-                curl -s -X POST "http://localhost:${CONTROLLER_PORT}/controller/snapshot/delete" \
+                curl -s -X POST "http://localhost:${CONTROLLER_PORT}/controller/snapshot/delete?token=${CONTROLLER_TOKEN}" \
                     -H "Content-Type: application/json" \
                     -d "{\"snapshot\": \"${target}\"}" | jq '.'
                 ;;
@@ -428,11 +428,11 @@ case "${1:-help}" in
                     echo "This will stop the gateway and restore state from: ${target}"
                     read -p "Continue? [y/N] " confirm
                     [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Cancelled"; exit 0; }
-                    curl -s -X POST "http://localhost:${CONTROLLER_PORT}/controller/snapshot/restore" \
+                    curl -s -X POST "http://localhost:${CONTROLLER_PORT}/controller/snapshot/restore?token=${CONTROLLER_TOKEN}" \
                         -H "Content-Type: application/json" \
                         -d "{\"snapshot\": \"${target}\"}" | jq '.'
                 else
-                    curl -s -X POST "http://localhost:${CONTROLLER_PORT}/controller/snapshot/restore" \
+                    curl -s -X POST "http://localhost:${CONTROLLER_PORT}/controller/snapshot/restore?token=${CONTROLLER_TOKEN}" \
                         -H "Content-Type: application/json" \
                         -d "{\"snapshot\": \"${target}\"}" | jq '.'
                 fi
