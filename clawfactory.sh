@@ -885,6 +885,15 @@ ENVEOF
         fi
         lima_tunnels "${2:-status}"
         ;;
+    config)
+        if [[ "$SANDBOX_MODE" != "lima" ]]; then
+            echo "Config commands are only available in Lima sandbox mode"
+            exit 1
+        fi
+        lima_ensure
+        shift
+        lima_config_edit "$@"
+        ;;
     code)
         if [[ "$SANDBOX_MODE" != "lima" ]]; then
             echo "Code commands are only available in Lima sandbox mode"
@@ -979,6 +988,8 @@ ENVEOF
         echo "  controller      Show controller URL"
         echo "  audit           Show recent audit log"
         echo "  snapshot        Manage snapshots (list/create/rename/delete)"
+        echo "  config          Edit gateway config (pulls from VM, edits, pushes back)"
+        echo "  config --jq F   Apply a jq filter to gateway config"
         echo "  openclaw <args> Run OpenClaw CLI (e.g. openclaw onboard)"
         echo "  init            Interactive new bot / clone setup"
         echo "  info            Show instance info and tokens"

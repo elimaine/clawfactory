@@ -665,6 +665,59 @@ lima_tunnels() {
 }
 
 # ============================================================
+# lima_config_edit — Edit openclaw.json on the VM
+# ============================================================
+# Pulls the live VM config to a temp file, opens $EDITOR (or
+# applies a jq filter via --jq), and pushes it back.
+# Usage:
+#   lima_config_edit                    # open in $EDITOR
+#   lima_config_edit --jq '<filter>'    # apply jq filter
+lima_config_edit() {
+    local instance="${INSTANCE_NAME:-default}"
+    local svc_user="openclaw-${instance}"
+    local vm_config="${LIMA_SRV}/bot_repos/${instance}/state/openclaw.json"
+    local rsh="ssh -F ${LIMA_SSH_CONFIG}"
+
+    local workfile
+    workfile=$(mktemp "${TMPDIR:-/tmp}/openclaw-config-XXXXXX.json")
+    trap "rm -f '$workfile' '${workfile}.bak'" RETURN
+
+    # Pull live config from VM
+    rsync -a --rsync-path="sudo rsync" \
+        -e "$rsh" \
+        "${LIMA_SSH_HOST}:${vm_config}" "$workfile"
+    cp "$workfile" "${workfile}.bak"
+
+    if [[ "${1:-}" == "--jq" && -n "${2:-}" ]]; then
+        local filtered
+        filtered=$(jq "$2" "$workfile") || { echo "[config] jq filter failed" >&2; return 1; }
+        echo "$filtered" > "$workfile"
+    else
+        "${EDITOR:-vi}" "$workfile"
+    fi
+
+    # Validate JSON
+    if ! jq empty "$workfile" 2>/dev/null; then
+        echo "[config] Invalid JSON — aborting" >&2
+        return 1
+    fi
+
+    # Skip push if unchanged
+    if diff -q "$workfile" "${workfile}.bak" >/dev/null 2>&1; then
+        echo "[config] No changes"
+        return 0
+    fi
+
+    # Push back to VM with correct ownership
+    rsync -a --rsync-path="sudo rsync" \
+        -e "$rsh" \
+        "$workfile" "${LIMA_SSH_HOST}:${vm_config}"
+    _lima_root "chown ${svc_user}:${svc_user} ${vm_config}"
+
+    echo "[config] Updated config on VM"
+}
+
+# ============================================================
 # lima_openclaw — Run OpenClaw CLI inside Lima VM (interactive)
 # ============================================================
 lima_openclaw() {
@@ -869,8 +922,9 @@ _lima_backup_state() {
         tar --exclude='*.tmp*' \
             --exclude='agents/*/sessions/*.jsonl' \
             --exclude='agents/*/sessions/*.jsonl.deleted.*' \
-            --exclude='installed' \
-            --exclude='installed/*' \
+            --exclude='installed/*/node_modules' \
+            --exclude='installed/*/.venv' \
+            --exclude='installed/*/venv' \
             --exclude='*/.git' \
             --exclude='**/venv' \
             --exclude='*/node_modules' \
@@ -944,6 +998,38 @@ _lima_restore_snapshot() {
             exit 1
         fi
     "
+
+    # Reinstall plugin dependencies (node_modules excluded from snapshots)
+    _lima_restore_plugin_deps "$instance"
+}
+
+# ============================================================
+# _lima_restore_plugin_deps — Reinstall node_modules for plugins
+# ============================================================
+# Snapshots exclude */node_modules, so after restore any plugins
+# under state/extensions/ need their deps reinstalled.
+_lima_restore_plugin_deps() {
+    local instance="${1:-${INSTANCE_NAME:-default}}"
+    local svc_user="openclaw-${instance}"
+    local extensions_dir="${LIMA_SRV}/bot_repos/${instance}/state/extensions"
+
+    _lima_root "
+        [ -d ${extensions_dir} ] || exit 0
+        found=0
+        for pkg in ${extensions_dir}/*/package.json; do
+            [ -f \"\$pkg\" ] || continue
+            plugin_dir=\$(dirname \"\$pkg\")
+            found=\$((found + 1))
+            echo \"[plugins] Installing deps: \$(basename \$plugin_dir)\"
+            cd \"\$plugin_dir\"
+            npm install --omit=dev --no-audit --no-fund --loglevel=error 2>&1 || \
+                echo \"[plugins] Warning: npm install failed for \$(basename \$plugin_dir)\" >&2
+        done
+        if [ \$found -gt 0 ]; then
+            chown -R ${svc_user}:${svc_user} ${extensions_dir}/
+            echo \"[plugins] Restored deps for \$found plugin(s)\"
+        fi
+    "
 }
 
 # ============================================================
@@ -951,6 +1037,20 @@ _lima_restore_snapshot() {
 # ============================================================
 lima_stop() {
     local instance="${INSTANCE_NAME:-default}"
+
+    # Check if VM is actually running before trying to interact with it
+    local vm_status
+    vm_status=$(limactl list --json 2>/dev/null | python3 -c "
+import json,sys
+for vm in json.loads(sys.stdin.read().rstrip().replace('}\n{', '},{')):
+    if vm.get('name')=='$LIMA_VM_NAME': print(vm.get('status',''))
+" 2>/dev/null || echo "unknown")
+
+    if [[ "$vm_status" != "Running" ]]; then
+        echo "VM is not running (status: ${vm_status}) — nothing to stop"
+        return 0
+    fi
+
     _lima_snapshot_pull "$instance"
     echo "Stopping ClawFactory services..."
     _lima_root "
