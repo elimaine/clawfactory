@@ -277,31 +277,25 @@ lima_build() {
     vm_hash=$(_lima_root "cat ${LIMA_SRV}/bot_repos/${instance}/code/.pnpm-lock-hash 2>/dev/null" 2>/dev/null || true)
     if [[ -n "$vm_hash" ]]; then
         local src_hash
-        src_hash=$(_lima_exec bash -c "md5sum ${src_dir}/pnpm-lock.yaml 2>/dev/null | cut -d' ' -f1" 2>/dev/null || true)
+        src_hash=$(_lima_root "md5sum ${LIMA_SRV}/bot_repos/${instance}/code/pnpm-lock.yaml 2>/dev/null | cut -d' ' -f1" 2>/dev/null || true)
         if [[ "$vm_hash" == "$src_hash" ]]; then
             needs_install="no"
         fi
     fi
 
-    if _lima_exec test -f "${src_dir}/package.json" 2>/dev/null; then
+    local svc_code="${LIMA_SRV}/bot_repos/${instance}/code"
+    if _lima_root "test -f ${svc_code}/package.json" 2>/dev/null; then
         if [[ "$needs_install" == "yes" ]]; then
             echo "[build] Installing Node.js dependencies..."
-            _lima_exec bash -c "
+            _lima_root "
                 export CI=true
-                cd ${src_dir}
+                cd ${svc_code}
                 pnpm install --reporter=silent --frozen-lockfile 2>/dev/null || \
                     pnpm install --reporter=silent 2>/dev/null || \
                     pnpm install
             "
-            # Copy node_modules to the service directory
-            _lima_root "
-                rsync -a --delete \
-                    ${src_dir}/node_modules/ \
-                    ${LIMA_SRV}/bot_repos/${instance}/code/node_modules/
-            "
             # Cache lockfile hash
-            _lima_exec bash -c "md5sum ${src_dir}/pnpm-lock.yaml 2>/dev/null | cut -d' ' -f1" | \
-                _lima_root "cat > ${LIMA_SRV}/bot_repos/${instance}/code/.pnpm-lock-hash"
+            _lima_root "md5sum ${svc_code}/pnpm-lock.yaml 2>/dev/null | cut -d' ' -f1 > ${svc_code}/.pnpm-lock-hash"
             echo "[build] Dependencies installed"
         else
             echo "[build] Dependencies up to date (skipped)"

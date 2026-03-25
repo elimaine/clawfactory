@@ -561,10 +561,32 @@ case "${1:-help}" in
         fi
 
         if ! git -C "$repo" merge "${merge_args[@]}"; then
-            git -C "$repo" merge --abort
-            if $stashed; then git -C "$repo" stash pop; fi
-            echo "Merge conflict — resolve manually or retry with: ./clawfactory.sh -i ${INSTANCE_NAME} update --theirs" >&2
-            exit 1
+            if $use_theirs; then
+                echo "Content-level --theirs didn't resolve all conflicts, forcing upstream versions..."
+                # Resolve remaining conflicts: try checkout --theirs first (content conflicts),
+                # fall back to git add (file-location conflicts where only ours exists)
+                git -C "$repo" diff --name-only --diff-filter=U | while IFS= read -r f; do
+                    if ! git -C "$repo" checkout --theirs -- "$f" 2>/dev/null; then
+                        # File-location conflict: no theirs version, just accept ours
+                        git -C "$repo" add "$f"
+                    else
+                        git -C "$repo" add "$f"
+                    fi
+                done
+                # If there are still unmerged paths, bail out
+                if git -C "$repo" diff --name-only --diff-filter=U | grep -q .; then
+                    git -C "$repo" merge --abort
+                    if $stashed; then git -C "$repo" stash pop; fi
+                    echo "Merge conflict — could not auto-resolve. Fix manually in: $repo" >&2
+                    exit 1
+                fi
+                git -C "$repo" commit --no-edit
+            else
+                git -C "$repo" merge --abort
+                if $stashed; then git -C "$repo" stash pop; fi
+                echo "Merge conflict — resolve manually or retry with: ./clawfactory.sh -i ${INSTANCE_NAME} update --theirs" >&2
+                exit 1
+            fi
         fi
 
         # Pop stash
