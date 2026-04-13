@@ -139,6 +139,7 @@ lima_sync() {
             --exclude 'snapshots' \
             --exclude 'bot_repos/*/state' \
             --exclude 'bot_repos/*/code/dist' \
+            --exclude 'bot_repos/*/code/dist-runtime' \
             --exclude 'audit' \
             --exclude 'mitm-ca' \
             --exclude 'temporal' \
@@ -302,11 +303,15 @@ lima_build() {
         fi
 
         echo "[build] Building OpenClaw..."
-        _lima_root "
+        if ! _lima_root "
             export CI=true
+            export NODE_OPTIONS='--max-old-space-size=4096'
             cd ${LIMA_SRV}/bot_repos/${instance}/code
-            pnpm build 2>/dev/null || npm run build
-        "
+            pnpm build || npm run build
+        "; then
+            echo "[build] OpenClaw build FAILED" >&2
+            return 1
+        fi
         echo "[build] OpenClaw built"
 
         echo "[build] Building Control UI..."
@@ -840,6 +845,7 @@ _lima_state_pull() {
         --exclude 'subagents' \
         --exclude 'media' \
         --exclude '*.tmp*' \
+        --exclude 'extensions/*/node_modules' \
         -e "$rsh" \
         "${LIMA_SSH_HOST}:${LIMA_SRV}/bot_repos/${instance}/state/" \
         "${host_dir}/"
@@ -864,6 +870,7 @@ _lima_code_pull() {
         --rsync-path="sudo rsync" \
         --exclude 'node_modules' \
         --exclude 'dist' \
+        --exclude 'dist-runtime' \
         --exclude '.pnpm-lock-hash' \
         --exclude 'workspace' \
         -e "$rsh" \

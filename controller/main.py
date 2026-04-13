@@ -5061,8 +5061,18 @@ def run_gateway_command(cmd: list[str], timeout: int = 30) -> tuple[bool, str]:
                 cwd=str(CODE_DIR),
                 capture_output=True, text=True, timeout=timeout,
             )
-            output = result.stdout + result.stderr
-            return result.returncode == 0, output
+            if result.returncode == 0:
+                output = result.stdout
+                # Strip ANSI escape codes and leading log lines before JSON payload.
+                output = re.sub(r'\x1b\[[0-9;]*m', '', output)
+                for marker in ("{", "["):
+                    pos = output.find(marker)
+                    if pos >= 0:
+                        output = output[pos:]
+                        break
+                return True, output
+            else:
+                return False, result.stdout + result.stderr
         else:
             client = docker.from_env()
             gateway = client.containers.get(GATEWAY_CONTAINER)

@@ -519,10 +519,10 @@ case "${1:-help}" in
         ;;
     update)
         # Parse update flags
-        use_theirs=false
+        use_merge=false
         for arg in "${@:2}"; do
             case "$arg" in
-                --theirs|--force) use_theirs=true ;;
+                --merge) use_merge=true ;;
             esac
         done
 
@@ -542,65 +542,66 @@ case "${1:-help}" in
         echo "Fetching upstream for [${INSTANCE_NAME}]..."
         git -C "$repo" fetch upstream
 
-        # Auto-stash dirty working tree
-        stashed=false
-        if ! git -C "$repo" diff --quiet || ! git -C "$repo" diff --cached --quiet || \
-           [[ -n "$(git -C "$repo" ls-files --others --exclude-standard)" ]]; then
-            echo "Stashing local changes..."
-            git -C "$repo" stash --include-untracked
-            stashed=true
-        fi
+        # Save rollback point
+        prev_head=$(git -C "$repo" rev-parse HEAD)
+        upstream_short=$(git -C "$repo" rev-parse --short upstream/main)
 
-        # Merge with optional --theirs
-        merge_args=(upstream/main --no-edit)
-        if $use_theirs; then
-            merge_args+=(-X theirs)
-            echo "Merging upstream/main (preferring upstream on conflicts)..."
-        else
-            echo "Merging upstream/main..."
-        fi
-
-        if ! git -C "$repo" merge "${merge_args[@]}"; then
-            if $use_theirs; then
-                echo "Content-level --theirs didn't resolve all conflicts, forcing upstream versions..."
-                # Resolve remaining conflicts: try checkout --theirs first (content conflicts),
-                # fall back to git add (file-location conflicts where only ours exists)
+        if $use_merge; then
+            # Legacy merge mode — use when local source patches exist
+            echo "Merging upstream/main (--merge mode)..."
+            if ! git -C "$repo" merge upstream/main --no-edit -X theirs; then
+                # Force-resolve any remaining conflicts in favor of upstream
                 git -C "$repo" diff --name-only --diff-filter=U | while IFS= read -r f; do
-                    if ! git -C "$repo" checkout --theirs -- "$f" 2>/dev/null; then
-                        # File-location conflict: no theirs version, just accept ours
-                        git -C "$repo" add "$f"
-                    else
-                        git -C "$repo" add "$f"
-                    fi
+                    git -C "$repo" checkout --theirs -- "$f" 2>/dev/null || git -C "$repo" add "$f"
+                    git -C "$repo" add "$f"
                 done
-                # If there are still unmerged paths, bail out
                 if git -C "$repo" diff --name-only --diff-filter=U | grep -q .; then
                     git -C "$repo" merge --abort
-                    if $stashed; then git -C "$repo" stash pop; fi
                     echo "Merge conflict — could not auto-resolve. Fix manually in: $repo" >&2
                     exit 1
                 fi
-                git -C "$repo" commit --no-edit
-            else
-                git -C "$repo" merge --abort
-                if $stashed; then git -C "$repo" stash pop; fi
-                echo "Merge conflict — resolve manually or retry with: ./clawfactory.sh -i ${INSTANCE_NAME} update --theirs" >&2
-                exit 1
+                git -C "$repo" commit --no-edit --no-verify
+            fi
+        else
+            # Default: reset to upstream, preserve local-only files
+            # Local files (workspace/, agents/, config/, SOUL.md) are restored on top.
+            # node_modules/, dist/, ~/.npm/_npx/ cache, state/extensions/ are untouched.
+            local_dirs=()
+            for path in workspace agents config SOUL.md; do
+                if [[ -e "$repo/$path" ]]; then
+                    local_dirs+=("$path")
+                fi
+            done
+
+            echo "Resetting to upstream/main (${upstream_short})..."
+            git -C "$repo" reset --hard upstream/main
+
+            # Restore local-only files from previous HEAD
+            if [[ ${#local_dirs[@]} -gt 0 ]]; then
+                echo "Restoring local files: ${local_dirs[*]}"
+                git -C "$repo" checkout "$prev_head" -- "${local_dirs[@]}" 2>/dev/null || true
+                git -C "$repo" add -A
+                git -C "$repo" commit --no-verify \
+                    -m "Update to upstream ${upstream_short} — restore local files" \
+                    2>/dev/null || echo "(no local file changes to commit)"
             fi
         fi
 
-        # Pop stash
-        if $stashed; then
-            git -C "$repo" stash pop || echo "Warning: stash pop had conflicts (check $repo)"
-        fi
-
-        echo "Merged upstream into [${INSTANCE_NAME}]"
+        echo "Updated [${INSTANCE_NAME}] to upstream ${upstream_short}"
 
         # Redeploy
         if [[ "$SANDBOX_MODE" == "lima" ]]; then
             echo "Redeploying to Lima VM..."
             lima_sync
-            lima_build
+            if ! lima_build; then
+                echo "Build failed — rolling back to previous commit (${prev_head:0:10})..."
+                git -C "$repo" reset --hard "$prev_head"
+                lima_sync
+                lima_build
+                lima_services restart
+                echo "Rollback complete — [${INSTANCE_NAME}] restored to previous version" >&2
+                exit 1
+            fi
             # Post-update config migration
             echo "Running doctor --fix..."
             lima_openclaw doctor --fix 2>&1 || echo "Warning: doctor --fix returned non-zero (check config)"
@@ -1002,7 +1003,7 @@ ENVEOF
         echo "  stop            Stop all services"
         echo "  restart         Restart services"
         echo "  rebuild         Rebuild and restart"
-        echo "  update [--theirs]  Pull upstream changes and redeploy"
+        echo "  update [--merge]   Pull upstream changes and redeploy (--merge for legacy merge mode)"
         echo "  delete          Delete an instance and all its data"
         echo "  status          Show service status"
         echo "  logs [service]  Follow logs (gateway/proxy/controller)"

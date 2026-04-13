@@ -250,6 +250,18 @@ restore_snapshot() {
     log "Decrypting and extracting..."
     age -d -i "$AGE_KEY" "$snapshot_file" | tar -C "$STATE_DIR" -xf -
 
+    # Reinstall dependencies for any extensions that have a package.json
+    local ext_dir="${STATE_DIR}/extensions"
+    if [[ -d "$ext_dir" ]]; then
+        for pkg in "$ext_dir"/*/package.json; do
+            [[ -f "$pkg" ]] || continue
+            local pdir
+            pdir="$(dirname "$pkg")"
+            log "Installing deps for extension: $(basename "$pdir")"
+            (cd "$pdir" && npm install --omit=dev --silent 2>&1) || warn "Failed to install deps for $(basename "$pdir")"
+        done
+    fi
+
     log "Restore complete!"
     echo ""
     echo "Next steps:"
