@@ -1,18 +1,15 @@
 # ClawFactory
 <img width="853" height="497" alt="Screenshot 2026-02-24 at 2 15 17 PM" src="https://github.com/user-attachments/assets/9cea71cf-061d-4353-8d9c-77fc80ac6353" />
 
-> **Status**: Likely unstable for new installs. I haven't tested the newer openclaw commandline install flow, new users will likely need to either ssh into the lima to complete install or use the lima cli. This was built on latest osx on m4 apple silicon. I also recommend you use tails and forward ports to your tailnet so you can access the gateway and controller (and killswitch!) from your phone anywhere.
->
-> Is this a vibecoded mess? You got me there. Is it still helpful? Absolutely
+> **Status**: 26-4-14 openclaw has made a number of releases around their install flow. The provided speed install may not be sufficient. I suspect install will need to be completed manually with the newer openclaw commandline flow using './clawfactoy -i *instanceName* openclaw'. I recommend claude or opencode to help you get setup if you hit a snag.
 
-## NO FLUFF "What this is actually good for"
-- Installing openclaw for local use in a lima VM on mac. I have included solutions to sync to and from the VM to make managing your agent less of a hassle in a VM (which is a very good idea for the security layer!).
+## Why use Clawfactory? Harness of Harnesses.
+
+Openclaw is an incredible full stack agent platform and orchestration tool. However, using it and setting it up safetly has some real (and recurring) pain points this software seeks to make easy. 
+- OC (Openclaw) Updates often, and often breaks things. Clawfactoy makes them easy with a single button or command.
+- OC local security boundary is tricky. Maximize usefulness while minimize harm. Clawfactoy VM in VM allows OC control over itself, while protecting host machine and still allowing for more strict subagent VMs.
+- OC is a mercurial software, sometimes a single poor prompt or experiment can wreck your setup. Clawfactory has two ways of keeping your setups solid. Instances and snapshots. Have an agent running just the way you want? Copy it to a new instance to keep it seperate from your experiments. Snapshots can be for more temporary insurance, allowing you to snapshot agent state both using the agent, and also before risky updates so you can roll back.
 - The added controller can be used as a non code way of managing your openclaw gateway. Main features of the controller is the restart gateway button (important since openclaw made it so by default gateway cant restart itself anymore, a good idea), as well as memory snapshots (probably my favorite feature). Some features may not be currently working (like mitm web traffic capture), or are working poorly like the snapshot file editor and temporal integration. As far as I know there aren't any super difficult blockers to fixing those.. I just ran out of claude credits and haven't came around to fixing those. If you need them fixing it and setting it up for your use cases probably wont be difficult (plz open PR!). The controller is also a great scaffolding for whatever you want to add to your own openclaw. 
-- Multiple running openclaw instances / VMs has not been tested a while, probably some wires crossed somewhere.. no promises.
-- Security still has a lot of tradeoffs.. I would not use this in production yet.
-- Syncing, controller config chages, and snapshoting have the worst kinks worked out but can still be fussy for edge cases. Keep an eye out for ballooning snapshot sizes and add appropriate filetype ignores to snapshot creation.
-
-OK heres the rest of the docs, hopefully not out of date..
 
 ## Vms all the way down.
 
@@ -24,9 +21,7 @@ This project has 3 modes:
 
 Pulls from latest version of openclaw but you can also swap in your workspace.
 
-Your agents talk through channels (Discord, Telegram, Slack, and more via OpenClaw extensions), but every meaningful change flows through the controller. Soft lock on bot promotion, need to be taught to push version proposals. No silent mutations should last long term. Humans hold the merge to long term state.
-
-## Launch Sequence
+## Assembly Sequence
 
 ```bash
 git clone https://github.com/elimaine/clawfactory
