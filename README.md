@@ -1,7 +1,6 @@
 # ClawFactory
-<img width="853" height="497" alt="Screenshot 2026-02-24 at 2 15 17 PM" src="https://github.com/user-attachments/assets/9cea71cf-061d-4353-8d9c-77fc80ac6353" />
 
-> **Status**: 26-4-14 openclaw has made a number of releases around their install flow. The provided speed install may not be sufficient. I suspect install will need to be completed manually with the newer openclaw commandline flow using './clawfactoy -i *instanceName* openclaw'. I recommend claude or opencode to help you get setup if you hit a snag.
+> **Status**: 26-4-14 Openclaw has made a number of releases around their install flow. The provided speed install may not be sufficient. I suspect install will need to be completed manually with the newer openclaw commandline flow using './clawfactoy -i *instanceName* openclaw'. I recommend claude or opencode to help you get setup if you hit a snag.
 
 ## Why use Clawfactory? Harness of Harnesses.
 
@@ -9,7 +8,9 @@ Openclaw is an incredible full stack agent platform and orchestration tool. Howe
 - OC (Openclaw) Updates often, and often breaks things. Clawfactoy makes them easy with a single button or command.
 - OC local security boundary is tricky. Maximize usefulness while minimize harm. Clawfactoy VM in VM allows OC control over itself, while protecting host machine and still allowing for more strict subagent VMs.
 - OC is a mercurial software, sometimes a single poor prompt or experiment can wreck your setup. Clawfactory has two ways of keeping your setups solid. Instances and snapshots. Have an agent running just the way you want? Copy it to a new instance to keep it seperate from your experiments. Snapshots can be for more temporary insurance, allowing you to snapshot agent state both using the agent, and also before risky updates so you can roll back.
-- The added controller can be used as a non code way of managing your openclaw gateway. Main features of the controller is the restart gateway button (important since openclaw made it so by default gateway cant restart itself anymore, a good idea), as well as memory snapshots (probably my favorite feature). Some features may not be currently working (like mitm web traffic capture), or are working poorly like the snapshot file editor and temporal integration. As far as I know there aren't any super difficult blockers to fixing those.. I just ran out of claude credits and haven't came around to fixing those. If you need them fixing it and setting it up for your use cases probably wont be difficult (plz open PR!). The controller is also a great scaffolding for whatever you want to add to your own openclaw. 
+- The added controller (pictued) can be used as a non code way of managing your openclaw gateway. 
+
+<img width="853" height="497" alt="Screenshot 2026-02-24 at 2 15 17 PM" src="https://github.com/user-attachments/assets/9cea71cf-061d-4353-8d9c-77fc80ac6353" />
 
 ## Vms all the way down.
 
