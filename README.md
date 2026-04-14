@@ -33,8 +33,8 @@ cd clawfactory
 ```
 
 Once online:
-- **Gateway UI**: http://localhost:18789?token=YOUR_GATEWAY_TOKEN
-- **Mission Control**: http://localhost:8080/controller?token=YOUR_CONTROLLER_TOKEN
+- **Gateway UI**: http://localhost:18789
+- **Mission Control**: http://localhost:8080/controller
 
 The installer generates all auth tokens automatically. Run `./clawfactory.sh info` to reveal them.
 
@@ -62,6 +62,8 @@ Either use the GUI and hit the big red killswitch button or use the CLI:
 ./killswitch.sh lock      # Everything stops. Now.
 ./killswitch.sh restore   # Bring systems back after review
 ```
+
+Killswitch can also be set by changing ENV value. An advanced way of using this is you can set up a honeypot file that on access locks your instances.
 
 ## Field Manual
 
