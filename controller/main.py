@@ -2728,9 +2728,13 @@ async def promote_ui(
                         if (pending.length > 0) {{
                             let html = '';
                             pending.forEach(p => {{
-                                html += `<div style="background: #252525; padding: 0.5rem; border-radius: 3px; margin-bottom: 0.5rem;">
-                                    <strong style="color: #ff9800;">${{p.code}}</strong>
-                                    <span style="color: #888; font-size: 0.8rem; margin-left: 0.5rem;">from ${{p.senderId || p.userId || 'unknown'}}</span>
+                                const sender = (p.senderId || p.userId || 'unknown').replace(/'/g, "&#39;");
+                                html += `<div style="background: #252525; padding: 0.5rem; border-radius: 3px; margin-bottom: 0.5rem; display: flex; justify-content: space-between; align-items: center; gap: 0.5rem;">
+                                    <div style="flex: 1; min-width: 0; overflow: hidden;">
+                                        <strong style="color: #ff9800;">${{p.code}}</strong>
+                                        <span style="color: #888; font-size: 0.8rem; margin-left: 0.5rem;">from ${{sender}}</span>
+                                    </div>
+                                    <button class="small" onclick="approvePairingInline('${{channel}}', '${{p.code}}')">Approve</button>
                                 </div>`;
                             }});
                             pendingDiv.innerHTML = html;
@@ -2755,6 +2759,31 @@ async def promote_ui(
             // Legacy function for backwards compatibility
             async function fetchPairing(channel) {{
                 return fetchChannelPairing(channel);
+            }}
+
+            async function approvePairingInline(channel, code) {{
+                const result = document.getElementById('pairing-result');
+                result.style.display = 'block';
+                result.className = 'result';
+                result.textContent = `Approving ${{code}} on ${{channel}}...`;
+                try {{
+                    const resp = await fetch(basePath + '/gateway/pairing/approve', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ channel, code }})
+                    }});
+                    const data = await resp.json();
+                    if (!resp.ok || data.error || data.detail) {{
+                        result.className = 'result error';
+                        result.textContent = data.error || data.detail || 'Unknown error';
+                    }} else {{
+                        result.textContent = data.status || 'Approved!';
+                        fetchChannelPairing(channel);
+                    }}
+                }} catch(e) {{
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
+                }}
             }}
 
             async function approvePairingCode() {{
@@ -3580,6 +3609,11 @@ def create_snapshot(name: str = "") -> dict:
                 "--exclude=*/.venv",
                 "--exclude=subagents",
                 "--exclude=media",
+                "--exclude=agents/*/sessions/*.jsonl.reset.*",
+                "--exclude=agents/*/agent/auth/*/logs_*.sqlite*",
+                "--exclude=agents/*/agent/auth/*/cache",
+                "--exclude=*.sqlite-wal",
+                "--exclude=*.db-wal",
                 "."
             ],
             capture_output=True,

@@ -209,44 +209,13 @@ case "${1:-help}" in
             lima_sync
             lima_build
 
-            # Snapshot-based state management
-            if _lima_has_snapshot; then
+            # Cold-start only: VM has no state yet → auto-restore latest snapshot.
+            # If state already exists, leave it alone — it's the source of truth
+            # for the running instance. Use `rebuild` to opt into a restore.
+            if _lima_has_snapshot && ! _lima_has_state; then
                 snapshot_name=$(_lima_latest_snapshot_name)
-
-                if _lima_has_state; then
-                    echo ""
-                    echo "  Latest snapshot: ${snapshot_name}"
-                    read -p "  Restore state from snapshot? [Y/n] " answer
-                    if [[ "${answer,,}" != "n" ]]; then
-                        echo "  Backing up current state..."
-                        backup_name=$(_lima_backup_state)
-                        backup_name="${backup_name%%[[:space:]]}"  # trim whitespace
-                        if [[ -n "$backup_name" && "$backup_name" != "ERROR" ]]; then
-                            # Verify the backup file actually exists in the VM
-                            if _lima_root "test -f ${LIMA_SRV}/snapshots/${INSTANCE_NAME}/${backup_name}" 2>/dev/null; then
-                                echo "  Current state saved → ${backup_name}"
-                            else
-                                echo "  Warning: Backup failed (file not created). Aborting restore." >&2
-                                echo "  Create a snapshot manually before restoring: ./clawfactory.sh -i ${INSTANCE_NAME} snapshot create safety" >&2
-                                backup_name=""
-                            fi
-                        else
-                            echo "  Warning: Backup failed. Aborting restore." >&2
-                            echo "  Create a snapshot manually before restoring: ./clawfactory.sh -i ${INSTANCE_NAME} snapshot create safety" >&2
-                            backup_name=""
-                        fi
-                        if [[ -n "$backup_name" ]]; then
-                            _lima_restore_snapshot
-                            echo "  Restored from: ${snapshot_name}"
-                            echo "  Rollback: ./clawfactory.sh -i ${INSTANCE_NAME} snapshot restore ${backup_name}"
-                        fi
-                    else
-                        echo "  Keeping current state"
-                    fi
-                else
-                    echo "[snapshot] Restoring state from: ${snapshot_name}"
-                    _lima_restore_snapshot
-                fi
+                echo "[snapshot] No state found — restoring from: ${snapshot_name}"
+                _lima_restore_snapshot
                 echo ""
             fi
 
@@ -289,6 +258,39 @@ case "${1:-help}" in
             echo "Rebuilding ClawFactory [${INSTANCE_NAME}] in Lima VM..."
             lima_sync
             lima_build
+
+            # Offer snapshot restore at rebuild time (opt-in, default No).
+            if _lima_has_snapshot && _lima_has_state; then
+                snapshot_name=$(_lima_latest_snapshot_name)
+                echo ""
+                echo "  Latest snapshot: ${snapshot_name}"
+                read -p "  Restore state from snapshot? [y/N] " answer
+                if [[ "${answer,,}" == "y" ]]; then
+                    echo "  Backing up current state..."
+                    backup_name=$(_lima_backup_state)
+                    backup_name="${backup_name%%[[:space:]]}"
+                    if [[ -n "$backup_name" && "$backup_name" != "ERROR" ]]; then
+                        if _lima_root "test -f ${LIMA_SRV}/snapshots/${INSTANCE_NAME}/${backup_name}" 2>/dev/null; then
+                            echo "  Current state saved → ${backup_name}"
+                        else
+                            echo "  Warning: Backup failed (file not created). Aborting restore." >&2
+                            echo "  Create a snapshot manually before restoring: ./clawfactory.sh -i ${INSTANCE_NAME} snapshot create safety" >&2
+                            backup_name=""
+                        fi
+                    else
+                        echo "  Warning: Backup failed. Aborting restore." >&2
+                        echo "  Create a snapshot manually before restoring: ./clawfactory.sh -i ${INSTANCE_NAME} snapshot create safety" >&2
+                        backup_name=""
+                    fi
+                    if [[ -n "$backup_name" ]]; then
+                        _lima_restore_snapshot
+                        echo "  Restored from: ${snapshot_name}"
+                        echo "  Rollback: ./clawfactory.sh -i ${INSTANCE_NAME} snapshot restore ${backup_name}"
+                    fi
+                fi
+                echo ""
+            fi
+
             lima_services restart
             lima_tunnels start
             echo "ClawFactory [${INSTANCE_NAME}] rebuilt and restarted"
