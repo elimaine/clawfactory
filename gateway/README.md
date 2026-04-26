@@ -1,40 +1,43 @@
-# Gateway Sandbox Layer
+# Gateway Sandbox Wrapper
 
-This directory contains the Docker configuration for enabling OpenClaw sandbox support via Sysbox.
+This directory is used only for Docker Sysbox mode. It is not the normal Lima path.
 
-## Overview
+`docker-compose.sandbox.yml` rebuilds the gateway image from this directory, using the normal OpenClaw gateway image as its base:
 
-When sandbox mode is enabled, the gateway container runs with Docker-in-Docker (DinD) capabilities provided by Sysbox. This allows OpenClaw to create isolated containers for tool execution.
+```bash
+docker compose -f docker-compose.yml -f docker-compose.sandbox.yml build gateway
+```
 
-## Files
+## What It Adds
 
-- `Dockerfile` - Extends the base OpenClaw image with Docker daemon
-- `sandbox-entrypoint.sh` - Entrypoint script that starts dockerd and then OpenClaw
+`gateway/Dockerfile` installs Docker Engine inside the gateway image, adds the `node` user to the Docker group, and copies `sandbox-entrypoint.sh`.
 
-## How It Works
+`sandbox-entrypoint.sh` tries to:
 
-1. The base gateway image is built from `bot_repos/{instance}/code/Dockerfile`
-2. This sandbox layer adds Docker to that image
-3. Sysbox runtime provides secure nested container isolation
-4. The entrypoint starts dockerd before running the OpenClaw gateway
+- start `dockerd` inside the container;
+- create or reuse `openclaw-sandbox:bookworm-slim`;
+- sync workspace files from `/workspace/code/workspace` into `/home/node/.openclaw/workspace`;
+- keep memory in state rather than code;
+- install packages from `workspace/<instance>_save/package.json` when the package hash changes;
+- run OpenClaw non-interactive onboarding;
+- start `node dist/index.js gateway --port 18789 --bind lan`.
 
 ## Requirements
 
-- Sysbox installed on the host: https://github.com/nestybox/sysbox
-- Verify: `docker info | grep -i sysbox`
-
-## Enable/Disable
+The host must have Sysbox installed and Docker must report the runtime:
 
 ```bash
-./clawfactory.sh sandbox enable   # Enable sandbox mode
-./clawfactory.sh sandbox disable  # Disable sandbox mode
-./clawfactory.sh rebuild          # Rebuild after changing
+docker info | grep -i sysbox
 ```
 
-## Security
+The compose override sets:
 
-Sysbox provides:
-- User namespace isolation (root in container = unprivileged on host)
-- No privileged mode required
-- Complete isolation between inner and outer Docker
-- Secure execution of untrusted code in nested containers
+```yaml
+runtime: sysbox-runc
+```
+
+The wrapper is intended to let OpenClaw create nested sandbox containers without privileged Docker-in-Docker.
+
+## Caveat
+
+The entrypoint currently starts Docker with `sudo dockerd`, but this wrapper Dockerfile does not install `sudo`. It works only if the base OpenClaw image already provides sudo. This is tracked in [../docs/issues-log.md](../docs/issues-log.md).

@@ -1,106 +1,125 @@
-# Command Reference
+# Commands
 
-Your main interface is `./clawfactory.sh`. Every command supports `-i <instance>` for targeting a specific agent in your fleet.
+All commands are run from the repository root.
+
+```bash
+./clawfactory.sh [-i <instance>] <command>
+```
+
+The instance comes from `-i`, `--instance`, or `.clawfactory.conf`.
 
 ## Lifecycle
 
-Bring agents online, take them offline, or cycle them.
-
 ```bash
-./clawfactory.sh start              # Launch default instance
-./clawfactory.sh stop               # Shut down default instance
-./clawfactory.sh restart            # Cycle all services
-./clawfactory.sh status             # Service health at a glance
-./clawfactory.sh info               # Display instance name + auth tokens
-./clawfactory.sh list               # Survey the entire fleet
+./clawfactory.sh -i <instance> start
+./clawfactory.sh -i <instance> stop
+./clawfactory.sh -i <instance> restart
+./clawfactory.sh -i <instance> rebuild
+./clawfactory.sh -i <instance> status
 ```
 
-## Diagnostics
+In Lima mode, these commands manage the VM-side systemd services. In Docker mode, they manage the compose stack.
 
-Peek under the hood when you need to see what your agent is up to.
+`rebuild` in Lima mode syncs, builds, optionally restores a snapshot, then restarts services. `rebuild` in Docker mode rebuilds compose images with `--no-cache`.
+
+## Logs And Shells
 
 ```bash
-./clawfactory.sh logs [service]     # Tail live logs (gateway/proxy/controller/temporal/worker)
-./clawfactory.sh shell [service]    # Drop into a container shell
-./clawfactory.sh controller         # Print the Controller dashboard URL
-./clawfactory.sh audit              # Review the recent audit trail
+./clawfactory.sh -i <instance> logs gateway
+./clawfactory.sh -i <instance> logs controller
+./clawfactory.sh -i <instance> logs proxy
+./clawfactory.sh -i <instance> logs temporal
+./clawfactory.sh -i <instance> logs worker
+./clawfactory.sh -i <instance> shell
 ```
+
+Docker mode follows `docker logs` for `clawfactory-<instance>-<service>`. Lima mode follows `journalctl` for systemd units.
+
+## Controller And Audit
+
+```bash
+./clawfactory.sh -i <instance> controller
+./clawfactory.sh -i <instance> audit
+./clawfactory.sh -i <instance> info
+./clawfactory.sh bots
+```
+
+`controller` prints the local controller URL, including the token when known. `info` prints mode, ports, and saved tokens. `bots` lists local instance folders, whether secrets and snapshots exist, and running service status.
 
 ## Snapshots
 
-Freeze-dry your agent's runtime state into an encrypted archive. Restore it anytime.
-
 ```bash
-./clawfactory.sh snapshot create    # Capture current state
-./clawfactory.sh snapshot list      # Browse available snapshots
-./clawfactory.sh snapshot restore <file>  # Restore from archive
-./clawfactory.sh snapshot keygen    # Generate encryption keys
+./clawfactory.sh -i <instance> snapshot list
+./clawfactory.sh -i <instance> snapshot create [name]
+./clawfactory.sh -i <instance> snapshot rename <filename> <new-name>
+./clawfactory.sh -i <instance> snapshot delete <filename>
+./clawfactory.sh -i <instance> snapshot delete all
+./clawfactory.sh -i <instance> snapshot restore [filename|latest]
 ```
 
-See [Snapshots](snapshots.md) for the full picture.
-
-## Fleet Operations
-
-Run multiple agents side by side, each with their own identity, secrets, and sandbox.
+Lima-only snapshot sync helpers:
 
 ```bash
-./clawfactory.sh -i bot1 start     # Bring 'bot1' online
-./clawfactory.sh -i bot1 stop      # Take 'bot1' offline
-./clawfactory.sh -i bot1 info      # Show 'bot1' credentials
+./clawfactory.sh -i <instance> snapshot pull
+./clawfactory.sh -i <instance> snapshot autopull enable
+./clawfactory.sh -i <instance> snapshot autopull disable
+./clawfactory.sh -i <instance> snapshot autopull status
 ```
 
-## Sandbox Control
-
-Manage your containment layer depending on your platform.
-
-```bash
-# Sysbox (Linux)
-./clawfactory.sh sandbox            # Check sandbox status
-./clawfactory.sh sandbox enable     # Activate Sysbox isolation
-./clawfactory.sh sandbox disable    # Drop back to standard containers
-
-# Lima VM (macOS)
-./clawfactory.sh lima setup         # Provision a Lima VM
-./clawfactory.sh lima shell         # Shell into the VM
-./clawfactory.sh lima status        # VM + service health
-./clawfactory.sh lima teardown      # Tear it all down
-```
-
-See [Sandbox](sandbox.md) for architecture details.
+Snapshot actions call controller endpoints. The older `scripts/snapshot.sh` is a host-side helper and does not cover every controller snapshot feature.
 
 ## OpenClaw CLI
 
-Talk directly to the OpenClaw runtime inside the sandbox — useful for first-time bot setup.
-
 ```bash
-./clawfactory.sh openclaw           # Launch the OpenClaw interactive CLI
+./clawfactory.sh -i <instance> openclaw <args>
+./clawfactory.sh -i <instance> openclaw onboard
 ```
 
-## Temporal Workflows
+Docker mode runs inside the gateway container. Lima mode runs as the per-instance service user in the VM with the instance state directory and gateway env loaded.
 
-Temporal provides durable workflow orchestration with automatic retries, scheduling, and a web UI for visibility.
-
-```bash
-./clawfactory.sh logs temporal      # Tail Temporal server logs
-./clawfactory.sh logs worker        # Tail Temporal worker logs
-```
-
-Access the Temporal UI:
-- **Local:** `http://localhost:8082`
-- **Tailnet:** `https://<hostname>:8444/`
-
-Set up workflow schedules (run once after deployment):
-```bash
-# Inside the Lima VM
-cd /srv/clawfactory/controller
-python3 temporal_schedules.py
-```
-
-## Kill Switch
-
-The nuclear option. Shuts down all services and severs network access immediately.
+## Updates
 
 ```bash
-./killswitch.sh lock                # Hard stop — everything goes dark
-./killswitch.sh restore             # Bring systems back online after review
+./clawfactory.sh -i <instance> update
+./clawfactory.sh -i <instance> update --merge
 ```
+
+Default update resets the bot source to `upstream/main`, then restores selected local files. `--merge` uses a merge flow for instances that carry source patches.
+
+## Instance Management
+
+```bash
+./clawfactory.sh init
+./clawfactory.sh -i <instance> delete
+```
+
+`init` can create a fresh OpenClaw instance or clone an existing local instance. `delete` removes the instance's local code, secrets, and snapshots, and removes the VM-side data in Lima mode.
+
+## Lima-Specific Commands
+
+```bash
+./clawfactory.sh lima setup
+./clawfactory.sh lima shell
+./clawfactory.sh lima status
+./clawfactory.sh lima teardown
+./clawfactory.sh -i <instance> sync
+./clawfactory.sh -i <instance> sync watch
+./clawfactory.sh -i <instance> config
+./clawfactory.sh -i <instance> config --jq '<jq-filter>'
+./clawfactory.sh -i <instance> code pull
+./clawfactory.sh -i <instance> tunnels status
+./clawfactory.sh -i <instance> mount list
+```
+
+`sync` pushes controller/proxy/code/secrets into the VM and restarts controller plus gateway. `sync watch` requires `fswatch`.
+
+`config` edits the live VM `openclaw.json`, validates JSON, pushes it back, and preserves ownership.
+
+## Emergency Stop
+
+```bash
+./killswitch.sh lock
+./killswitch.sh restore
+```
+
+In Lima mode, `lock` stops the Lima VM. In Docker mode, `restore` brings compose services back up. The controller also has a `/killswitch` endpoint that snapshots, signals the host-side Lima watcher, and stops the gateway.

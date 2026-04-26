@@ -1,70 +1,113 @@
-# Snapshots & State
+# Snapshots
 
-## Encrypted Snapshots
+Snapshots are the recovery system for bot state. They are age-encrypted tar archives stored under:
 
-Think of snapshots as cryogenic backups for your agent. They capture everything that makes the bot *itself* — the stuff that isn't tracked in git but would be devastating to lose:
+```text
+snapshots/<instance>/
+```
 
-- Vector embeddings database (`memory/main.sqlite`)
-- Runtime configuration (`openclaw.json`)
-- Paired devices and credentials
-- Device identity keys
+The private key lives at:
 
-**Not captured** (rebuilt automatically from git on startup):
-- `installed/` — npm packages declared in `{instance}_save/package.json`
+```text
+secrets/<instance>/snapshot.key
+```
 
-### Usage
+Keep that key safe. Without it, snapshots cannot be decrypted.
+
+## What Is Included
+
+Controller-created snapshots package `OPENCLAW_HOME`, which is normally:
+
+- Docker mode: `/srv/bot/state`
+- Lima mode: `/srv/clawfactory/bot_repos/<instance>/state`
+
+That state includes runtime config, memory indexes, paired devices, credentials, agent state, and workspace state managed by OpenClaw.
+
+## What Is Excluded
+
+The controller excludes generated or bulky data such as:
+
+- temp files;
+- session JSONL logs;
+- `installed`;
+- nested `.git` directories;
+- `node_modules`;
+- Python virtualenvs;
+- `__pycache__`;
+- `subagents`;
+- `media`;
+- SQLite WAL files and selected auth/cache logs.
+
+The intent is to preserve recoverable state, not dependency caches.
+
+## Create And List
 
 ```bash
-# Generate an encryption keypair (once per agent)
-./clawfactory.sh snapshot keygen
-
-# Freeze current state into an encrypted archive
-./clawfactory.sh snapshot create
-
-# Browse available snapshots
-./clawfactory.sh snapshot list
-
-# Restore from a snapshot (shut down the agent first!)
-./clawfactory.sh stop
-./clawfactory.sh snapshot restore latest
-./clawfactory.sh start
+./clawfactory.sh -i <instance> snapshot create
+./clawfactory.sh -i <instance> snapshot create before-upgrade
+./clawfactory.sh -i <instance> snapshot list
 ```
 
-The agent can also trigger its own snapshots through the Controller API:
+Controller filenames use this shape:
+
+```text
+snapshot--YYYY-MM-DDTHH-MM-SSZ.tar.age
+before-upgrade--YYYY-MM-DDTHH-MM-SSZ.tar.age
+```
+
+The controller also updates `latest.tar.age` as a symlink to the newest created snapshot.
+
+## Restore
+
 ```bash
-curl -X POST http://localhost:8080/snapshot
+./clawfactory.sh -i <instance> snapshot restore latest
+./clawfactory.sh -i <instance> snapshot restore <filename>
 ```
 
-## Memory Systems
+Restore behavior:
 
-Your agent builds up memory over time — daily journals, long-term recall, and vector embeddings for semantic search. All of it lives in `state/` and gets swept into encrypted snapshots.
+- stops the gateway;
+- moves current state aside to a timestamped backup directory;
+- decrypts and extracts the snapshot;
+- migrates Docker-era paths when restoring into Lima;
+- fixes ownership in Lima mode;
+- restarts the gateway.
 
-| Type | Location | Backup Method |
-|------|----------|---------------|
-| Daily journals | `state/workspace/memory/YYYY-MM-DD.md` | Encrypted snapshots |
-| Long-term memory | `state/workspace/MEMORY.md` | Encrypted snapshots |
-| Vector embeddings | `state/memory/main.sqlite` | Encrypted snapshots |
+If extraction fails, the controller attempts to move the backup state back.
 
-Memory stays in `state/` rather than git for good reasons:
-- The vector database needs real filesystem access for indexing
-- Constant memory updates would flood git history with noise
-- Encrypted snapshots keep the agent's thoughts private
+## Rename And Delete
 
-## Bot Save State
-
-Agents can declare persistent state they want to carry across restarts. The `{instance}_save/` directory is their designated cargo hold:
-
-```
-workspace/{instance}_save/
-├── package.json        # npm dependencies (auto-installed on startup)
-├── config.json         # Agent-specific configuration
-└── tools/              # Scripts the agent has written for itself
+```bash
+./clawfactory.sh -i <instance> snapshot rename <filename> <new-name>
+./clawfactory.sh -i <instance> snapshot delete <filename>
+./clawfactory.sh -i <instance> snapshot delete all
 ```
 
-Changes to save state go through the standard promotion pipeline — the agent can't just mutate its own config unchecked:
+Snapshot labels are sanitized to letters, numbers, hyphens, and underscores. Deleting `latest` directly is blocked; delete the actual target file instead.
 
-1. Agent edits files in `{instance}_save/`
-2. Agent commits and pushes a branch
-3. Agent opens a PR
-4. Human reviews and merges
-5. Gateway restarts and picks up the new state
+## Browse And Edit
+
+The controller API can open a snapshot into a temporary workspace:
+
+- open snapshot;
+- list files;
+- read, write, upload, delete, rename, duplicate files;
+- download files or directories;
+- save the modified workspace as a new encrypted snapshot.
+
+Temporary workspaces live under `/tmp/cf-snapshot-edit-<uuid>` and are cleaned up after one hour or on controller shutdown.
+
+## Lima Sync
+
+Lima mode treats the VM as the live runtime and the host as the durable operator copy. The launcher pulls VM snapshots to the host before sync and stop operations:
+
+```bash
+./clawfactory.sh -i <instance> snapshot pull
+./clawfactory.sh -i <instance> snapshot autopull enable
+```
+
+Host auto-pull uses a LaunchAgent every five minutes.
+
+## Legacy Script
+
+`scripts/snapshot.sh` is an older host-side snapshot helper. The supported operational path is the controller-backed `./clawfactory.sh snapshot ...` commands.

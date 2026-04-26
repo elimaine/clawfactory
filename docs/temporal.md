@@ -1,135 +1,120 @@
-# Temporal Workflow Orchestration
+# Temporal
 
-Temporal provides durable execution for agentic workflows — automatic retries, crash-resilient scheduling, and a web UI for real-time visibility. It replaces fragile cron-based workflows with first-class orchestration.
+Temporal support is present, but it is mostly wired for Lima mode.
 
-## Why Temporal?
+## Services
 
-Cron jobs fire-and-forget. If a step fails, you get a log entry and nothing else. Temporal gives you:
+Lima setup creates:
 
-- **Automatic retries** with configurable backoff (e.g., 30s initial, 5min max, 3 attempts)
-- **Durable execution** — workflows survive server restarts and pick up where they left off
-- **Multi-step sequencing** — chain activities with waits, conditionals, and error handling
-- **Visibility** — every workflow execution is browsable in the Temporal UI with full history
-- **Scheduling** — cron-like schedules with the Temporal scheduler (replaces OpenClaw cron jobs)
+- `clawfactory-temporal`: Temporal dev server using SQLite at `/srv/clawfactory/temporal/temporal.db`.
+- `clawfactory-temporal-worker`: Python worker in `controller/temporal_worker.py`.
 
-## Architecture
+The controller connects to `TEMPORAL_HOST`, defaulting to:
 
-```
-┌─────────────────────────────────────────────────┐
-│  Lima VM                                         │
-│                                                  │
-│  clawfactory-temporal.service                    │
-│  └── temporal server start-dev                   │
-│      ├── gRPC :7233 (internal)                   │
-│      ├── HTTP :7243 (internal)                   │
-│      ├── UI   :8233 (internal)                   │
-│      └── SQLite /srv/clawfactory/temporal/       │
-│                                                  │
-│  clawfactory-temporal-worker.service             │
-│  └── python3 temporal_worker.py                  │
-│      ├── Connects to Temporal gRPC               │
-│      ├── Registers workflows + activities        │
-│      └── Calls gateway HTTP API for agent turns  │
-│                                                  │
-│  nginx :8082 ──► proxy to Temporal UI :8233      │
-└─────────────────────────────────────────────────┘
-
-macOS host:
-  SSH tunnel: localhost:8082 ──► VM:8082
-  Tailscale:  https://<hostname>:8444/ ──► VM:8082
+```text
+127.0.0.1:7233
 ```
 
-## Port Assignments
+The Temporal UI is proxied on host port `8082` in Lima mode.
 
-| Service | VM Port | External Access |
-|---------|---------|-----------------|
-| Temporal gRPC | 7233 | Internal only |
-| Temporal HTTP | 7243 | Internal only |
-| Temporal UI | 8233 | Internal only |
-| nginx (Temporal UI proxy) | 8082 | localhost:8082 |
-| Tailscale HTTPS (Temporal) | — | :8444 |
+Docker Compose mode does not define a Temporal service in `docker-compose.yml`.
 
-## Files
+## Built-In Workflows
 
-| File | Purpose |
-|------|---------|
-| `controller/temporal_worker.py` | Worker process — registers workflows and activities |
-| `controller/temporal_schedules.py` | One-time script to create Temporal schedules |
-| `controller/requirements.txt` | Includes `temporalio>=1.9.0` |
-| `sandbox/lima/setup.sh` | Installs Temporal CLI, creates systemd units |
-| `sandbox/lima/vm.sh` | Manages Temporal services lifecycle |
+`controller/temporal_worker.py` registers:
 
-## Usage
+- `WeatherCheckWorkflow`: calls `wttr.in` for current weather.
+- `PoetryResearchWorkflow`: triggers a research agent turn, waits two hours, then triggers a synthesis agent turn.
+- `CustomWorkflow`: runs a JSON-defined sequence of `agent_turn`, `delay`, and `http` steps.
 
-### Viewing the Temporal UI
+The worker uses task queue:
 
-After starting services with `./clawfactory.sh -i <instance> start`:
+```text
+clawfactory
+```
 
-- **Local:** http://localhost:8082
-- **Tailnet:** https://\<hostname\>:8444/
+Agent turns call the OpenClaw gateway endpoint:
 
-The UI shows:
-- **Workflows** — active and completed workflow executions
-- **Schedules** — configured cron-like schedules
-- **History** — step-by-step execution timeline for each workflow run
+```text
+POST /api/cron/fire
+```
 
-### Logs
+with `{"job_id": "<agent_id>"}`.
+
+## Controller Endpoints
+
+```text
+POST /temporal/start
+GET  /temporal/workflows
+GET  /temporal/workflow/{workflow_id}
+```
+
+Agent-scoped equivalents:
+
+```text
+POST /agent/temporal/start
+GET  /agent/temporal/status/{workflow_id}
+```
+
+All return `503` if the controller cannot connect to Temporal.
+
+## Workflow Definitions
+
+Definitions are JSON files under:
+
+```text
+/srv/clawfactory/workflows
+```
+
+Controller endpoints:
+
+```text
+GET    /temporal/definitions
+GET    /temporal/definition/{name}
+POST   /temporal/definition
+DELETE /temporal/definition/{name}
+POST   /temporal/definition/{name}/run
+POST   /agent/temporal/run/{name}
+```
+
+Example definition:
+
+```json
+{
+  "name": "daily-check",
+  "description": "Run an agent, wait, then call a URL",
+  "steps": [
+    {"type": "agent_turn", "agent_id": "daily-check"},
+    {"type": "delay", "duration": "5m"},
+    {"type": "http", "method": "GET", "url": "https://example.com/health", "timeout": 30}
+  ]
+}
+```
+
+Durations support `s`, `m`, and `h`.
+
+## Schedule Helper
+
+`controller/temporal_schedules.py` creates one hard-coded schedule:
+
+```text
+poetry-research-daily
+```
+
+It runs `PoetryResearchWorkflow` at `0 4 * * *`.
+
+Run it inside an environment that can reach Temporal:
 
 ```bash
-./clawfactory.sh logs temporal    # Temporal server logs
-./clawfactory.sh logs worker      # Temporal worker logs
+python3 controller/temporal_schedules.py
 ```
 
-### Setting Up Schedules
+## Killswitch Behavior
 
-After the first deployment, create the workflow schedules:
+The worker checks:
 
-```bash
-# SSH into the Lima VM
-limactl shell clawfactory
-
-# Run the schedule setup
-cd /srv/clawfactory/controller
-python3 temporal_schedules.py
+```text
+/tmp/clawfactory-snapshot-sync/KILLSWITCH_<instance>
 ```
 
-This creates:
-- `poetry-research-daily` — fires the `PoetryResearchWorkflow` at 4am daily
-
-### Manual Workflow Execution
-
-Trigger a workflow manually from the Temporal UI:
-1. Open http://localhost:8082
-2. Click "Start Workflow"
-3. Select `PoetryResearchWorkflow`
-4. Use task queue `clawfactory`
-5. Click "Start"
-
-Or via the Temporal CLI inside the VM:
-```bash
-temporal workflow start \
-  --type PoetryResearchWorkflow \
-  --task-queue clawfactory \
-  --workflow-id poetry-research-manual
-```
-
-## Proof of Concept: PoetryResearchWorkflow
-
-The initial workflow migrated to Temporal:
-
-1. **Phase 1** — Triggers `poetry-research-execute` agent turn via gateway API
-2. **Wait** — 2-hour delay for research to settle
-3. **Phase 2** — Triggers `poetry-research-synthesize` agent turn
-
-Each phase retries up to 3 times with 30s→5min exponential backoff.
-
-## Adding New Workflows
-
-1. Define the workflow class and activities in `temporal_worker.py`
-2. Register workflows/activities in the `Worker()` constructor
-3. Optionally add a schedule in `temporal_schedules.py`
-4. Sync and restart: `./clawfactory.sh -i <instance> rebuild`
-
-## Data Storage
-
-Temporal runs in dev mode with SQLite storage at `/srv/clawfactory/temporal/temporal.db`. This is suitable for single-node deployments. For production use with multiple workers, switch to PostgreSQL or MySQL.
+before firing agent turns. If the killswitch signal exists, the activity refuses to trigger the gateway.

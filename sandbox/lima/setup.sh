@@ -288,6 +288,12 @@ install_dependencies() {
     lima_root "mkdir -p /srv/clawfactory/temporal"
     echo "done"
 
+    # Approved extras (managed by clawfactory.sh setup-extras approve)
+    if [[ -f "${SCRIPT_DIR}/setup-extras.sh" ]]; then
+        echo "  [extras] Applying approved extras..."
+        cat "${SCRIPT_DIR}/setup-extras.sh" | limactl shell "$LIMA_VM_NAME" -- bash -s install
+    fi
+
     echo ""
     ok "All dependencies installed in Lima VM"
 }

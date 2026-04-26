@@ -1,80 +1,87 @@
 # ClawFactory
 
-> **Status**: 26-4-14 Openclaw has made a number of releases around their install flow. The provided speed install may not be sufficient. I suspect install will need to be completed manually with the newer openclaw commandline flow using './clawfactoy -i *instanceName* openclaw'. I recommend claude or opencode to help you get setup if you hit a snag.
+ClawFactory is an operator-owned runtime for running OpenClaw bots without pretending the bot is a disposable process. It is a harness of harnesses: a practical shell around OpenClaw that keeps the bot's source, state, secrets, snapshots, logs, and emergency controls visible to the human who is responsible for it.
 
-## Why use Clawfactory? Harness of Harnesses.
+The project has a practical bias: make the bot easy to start, inspect, stop, update, and recover. OpenClaw moves quickly, experiments can wreck a good setup, and local security boundaries are easy to misunderstand. ClawFactory answers that with named instances, encrypted snapshots, controller visibility, and, in Lima mode, VMs all the way down.
 
-Openclaw is an incredible full stack agent platform and orchestration tool. However, using it and setting it up safetly has some real (and recurring) pain points this software seeks to make easy. 
-- OC (Openclaw) Updates often, and often breaks things. Clawfactoy makes them easy with a single button or command.
-- OC local security boundary is tricky. Maximize usefulness while minimize harm. Clawfactoy VM in VM allows OC control over itself, while protecting host machine and still allowing for more strict subagent VMs.
-- OC is a mercurial software, sometimes a single poor prompt or experiment can wreck your setup. Clawfactory has two ways of keeping your setups solid. Instances and snapshots. Have an agent running just the way you want? Copy it to a new instance to keep it seperate from your experiments. Snapshots can be for more temporary insurance, allowing you to snapshot agent state both using the agent, and also before risky updates so you can roll back.
-- The added controller (pictued) can be used as a non code way of managing your openclaw gateway. 
+## What It Runs
 
-<img width="853" height="497" alt="Screenshot 2026-02-24 at 2 15 17 PM" src="https://github.com/user-attachments/assets/9cea71cf-061d-4353-8d9c-77fc80ac6353" />
+A ClawFactory instance is a named bot under `bot_repos/<instance>/` with matching secrets and snapshots:
 
-## Vms all the way down.
+- `bot_repos/<instance>/code`: the OpenClaw source checkout and workspace files.
+- `bot_repos/<instance>/state`: OpenClaw runtime state, config, memory indexes, credentials, paired devices, and generated files.
+- `secrets/<instance>`: env files and snapshot encryption keys.
+- `snapshots/<instance>`: age-encrypted state backups.
+- `audit`: controller audit events, traffic logs, scrub rules, and session cookies.
 
-This project has 3 modes: 
+There are two runtime paths:
 
-- nested virtualization (recommended, osx apple silicon implemented)
-- single layer virtualization, openclaw gateway sandboxed
-- and no virtualization, with agents sandboxed through openclaw
+- Lima mode, selected by `SANDBOX_MODE=lima`, runs services directly inside a Linux VM with systemd. This is the current macOS path and the only path wired for Temporal and MITM TLS capture.
+- Docker Compose mode runs `proxy`, `gateway`, `controller`, and `llm-proxy` containers on the host. It is still supported by the compose files and launcher.
 
-Pulls from latest version of openclaw but you can also swap in your workspace.
-
-## Assembly Sequence
+## Quick Start
 
 ```bash
-git clone https://github.com/elimaine/clawfactory
-cd clawfactory
-./install.sh              # Interactive setup — provisions your first agent
-./clawfactory.sh start    # Bring systems online
-./clawfactory.sh info     # Display access credentials
+./install.sh
+./clawfactory.sh -i <instance> start
+./clawfactory.sh -i <instance> status
+./clawfactory.sh -i <instance> controller
 ```
 
-Once online:
-- **Gateway UI**: http://localhost:18789
-- **Mission Control**: http://localhost:8080/controller
+On macOS, the installer defaults toward Lima. If you already have an instance, `./clawfactory.sh bots` lists saved bots, configured secrets, snapshot availability, and ports.
 
-The installer generates all auth tokens automatically. Run `./clawfactory.sh info` to reveal them.
-
-## Requirements
-
-- API keys for your chosen AI providers — see the [API Key Guide](docs/API-KEYS.md)
-
-## How It Works
-
-Three subsystems behind a reverse proxy, each with a distinct role:
-
-| Subsystem | Function |
-|-----------|----------|
-| **Proxy** (nginx) | Front door — routes traffic on :18789 and :8080 |
-| **Gateway** (OpenClaw) | The agent brain — channels, LLM calls, tool execution, memory |
-| **Controller** (FastAPI) | Mission control — webhooks, promotion authority, snapshots, device pairing |
-
-## Emergency Shutdown
-
-If an agent goes sideways, pull the plug instantly:
-
-Either use the GUI and hit the big red killswitch button or use the CLI:
+For emergencies:
 
 ```bash
-./killswitch.sh lock      # Everything stops. Now.
-./killswitch.sh restore   # Bring systems back after review
+./killswitch.sh lock
 ```
 
-Killswitch can also be set by changing ENV value. An advanced way of using this is you can set up a honeypot file that on access locks your instances.
+In Lima mode, the killswitch stops the Lima VM. In Docker mode, it stops compose services and attempts a restrictive iptables lock when iptables exists.
 
-## Field Manual
+The point is not to make the agent powerless. The point is to make the agent useful while keeping rollback, shutdown, and recovery boring.
 
-- [Setup Guide](docs/setup.md) — Installation, secrets, remote access
-- [Architecture](docs/architecture.md) — System diagrams, data flow, promotion pipeline
-- [Commands](docs/commands.md) — Full CLI reference
-- [Sandbox](docs/sandbox.md) — Containment modes (none, Sysbox, Lima VM)
-- [Snapshots](docs/snapshots.md) — Encrypted backups, memory systems, bot state
-- [Controller API](docs/controller-api.md) — Endpoints and the config editor
-- [API Keys](docs/API-KEYS.md) — Provider key setup
+## Main Commands
 
-## License
+```bash
+./clawfactory.sh -i <instance> start
+./clawfactory.sh -i <instance> stop
+./clawfactory.sh -i <instance> restart
+./clawfactory.sh -i <instance> rebuild
+./clawfactory.sh -i <instance> update
+./clawfactory.sh -i <instance> logs gateway
+./clawfactory.sh -i <instance> shell
+./clawfactory.sh -i <instance> snapshot list
+./clawfactory.sh -i <instance> snapshot create before-change
+./clawfactory.sh -i <instance> snapshot restore latest
+./clawfactory.sh -i <instance> openclaw onboard
+```
 
-MIT
+See [docs/commands.md](docs/commands.md) for the full command reference.
+
+## Operator UI
+
+The controller is the operational dashboard. It exposes:
+
+- gateway status, restart, rebuild, logs, pairing approvals, and config editing;
+- encrypted snapshot create, list, rename, delete, restore, download, and browse/edit/save flows;
+- plaintext LLM proxy logs in Docker mode and encrypted MITM traffic logs in Lima mode;
+- scrub-rule management for captured text;
+- Temporal workflow start/status/definition endpoints when Temporal is available.
+
+The controller accepts `?token=...`, `Authorization: Bearer ...`, or a `clawfactory_session` cookie when `CONTROLLER_API_TOKEN` is configured. If no controller token is configured, most controller endpoints are open.
+
+## Docs
+
+- [Setup](docs/setup.md)
+- [Commands](docs/commands.md)
+- [Architecture](docs/architecture.md)
+- [Sandboxing](docs/sandbox.md)
+- [Snapshots](docs/snapshots.md)
+- [Controller API](docs/controller-api.md)
+- [API keys and secrets](docs/API-KEYS.md)
+- [Temporal](docs/temporal.md)
+- [Known issues log](docs/issues-log.md)
+
+## Current Caveats
+
+The docs now describe what the code does, not every plan the project has had. Some older planning ideas are not implemented, especially GitHub PR promotion endpoints and some tests that still refer to removed or unfinished routes. The tracked issues are in [docs/issues-log.md](docs/issues-log.md).

@@ -919,6 +919,19 @@ ENVEOF
         shift
         lima_config_edit "$@"
         ;;
+    setup-extras)
+        if [[ "$SANDBOX_MODE" != "lima" ]]; then
+            echo "setup-extras is only available in Lima sandbox mode"
+            exit 1
+        fi
+        if [[ "$INSTANCE_NAME" == "default" ]]; then
+            echo "Error: Specify an instance with -i <name>" >&2
+            exit 1
+        fi
+        lima_ensure
+        shift
+        lima_extras "$@"
+        ;;
     code)
         if [[ "$SANDBOX_MODE" != "lima" ]]; then
             echo "Code commands are only available in Lima sandbox mode"
@@ -1015,6 +1028,7 @@ ENVEOF
         echo "  snapshot        Manage snapshots (list/create/rename/delete)"
         echo "  config          Edit gateway config (pulls from VM, edits, pushes back)"
         echo "  config --jq F   Apply a jq filter to gateway config"
+        echo "  setup-extras    Manage agent-submitted system packages and env secrets (list/show/approve/reject)"
         echo "  openclaw <args> Run OpenClaw CLI (e.g. openclaw onboard)"
         echo "  init            Interactive new bot / clone setup"
         echo "  info            Show instance info and tokens"

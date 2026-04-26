@@ -1,301 +1,130 @@
-# API Key Acquisition Guide
+# API Keys And Secrets
 
-This guide walks you through obtaining each API key needed for a fresh ClawFactory install.
+Secrets are stored per instance under:
 
-## Minimal Recommended Setup
-
-1. **Channel token** (Discord, Telegram, or Slack)
-2. **Kimi K2** or **Anthropic** (primary model)
-3. **Ollama** (local embeddings, free) or **OpenAI** (remote embeddings)
-
-
-## Channel Tokens (At least one required)
-
-### Discord Bot Token
-
-1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
-2. Click **New Application** → name it (e.g., "MyBot")
-3. Go to **Bot** in the left sidebar
-4. Click **Reset Token** → **Yes, do it!**
-5. Copy the token (you won't see it again)
-6. Under **Privileged Gateway Intents**, enable:
-   - **Message Content Intent** (required for reading messages)
-   - **Server Members Intent** (optional, for member lists)
-
-**Token format**: `MTIzNDU2Nzg5...` (long base64 string)
-
-#### Required OAuth2 Scopes
-
-| Scope | Required | Purpose |
-|-------|----------|---------|
-| `bot` | Yes | Main bot functionality |
-| `applications.commands` | Optional | Slash commands support |
-
-The other scopes (`guilds`, `rpc`, `presences`, etc.) are for user OAuth apps, not bots. For a standard bot, you only need `bot` and optionally `applications.commands`.
-
-#### Bot Permissions
-
-When generating the invite URL, select these permissions:
-
-| Permission | Bit Value | Purpose |
-|------------|-----------|---------|
-| View Channels | 1024 | See channels the bot can access |
-| Send Messages | 2048 | Reply to users |
-| Embed Links | 16384 | Rich message formatting |
-| Attach Files | 32768 | Send images/files |
-| Read Message History | 65536 | Context for conversations |
-| Add Reactions | 64 | React to messages |
-| Use External Emoji | 262144 | Custom emoji support |
-| Create Public Threads | 34359738368 | Thread conversations |
-| Send Messages in Threads | 274877906944 | Reply in threads |
-| Manage Threads | 17179869184 | Archive/manage threads |
-
-#### Generating the Invite URL
-
-1. Go to **OAuth2** → **URL Generator** in the Developer Portal
-2. Select scopes: `bot` + `applications.commands`
-3. Select the permissions listed above
-4. Copy the generated URL
-5. Open the URL to invite the bot to **your own server**
-
-#### Security: Bot Pairing and Server Control
-
-**Important**: Only add the bot to servers you control.
-
-OpenClaw uses a **pairing system** for security:
-- When the bot joins a server, it doesn't automatically respond to everyone
-- Users must be **paired** (authorized) before the bot will interact with them
-- Pairing is managed through the Controller UI or via DM pairing codes
-
-**Why this matters**:
-- If you add the bot to a server you don't control, the server owner/admins could potentially interact with your bot
-- The pairing system prevents unauthorized access, but it's still best practice to only deploy to servers you own
-- For public bots serving multiple communities, use the allowlist/denylist features in `openclaw.json`
-
-To pair a user:
-1. Go to Controller UI → **Devices** section
-2. Approve pending pairing requests, or
-3. Have the user DM the bot with the pairing code shown in the Controller
-
----
-
-### Telegram Bot Token
-
-1. Open Telegram and message [@BotFather](https://t.me/BotFather)
-2. Send `/newbot`
-3. Follow prompts to name your bot
-4. Copy the token BotFather gives you
-
-**Token format**: `123456789:ABCdefGHI...`
-
-**Note**: Use `/setprivacy` with BotFather to enable group messages if needed.
-
----
-
-### Slack Bot Token
-
-1. Go to [Slack API Apps](https://api.slack.com/apps)
-2. Click **Create New App** → **From scratch**
-3. Name it and select workspace
-4. Go to **OAuth & Permissions**
-5. Add Bot Token Scopes:
-   - `chat:write`
-   - `channels:history`
-   - `groups:history`
-   - `im:history`
-   - `app_mentions:read`
-6. Click **Install to Workspace**
-7. Copy the **Bot User OAuth Token**
-
-**Token format**: `xoxb-...`
-
----
-
-## AI Provider Keys (Choose at least one)
-
-### Anthropic (Claude) - note (best model, expensive)
-
-Best for: Primary model, high-quality reasoning
-
-1. Go to [Anthropic Console](https://console.anthropic.com/)
-2. Sign up or log in
-3. Go to **Settings** → **API Keys**
-4. Click **Create Key**
-5. Name it (e.g., "ClawFactory")
-6. Copy the key
-
-**Key format**: `sk-ant-api03-...`
-
-**Pricing**: ~$3/M input tokens, ~$15/M output tokens (Claude Sonnet)
-
----
-
-### Kimi K2.5 (Moonshot AI) - Recommended (high quality, 8x cheaper than Claude!)
-
-Best for: High-performance alternative, 256k context window, agentic tasks
-
-1. Go to [Moonshot Platform](https://platform.moonshot.ai/)
-2. Sign up and verify your account
-3. Go to **Console** → **API Keys**
-4. Click **Create new API key**
-5. Copy the key
-
-**Key format**: `sk-...` (standard format)
-
-**Pricing**: ~$0.60/M input, ~$2.50/M output - significantly cheaper than Anthropic
-
----
-
-### OpenAI (GPT-4) - note: you want one of these for memory embeddings, unless you want to do local.
-
-Best for: GPT models, widely compatible
-
-1. Go to [OpenAI Platform](https://platform.openai.com/)
-2. Sign up or log in
-3. Go to **API Keys** (left sidebar)
-4. Click **Create new secret key**
-5. Name it and copy the key
-
-**Key format**: `sk-proj-...` or `sk-...`
-
-**Pricing**: ~$2.50/M input, ~$10/M output (GPT-4o)
-
----
-
-### OpenRouter
-
-Best for: Access to multiple providers through one API
-
-1. Go to [OpenRouter](https://openrouter.ai/)
-2. Sign up or log in
-3. Go to **Keys** (left sidebar)
-4. Click **Create Key**
-5. Set spending limit (recommended)
-6. Copy the key
-
-**Key format**: `sk-or-v1-...`
-
-**Pricing**: Pass-through pricing + small markup
-
----
-
-### Ollama (Local Models)
-
-Best for: Running models locally, no API costs, privacy
-
-1. Install Ollama:
-   ```bash
-   # macOS
-   brew install ollama
-
-   # Linux
-   curl -fsSL https://ollama.ai/install.sh | sh
-   ```
-
-2. Start Ollama:
-   ```bash
-   ollama serve
-   ```
-
-3. Pull models:
-   ```bash
-   ollama pull llama3.2        # General purpose
-   ollama pull nomic-embed-text # For embeddings
-   ollama pull qwen2.5:32b      # Larger model
-   ```
-
-**No API key needed** - uses `ollama-local` as placeholder
-
-**Note**: For Docker, Ollama connects via `host.docker.internal:11434`
-
----
-
-## Optional Keys
-
-### GitHub Personal Access Token
-
-Only needed for automatic webhook configuration during install.
-
-1. Go to [GitHub Tokens (Classic)](https://github.com/settings/tokens/new)
-2. Note: Must be **Classic** token, not fine-grained
-3. Set description: "ClawFactory"
-4. Select scopes:
-   - `repo` (full control of private repos)
-   - `admin:repo_hook` (manage webhooks)
-   - `admin:org` (only if using an organization)
-5. Click **Generate token**
-6. Copy the token
-
-**Token format**: `ghp_...` (classic) or `github_pat_...` (fine-grained, won't work)
-
-**Note**: If you skip this, you can manually configure webhooks later.
-
----
-
-## Environment Variables Summary
-
-After obtaining keys, they go in `secrets/<instance>/gateway.env`:
-
-```bash
-# Channels (at least one)
-DISCORD_BOT_TOKEN=your_discord_token
-TELEGRAM_BOT_TOKEN=your_telegram_token
-SLACK_BOT_TOKEN=xoxb-your-slack-token
-
-# AI Providers (at least one)
-ANTHROPIC_API_KEY=sk-ant-api03-...
-KIMI_API_KEY=sk-...
-OPENAI_API_KEY=sk-proj-...
-GEMINI_API_KEY=AIza...
-OPENROUTER_API_KEY=sk-or-v1-...
-
-# Ollama (local)
-OLLAMA_API_KEY=ollama-local
-OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
-
-# Generated by installer
-OPENCLAW_GATEWAY_TOKEN=<auto-generated>
+```text
+secrets/<instance>/
 ```
 
----
+The installer writes two main env files:
 
-## Recommended Setup
+```text
+secrets/<instance>/gateway.env
+secrets/<instance>/controller.env
+```
 
-1. **Channel token** (Discord, Telegram, or Slack)
-2. **Kimi K2** or **Anthropic** (primary model)
-3. **Ollama** (local embeddings, free) or **OpenAI** (remote embeddings)
+It also writes shared token lookup data to:
 
----
+```text
+secrets/tokens.env
+```
 
-## Troubleshooting
+## Minimal Setup
 
-### "Invalid API key" errors
-- Check for extra whitespace when copying
-- Ensure the key hasn't been revoked
-- Verify you're using the correct key type (e.g., classic GitHub token)
+A useful first instance needs:
 
-### Ollama connection issues
-- Ensure `ollama serve` is running
-- Check if port 11434 is accessible
-- For Docker: verify `host.docker.internal` resolves
+- one chat channel token, usually Discord, Telegram, or Slack;
+- one primary model provider, usually Anthropic, Moonshot/Kimi, OpenAI, Gemini, OpenRouter, or Ollama;
+- a controller token, generated by the installer;
+- a gateway token, generated by the installer;
+- a snapshot key, generated by `age-keygen` when available.
 
-### Rate limits
-- Start with lower usage models during testing
-- Consider OpenRouter for automatic fallbacks
-- Add multiple providers for redundancy
+Search, voice, and extra model providers can be added later. Do not block initial setup on every optional key.
 
----
+## Gateway Secrets
 
-## Cost Estimation
+`gateway.env` is read by the OpenClaw gateway. In Lima mode it is also loaded by the controller service because the controller needs agent/internal gateway tokens for some operations.
 
-Rough monthly costs for moderate usage (~100k messages):
+Common values:
 
-| Provider | Estimated Cost |
-|----------|----------------|
-| Anthropic (Claude Sonnet) | $10-30/month |
-| OpenAI (GPT-4o) | $10-25/month |
-| Gemini (Flash) | $1-5/month |
-| Ollama | $0 (hardware costs only) |
-| OpenRouter | Varies by model |
+```text
+DISCORD_BOT_TOKEN=
+TELEGRAM_BOT_TOKEN=
+SLACK_BOT_TOKEN=
+SLACK_APP_TOKEN=
+ANTHROPIC_API_KEY=
+MOONSHOT_API_KEY=
+OPENAI_API_KEY=
+GEMINI_API_KEY=
+OPENROUTER_API_KEY=
+BRAVE_API_KEY=
+OLLAMA_API_KEY=ollama-local
+OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
+OPENCLAW_GATEWAY_TOKEN=
+GATEWAY_INTERNAL_TOKEN=
+AGENT_API_TOKEN=
+```
 
-Actual costs depend heavily on message length, thinking mode, and usage patterns.
+The installer currently prompts for ElevenLabs but does not write `ELEVENLABS_API_KEY` to `gateway.env`; add it manually if your OpenClaw config needs it.
+
+## Controller Secrets
+
+`controller.env` is read by the controller.
+
+Common values:
+
+```text
+CONTROLLER_API_TOKEN=
+OPENCLAW_GATEWAY_TOKEN=
+INSTANCE_NAME=
+GIT_USER_NAME=
+GIT_USER_EMAIL=
+GATEWAY_PORT=
+CONTROLLER_PORT=
+```
+
+`GATEWAY_PORT` and `CONTROLLER_PORT` are optional. The launcher auto-assigns and appends them when multiple Docker instances would otherwise collide.
+
+## Tokens
+
+`OPENCLAW_GATEWAY_TOKEN` authenticates requests to the OpenClaw gateway.
+
+`CONTROLLER_API_TOKEN` authenticates requests to the ClawFactory controller. If it is empty, most controller endpoints are open.
+
+`GATEWAY_INTERNAL_TOKEN` is generated in Lima mode if missing and is used for internal gateway operations.
+
+`AGENT_API_TOKEN` is generated in Lima mode if missing and is used by sandboxed agents for scoped controller endpoints. Agent endpoints deny access when this token is missing.
+
+Treat `AGENT_API_TOKEN` as powerful. Current `/agent/system/*` endpoints allow an unscoped agent to install apt packages, run shell installer commands, and set runtime env overlays inside the VM.
+
+## Snapshot Keys
+
+Snapshots use age.
+
+```text
+secrets/<instance>/snapshot.key
+secrets/<instance>/snapshot.pub
+```
+
+The private key decrypts snapshots and recovers the Fernet key used by encrypted MITM capture. Losing it means losing access to encrypted snapshots and encrypted captured traffic.
+
+## File Permissions
+
+The installer sets env files to mode `600` on the host.
+
+Lima mode tightens VM permissions:
+
+- `controller.env`: root-only;
+- `gateway.env`: root plus the gateway service group;
+- `snapshot.key`: root plus the gateway service group;
+- JSON credential files in `secrets/<instance>`: root plus gateway service group.
+
+## Provider Routing And Logging
+
+Docker Compose mode sets these gateway environment variables:
+
+```text
+ANTHROPIC_BASE_URL=http://llm-proxy:9090/anthropic
+OPENAI_BASE_URL=http://llm-proxy:9090/openai
+GEMINI_API_BASE=http://llm-proxy:9090/gemini
+```
+
+That means default Docker plaintext logging covers Anthropic, OpenAI, and Gemini. Other providers are not routed through `llm-proxy` unless configured in OpenClaw.
+
+Lima mode does not currently set provider base URLs automatically. Use OpenClaw config overrides if you want to route providers through the Lima `clawfactory-llm-proxy`.
+
+## Hygiene
+
+Do not put real provider keys in `bot_repos/<instance>/code`, workspace markdown, docs, or issue reports. Keep them in `secrets/<instance>`.
+
+If a token is exposed, rotate it rather than only deleting logs.

@@ -1,126 +1,89 @@
-# Sandbox Modes
+# Sandboxing
 
-Every agent needs a containment field. ClawFactory offers three isolation tiers depending on your platform and threat model. The installer auto-detects your system and presents the right options.
+ClawFactory has three sandbox modes. They are selected by `SANDBOX_MODE` in `.clawfactory.conf`.
 
-| Mode | Platform | Isolation Level | Setup |
-|------|----------|-----------------|-------|
-| `none` | Any | Container-level only | Default — no extra dependencies |
-| `sysbox` | Linux | Docker-in-Docker | Install [Sysbox](https://github.com/nestybox/sysbox) |
-| `lima` | macOS (Apple Silicon) | Full virtual machine | `./sandbox/lima/setup.sh` |
+```text
+lima    Linux VM on macOS, current primary path
+sysbox  Docker-in-Docker gateway wrapper through Sysbox
+none    plain Docker Compose services
+```
 
-## None (Default)
+The name is historical: `SANDBOX_MODE` controls more than tool sandboxing. In Lima mode it changes the whole deployment model.
 
-The lightweight option. Services run as standard Docker containers and tools execute directly on the gateway. Works well when you're relying on OpenClaw's own built-in sandbox modes for tool isolation.
+## Lima Mode
 
-## Sysbox (Linux)
+Lima mode runs services directly in a Linux VM:
 
-Sysbox gives you secure Docker-in-Docker — the gateway container can spawn fully isolated tool containers without exposing the host Docker socket. Clean separation between the agent runtime and whatever tools it decides to run.
+- gateway runs as `openclaw-<instance>`;
+- controller and helper services run as systemd services;
+- Docker runs inside the VM for OpenClaw's own tool sandbox;
+- nginx and Lima's VZ networking expose localhost ports to the host;
+- optional Tailscale HTTPS serve maps tailnet URLs to local ports.
+
+Start:
 
 ```bash
-# Install Sysbox
-wget https://downloads.nestybox.com/sysbox/releases/v0.6.4/sysbox-ce_0.6.4-0.linux_amd64.deb
-sudo dpkg -i sysbox-ce_0.6.4-0.linux_amd64.deb
+./clawfactory.sh -i <instance> start
+```
 
-# Verify it's registered
+Provision:
+
+```bash
+./clawfactory.sh lima setup
+```
+
+The host and VM are synchronized with rsync. Host code is pushed to the VM, but VM snapshots, state, and code changes are pulled back before destructive sync steps.
+
+### Lima Security Shape
+
+Lima mode creates a separate Unix user per instance. It sets:
+
+- `bot_repos/<instance>` owned by that service user;
+- `controller.env` root-only;
+- `gateway.env`, JSON credential files, and `snapshot.key` readable by the gateway group;
+- encrypted MITM traffic logs root-only;
+- audit log appendable by services.
+
+The gateway gets Docker group access in the VM so OpenClaw can run its tool sandbox.
+
+### Lima Capture Modes
+
+Two logging paths exist in the VM:
+
+- `clawfactory-llm-proxy` on port `9090`, which is not automatically wired into provider base URLs in current Lima code.
+- `clawfactory-mitm`, which is started by the controller capture toggle and uses iptables owner rules to redirect gateway user HTTP/HTTPS traffic to mitmproxy. Captured entries are Fernet-encrypted line by line; the Fernet key is age-encrypted with `snapshot.key`.
+
+## Sysbox Mode
+
+Sysbox mode uses Docker Compose plus `docker-compose.sandbox.yml`.
+
+The override:
+
+- builds `gateway/Dockerfile` on top of the normal OpenClaw gateway image;
+- runs the gateway container with `runtime: sysbox-runc`;
+- starts Docker inside the gateway container;
+- persists Docker data in the `gateway-docker-data` volume.
+
+Use this only on a host with Sysbox installed and working:
+
+```bash
 docker info | grep -i sysbox
-
-# Activate in ClawFactory
-./clawfactory.sh sandbox enable
 ```
 
-## Lima VM (macOS)
+The gateway wrapper tries to create the `openclaw-sandbox:bookworm-slim` image on first boot.
 
-The heavy-duty option. The entire agent stack runs as systemd services inside a Lima virtual machine using Apple's VZ framework, which delivers near-native networking speeds. Docker only exists inside the VM for OpenClaw's tool sandbox — your host stays clean.
+## None Mode
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  macOS Host                                                     │
-│                                                                 │
-│  clawfactory.sh ── rsync over SSH ──┐                           │
-│                                     ▼                           │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │  Lima VM (VZ framework, Ubuntu 24.04)                     │  │
-│  │                                                           │  │
-│  │  systemd services:                                        │  │
-│  │  ┌─────────┐   ┌──────────────┐   ┌──────────────────┐   │  │
-│  │  │  nginx  │──►│   Gateway    │──►│    LLM Proxy     │   │  │
-│  │  │  :80    │   │  (OpenClaw)  │   │  :9090           │   │  │
-│  │  │  :8081  │─┐ │  :18789      │   │                  │   │  │
-│  │  │  :8082  │┐│ └──────────────┘   │ Anthropic ──► api.anthropic.com
-│  │  └─────────┘││                    │ OpenAI   ──► api.openai.com
-│  │             ││ ┌──────────────┐   │ Gemini   ──► googleapis.com
-│  │             │└►│  Controller  │   └──────────────────┘   │  │
-│  │             │  │  (FastAPI)   │         │                │  │
-│  │             │  │  :8080       │         ▼                │  │
-│  │             │  └──────────────┘   /srv/clawfactory/      │  │
-│  │             │                    audit/traffic.jsonl     │  │
-│  │             │  ┌──────────────┐                          │  │
-│  │             └─►│  Temporal    │  workflow orchestration   │  │
-│  │                │  :7233 gRPC  │  retries, scheduling     │  │
-│  │                │  :8233 UI   │──► temporal/temporal.db   │  │
-│  │                └──────────────┘                          │  │
-│  │                ┌──────────────┐                          │  │
-│  │                │  MITM Proxy │  (opt-in, off by default) │  │
-│  │                │  mitmproxy  │  iptables REDIRECT        │  │
-│  │                │  :8888      │──► audit/traffic.enc.jsonl │  │
-│  │                └──────────────┘  (Fernet encrypted)      │  │
-│  │  dockerd (tool sandbox only)                             │  │
-│  └───────────────────────────────────────────────────────────┘  │
-│                                                                 │
-│  VZ auto-forwards ports to macOS localhost                      │
-│  [Kill Switch] ── stops Lima VM entirely                        │
-└─────────────────────────────────────────────────────────────────┘
-```
+`SANDBOX_MODE=none` uses plain Docker Compose. OpenClaw and ClawFactory still run in containers, but there is no extra VM or Sysbox layer around OpenClaw tool execution.
 
-### File Sync
+This mode is useful for local development and simpler deployments, but it is not the strongest isolation model.
 
-The host filesystem is **not mounted** into the VM (`mounts: []`). On every `start` or `rebuild`, `clawfactory.sh` syncs files from the host to the VM using rsync over the Lima SSH tunnel:
+## What Sandboxing Does Not Solve
 
-```
-Host                              Lima VM
-controller/  ──rsync──►  /tmp/cf-sync/controller/
-proxy/       ──rsync──►  /tmp/cf-sync/proxy/         ──sudo rsync──►  /srv/clawfactory/
-bot_repos/   ──rsync──►  /tmp/cf-sync/bot_repos/
-secrets/     ──rsync──►  /tmp/cf-sync/secrets/
-```
+Sandboxing does not replace operator controls:
 
-State directories use `--update` to preserve VM-side changes. Node modules are excluded from sync and installed inside the VM during the build step.
-
-### Provisioning
-
-One command to build the whole environment. Takes a few minutes the first time — it's downloading an Ubuntu image, booting a VM, and installing the full stack.
-
-```bash
-./sandbox/lima/setup.sh            # Build the VM from scratch
-./sandbox/lima/setup.sh teardown   # Nuke everything and start fresh
-```
-
-### Resource Scaling
-
-During setup, you choose how many agents you want to run concurrently. The VM scales its resources to match:
-
-| Agents | VM RAM | vCPUs |
-|--------|--------|-------|
-| 1      | 4 GiB  | 3     |
-| 2      | 6 GiB  | 4     |
-| 3      | 8 GiB  | 5     |
-
-### Multi-Agent Isolation
-
-When you're running a fleet, each agent gets hard boundaries inside the VM:
-
-- Dedicated system user (`openclaw-{instance}`) — agents can't see each other
-- Locked-down directories (`chmod 700`) — no cross-instance snooping
-- Secrets readable only by root and the owning agent (750/640 permissions)
-- Unique gateway port per instance via systemd overrides
-- Docker group access for tool sandboxing
-- Separate snapshot storage per agent
-
-### Commands
-
-```bash
-./clawfactory.sh lima setup        # Provision the Lima VM
-./clawfactory.sh lima shell        # Drop into the VM shell
-./clawfactory.sh lima status       # VM + service health check
-./clawfactory.sh lima teardown     # Tear down the VM entirely
-```
+- keep controller access token-protected if exposed beyond localhost;
+- do not put real secrets in bot code or workspace files;
+- snapshot before risky updates;
+- use the killswitch when behavior looks wrong;
+- review `docs/issues-log.md` for current gaps.

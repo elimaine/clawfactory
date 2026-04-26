@@ -73,8 +73,6 @@ save_config() {
     cat > "$CONFIG_FILE" <<EOF
 # ClawFactory Instance Configuration
 INSTANCE_NAME="${INSTANCE_NAME:-}"
-GITHUB_USERNAME="${GITHUB_USERNAME:-}"
-GITHUB_ORG="${GITHUB_ORG:-}"
 SANDBOX_MODE="${SANDBOX_MODE:-none}"
 EOF
 
@@ -87,8 +85,6 @@ EOF
 # Docker Compose environment (auto-generated)
 INSTANCE_NAME=${INSTANCE_NAME:-clawfactory}
 COMPOSE_PROJECT_NAME=clawfactory-${INSTANCE_NAME:-default}
-GITHUB_USERNAME=${GITHUB_USERNAME:-}
-GITHUB_ORG=${GITHUB_ORG:-}
 SANDBOX_ENABLED=${sandbox_enabled}
 SANDBOX_MODE=${SANDBOX_MODE:-none}
 EOF
@@ -130,7 +126,7 @@ load_env_value() {
         DISCORD_BOT_TOKEN|TELEGRAM_BOT_TOKEN|SLACK_BOT_TOKEN|SLACK_APP_TOKEN|ANTHROPIC_API_KEY|MOONSHOT_API_KEY|OPENAI_API_KEY|GEMINI_API_KEY|OLLAMA_API_KEY|OPENROUTER_API_KEY|BRAVE_API_KEY|ELEVENLABS_API_KEY|OPENCLAW_GATEWAY_TOKEN)
             file="${SECRETS_DIR}/${instance}/gateway.env"
             ;;
-        GITHUB_WEBHOOK_SECRET|ALLOWED_MERGE_ACTORS|CONTROLLER_API_TOKEN|GITHUB_TOKEN)
+        CONTROLLER_API_TOKEN)
             file="${SECRETS_DIR}/${instance}/controller.env"
             ;;
         *)
@@ -309,10 +305,8 @@ init_bot_repo() {
         fi
     else
         # No existing source - try GitHub or manual setup
-        # Determine repo owner (org or username)
-        local repo_owner="${GITHUB_REPO_OWNER:-${GITHUB_ORG:-${GITHUB_USERNAME}}}"
-        if [[ -z "$repo_owner" ]] && [[ "$GH_AVAILABLE" == "true" ]]; then
-            # Try to get from gh auth
+        local repo_owner=""
+        if [[ "$GH_AVAILABLE" == "true" ]]; then
             repo_owner=$(gh api user --jq '.login' 2>/dev/null || echo "")
         fi
 
@@ -343,13 +337,7 @@ init_bot_repo() {
         # Check if fork exists, if not create it
         if ! gh repo view "${fork_repo}" &>/dev/null; then
             info "Forking openclaw/openclaw as ${bot_repo_name} under ${repo_owner}..."
-            if [[ -n "$GITHUB_ORG" && "$GITHUB_ORG" == "$repo_owner" ]]; then
-                # Fork to organization
-                gh repo fork openclaw/openclaw --clone=false --fork-name "${bot_repo_name}" --org "${GITHUB_ORG}"
-            else
-                # Fork to personal account
-                gh repo fork openclaw/openclaw --clone=false --fork-name "${bot_repo_name}"
-            fi
+            gh repo fork openclaw/openclaw --clone=false --fork-name "${bot_repo_name}"
             success "Created fork: ${fork_repo}"
         else
             success "Fork exists: ${fork_repo}"
@@ -921,11 +909,6 @@ configure_secrets() {
 
     # Load any existing values from env files as defaults
     local saved_discord_token=$(load_env_value "DISCORD_BOT_TOKEN")
-    local saved_github_webhook=$(load_env_value "GITHUB_WEBHOOK_SECRET")
-    local saved_github_actors=$(load_env_value "ALLOWED_MERGE_ACTORS")
-
-    # GitHub username can be derived from actors
-    local saved_github_username="${saved_github_actors%%,*}"
 
     # If using saved secrets, skip configuration prompts
     if [[ "$USE_SAVED_SECRETS" == "true" ]]; then
@@ -962,12 +945,6 @@ configure_secrets() {
         MEMORY_SEARCH_ENABLED="true"
         MEMORY_SEARCH_PROVIDER="openclaw"
         MEMORY_SEARCH_MODEL="local"
-
-        # Set defaults for GitHub (offline mode when using saved)
-        GITHUB_USERNAME=""
-        GITHUB_WEBHOOK_SECRET=""
-        GITHUB_ALLOWED_ACTORS=""
-        GITHUB_BOT_REPO=""
     fi
 
     # If using saved secrets, skip configuration prompts
@@ -1068,110 +1045,7 @@ configure_secrets() {
         esac
     done
 
-    if [[ "$MODE" == "online" ]]; then
-        echo ""
-        echo "=== GitHub Configuration ==="
-        if [[ -n "$saved_github_username" ]]; then
-            GITHUB_USERNAME="$saved_github_username"
-            success "GitHub username: $GITHUB_USERNAME (saved)"
-        else
-            prompt GITHUB_USERNAME "Your GitHub username"
-        fi
-
-        # GitHub org configuration
-        echo ""
-        echo "Bot repos can be stored under a GitHub organization."
-        echo "This keeps them organized (e.g., my-bots-org/bot1-bot, my-bots-org/bot2-bot)"
-        echo "Leave empty to use your personal account (${GITHUB_USERNAME})"
-        echo ""
-
-        # Load saved org if exists
-        local saved_github_org=""
-        if [[ -f "$CONFIG_FILE" ]]; then
-            saved_github_org=$(grep "^GITHUB_ORG=" "$CONFIG_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '"')
-        fi
-
-        if [[ -n "$saved_github_org" ]]; then
-            GITHUB_ORG="$saved_github_org"
-            success "GitHub org: $GITHUB_ORG (saved)"
-        else
-            prompt GITHUB_ORG "GitHub organization (or leave empty for personal)" ""
-        fi
-
-        # Determine the repo owner (org or username)
-        if [[ -n "$GITHUB_ORG" ]]; then
-            GITHUB_REPO_OWNER="$GITHUB_ORG"
-            info "Bot repos will be created under: $GITHUB_ORG"
-        else
-            GITHUB_REPO_OWNER="$GITHUB_USERNAME"
-            info "Bot repos will be created under: $GITHUB_USERNAME"
-        fi
-
-        if [[ -n "$saved_github_webhook" ]]; then
-            GITHUB_WEBHOOK_SECRET="$saved_github_webhook"
-            GITHUB_BOT_REPO="${INSTANCE_NAME}-bot"
-            success "GitHub webhook secret (saved)"
-            success "Bot repo: ${GITHUB_REPO_OWNER}/${GITHUB_BOT_REPO}"
-            AUTO_GITHUB=false
-        else
-            echo ""
-            echo "Do you want to automatically configure GitHub webhooks?"
-            echo "This requires a classic GitHub personal access token (not fine-grained)."
-            echo "Scopes needed: 'repo' and 'admin:repo_hook'"
-            if [[ -n "$GITHUB_ORG" ]]; then
-                echo "For org repos, you also need 'admin:org' scope."
-            fi
-            echo ""
-            echo "Create a classic token here:"
-            echo "  https://github.com/settings/tokens/new?scopes=repo,admin:repo_hook&description=ClawFactory"
-            echo ""
-            echo "(If that page shows 'Fine-grained tokens', click 'Tokens (classic)' in the left sidebar)"
-            echo ""
-            read -p "Auto-configure GitHub? [y/N]: " auto_github
-
-            if [[ "$auto_github" =~ ^[Yy]$ ]]; then
-                prompt GITHUB_TOKEN "GitHub personal access token" "" true
-                prompt GITHUB_BOT_REPO "Bot repository name (will be created if doesn't exist)" "${INSTANCE_NAME}-bot"
-
-                GITHUB_WEBHOOK_SECRET=$(openssl rand -hex 32)
-                info "Generated webhook secret automatically"
-
-                AUTO_GITHUB=true
-            else
-                AUTO_GITHUB=false
-                GITHUB_TOKEN=""
-                GITHUB_BOT_REPO="${INSTANCE_NAME}-bot"
-                echo ""
-                echo "Manual webhook setup required."
-                echo ""
-                echo "The webhook secret is a shared secret between GitHub and ClawFactory."
-                echo "It verifies that webhook requests actually come from GitHub."
-                echo ""
-                echo "Generate one with:  openssl rand -hex 32"
-                echo ""
-                echo "After setup, add this secret to your bot repo's webhook settings:"
-                echo "  https://github.com/${GITHUB_REPO_OWNER}/${GITHUB_BOT_REPO}/settings/hooks/new"
-                echo ""
-                echo "Webhook settings:"
-                echo "  Payload URL: https://your-controller/webhook/github"
-                echo "  Content type: application/json"
-                echo "  Secret: (paste the secret you enter below)"
-                echo "  Events: Pull requests only"
-                echo ""
-                prompt GITHUB_WEBHOOK_SECRET "GitHub webhook secret" "" true
-            fi
-        fi
-
-        GITHUB_ALLOWED_ACTORS="${GITHUB_USERNAME}"
-
-        configure_ai_providers
-    else
-        GITHUB_USERNAME=""
-        GITHUB_WEBHOOK_SECRET=""
-        GITHUB_ALLOWED_ACTORS=""
-        GITHUB_BOT_REPO=""
-        configure_ai_providers
-    fi
+    configure_ai_providers
 
     fi  # End of USE_SAVED_SECRETS else block
 
@@ -1284,8 +1158,6 @@ EOF
 
     cat > "${INSTANCE_SECRETS_DIR}/controller.env" <<EOF
 # Controller environment for instance: ${INSTANCE_NAME}
-GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}
-ALLOWED_MERGE_ACTORS=${GITHUB_ALLOWED_ACTORS}
 
 # Controller's own API token (for authenticating requests TO controller)
 CONTROLLER_API_TOKEN=${CONTROLLER_TOKEN}
@@ -1300,13 +1172,6 @@ INSTANCE_NAME=${INSTANCE_NAME}
 GIT_USER_NAME=${git_user_name}
 GIT_USER_EMAIL=${git_user_email}
 EOF
-
-    # Add GITHUB_TOKEN if provided (for bot push capability)
-    if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-        echo "" >> "${INSTANCE_SECRETS_DIR}/controller.env"
-        echo "# GitHub token for pushing proposal branches" >> "${INSTANCE_SECRETS_DIR}/controller.env"
-        echo "GITHUB_TOKEN=${GITHUB_TOKEN}" >> "${INSTANCE_SECRETS_DIR}/controller.env"
-    fi
 
     # Generate snapshot encryption key if age is available
     if command -v age-keygen &>/dev/null; then
@@ -1323,109 +1188,9 @@ EOF
 
     chmod 600 "${INSTANCE_SECRETS_DIR}"/*.env
 
-    # Auto-configure GitHub if requested
-    if [[ "${AUTO_GITHUB:-false}" == "true" ]] && [[ -n "${GITHUB_TOKEN:-}" ]]; then
-        configure_github_auto
-    fi
-
-    # Update config with GITHUB_USERNAME for docker-compose
     save_config
 
     success "Secrets configured"
-}
-
-# ============================================================
-# Auto-configure GitHub (repo + webhook)
-# ============================================================
-configure_github_auto() {
-    info "Configuring GitHub automatically..."
-
-    local api_base="https://api.github.com"
-    local auth_header="Authorization: Bearer ${GITHUB_TOKEN}"
-    local repo_owner="${GITHUB_REPO_OWNER:-${GITHUB_ORG:-${GITHUB_USERNAME}}}"
-
-    # Check if repo exists
-    local repo_check
-    repo_check=$(curl -s -o /dev/null -w "%{http_code}" \
-        -H "$auth_header" \
-        "${api_base}/repos/${repo_owner}/${GITHUB_BOT_REPO}")
-
-    if [[ "$repo_check" == "404" ]]; then
-        info "Creating repository ${repo_owner}/${GITHUB_BOT_REPO}..."
-        local create_result
-
-        if [[ -n "$GITHUB_ORG" && "$GITHUB_ORG" == "$repo_owner" ]]; then
-            # Create in organization
-            create_result=$(curl -s -X POST \
-                -H "$auth_header" \
-                -H "Content-Type: application/json" \
-                "${api_base}/orgs/${GITHUB_ORG}/repos" \
-                -d "{\"name\":\"${GITHUB_BOT_REPO}\",\"private\":true,\"description\":\"ClawFactory bot repository\"}")
-        else
-            # Create in personal account
-            create_result=$(curl -s -X POST \
-                -H "$auth_header" \
-                -H "Content-Type: application/json" \
-                "${api_base}/user/repos" \
-                -d "{\"name\":\"${GITHUB_BOT_REPO}\",\"private\":true,\"description\":\"ClawFactory bot repository\"}")
-        fi
-
-        if echo "$create_result" | grep -q '"id"'; then
-            success "Created repository"
-        else
-            warn "Failed to create repository: $create_result"
-            return 1
-        fi
-    else
-        info "Repository already exists"
-    fi
-
-    # Create webhook
-    info "Creating webhook..."
-    echo ""
-    echo "Enter your Controller's public URL (where GitHub will send webhooks)."
-    echo "Example: https://clawfactory.yourdomain.com"
-    prompt CONTROLLER_URL "Controller URL"
-
-    local webhook_result
-    webhook_result=$(curl -s -X POST \
-        -H "$auth_header" \
-        -H "Content-Type: application/json" \
-        "${api_base}/repos/${repo_owner}/${GITHUB_BOT_REPO}/hooks" \
-        -d "{
-            \"name\": \"web\",
-            \"active\": true,
-            \"events\": [\"pull_request\"],
-            \"config\": {
-                \"url\": \"${CONTROLLER_URL}/webhook/github\",
-                \"content_type\": \"json\",
-                \"secret\": \"${GITHUB_WEBHOOK_SECRET}\",
-                \"insecure_ssl\": \"0\"
-            }
-        }")
-
-    if echo "$webhook_result" | grep -q '"id"'; then
-        success "Created webhook"
-    else
-        warn "Failed to create webhook (may already exist): $webhook_result"
-    fi
-
-    # Update local repo to push to GitHub
-    info "Configuring local repo to push to GitHub..."
-    cd "${BOT_REPOS_DIR}/${INSTANCE_NAME}/code"
-    git remote set-url origin "https://github.com/${repo_owner}/${GITHUB_BOT_REPO}.git" 2>/dev/null || \
-        git remote add origin "https://github.com/${repo_owner}/${GITHUB_BOT_REPO}.git"
-
-    cd "${SCRIPT_DIR}"
-
-    echo ""
-    success "GitHub configured!"
-    echo ""
-    echo "Your bot repo: https://github.com/${repo_owner}/${GITHUB_BOT_REPO}"
-    echo ""
-    echo "Note: You may need to push the initial bot content to GitHub:"
-    echo "  cd bot_repos/${INSTANCE_NAME}/code && git push -u origin main"
-    echo ""
 }
 
 # ============================================================

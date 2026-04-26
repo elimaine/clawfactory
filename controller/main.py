@@ -5927,6 +5927,370 @@ async def agent_temporal_status(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============================================================
+# Agent System Endpoints — setup-extras system
+# ============================================================
+# Three endpoints for the agent to install packages / shell-pipe installers /
+# set runtime env vars. Each call has IMMEDIATE effect inside the VM, AND
+# records an entry in state/setup-extras.json. The host-side
+# `clawfactory.sh setup-extras approve <id>` is the only path that promotes
+# an entry into permanent host artifacts (secrets/<inst>/*.env or
+# sandbox/lima/setup-extras.sh) — agent never touches host filesystem.
+
+EXTRAS_FILE = OPENCLAW_HOME / "setup-extras.json"
+RUNTIME_ENV_FILE = OPENCLAW_HOME / "runtime.env"
+RUNTIME_CONTROLLER_ENV_FILE = OPENCLAW_HOME / "runtime.controller.env"
+
+_PKG_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9.+-]*$")
+_ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+def _read_extras() -> dict:
+    if not EXTRAS_FILE.exists():
+        return {"version": 1, "extras": []}
+    try:
+        with open(EXTRAS_FILE) as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or not isinstance(data.get("extras"), list):
+            return {"version": 1, "extras": []}
+        return data
+    except Exception:
+        return {"version": 1, "extras": []}
+
+
+def _write_extras(data: dict):
+    EXTRAS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = EXTRAS_FILE.with_suffix(".json.tmp")
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+    tmp.replace(EXTRAS_FILE)
+    svc_user = f"openclaw-{INSTANCE_NAME}"
+    try:
+        shutil.chown(str(EXTRAS_FILE), user=svc_user, group=svc_user)
+        os.chmod(EXTRAS_FILE, 0o640)
+    except (LookupError, OSError):
+        pass
+
+
+def _make_extra_id() -> str:
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+    return f"e_{ts}_{secrets.token_hex(2)}"
+
+
+def _find_open_extra(data: dict, kind: str, **match) -> Optional[dict]:
+    """Return an existing pending/approved entry matching key fields, or None."""
+    for entry in data.get("extras", []):
+        if entry.get("kind") != kind:
+            continue
+        if entry.get("status") not in ("pending", "approved"):
+            continue
+        if all(entry.get(k) == v for k, v in match.items()):
+            return entry
+    return None
+
+
+def _set_extra_error(entry_id: str, error: Optional[str]):
+    data = _read_extras()
+    for entry in data["extras"]:
+        if entry["id"] == entry_id:
+            entry["last_error"] = error
+            break
+    _write_extras(data)
+
+
+def _age_encrypt(value: str) -> str:
+    """Encrypt a string with the instance's age public key. Returns ASCII-armored ciphertext."""
+    if not AGE_KEY.exists():
+        raise HTTPException(status_code=500, detail=f"age key not found at {AGE_KEY}")
+    try:
+        pub = subprocess.run(
+            ["age-keygen", "-y", str(AGE_KEY)],
+            capture_output=True, text=True, check=True, timeout=10,
+        ).stdout.strip()
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(status_code=500, detail=f"age-keygen failed: {e.stderr}")
+    if not pub:
+        raise HTTPException(status_code=500, detail="age public key derivation returned empty")
+    try:
+        result = subprocess.run(
+            ["age", "-a", "-r", pub],
+            input=value, capture_output=True, text=True, check=True, timeout=10,
+        )
+        return result.stdout
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(status_code=500, detail=f"age encryption failed: {e.stderr}")
+
+
+def _check_unscoped_agent(token, authorization, agent_id):
+    """Auth + scope gate for /agent/system/* endpoints. Mirrors gateway/restart posture:
+    agent must be unscoped (None scope) — sub-agents cannot install or set env."""
+    if not check_agent_auth(token, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    scope = resolve_agent_file_scope((agent_id or "").strip())
+    if scope is not None:
+        audit_log("agent_system_denied", {"agent": agent_id, "reason": "scoped_agent"})
+        raise HTTPException(status_code=403, detail="Only unscoped agents may use /agent/system/*")
+
+
+class AptInstallRequest(BaseModel):
+    package: str
+    reason: str
+    verify_bin: Optional[str] = None
+    apt_source: Optional[dict] = None
+
+
+class RunInstallerRequest(BaseModel):
+    command: str
+    verify: str
+    reason: str
+
+
+class EnvSetRequest(BaseModel):
+    key: str
+    value: str
+    scope: str
+    reason: str
+
+
+@app.post("/agent/system/apt-install")
+async def agent_apt_install(
+    body: AptInstallRequest,
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+    agent_id: Optional[str] = Query(None),
+):
+    """Install an apt package immediately + record a setup-extras entry."""
+    _check_unscoped_agent(token, authorization, agent_id)
+
+    pkg = body.package.strip()
+    if not _PKG_NAME_RE.match(pkg):
+        raise HTTPException(status_code=400, detail="Invalid package name")
+
+    data = _read_extras()
+    existing = _find_open_extra(data, "apt_package", package=pkg)
+    if existing:
+        entry_id = existing["id"]
+    else:
+        entry_id = _make_extra_id()
+        data["extras"].append({
+            "id": entry_id,
+            "kind": "apt_package",
+            "status": "pending",
+            "proposed_at": datetime.now(timezone.utc).isoformat(),
+            "proposed_by": f"agent:{agent_id or 'unscoped'}",
+            "reason": body.reason,
+            "package": pkg,
+            "verify_bin": body.verify_bin,
+            "apt_source": body.apt_source,
+            "last_error": None,
+        })
+        _write_extras(data)
+
+    stderr_tail = ""
+    if body.apt_source:
+        src = body.apt_source
+        name = (src.get("name") or "").strip()
+        key_url = (src.get("key_url") or "").strip()
+        repo_line = (src.get("repo_line") or "").strip()
+        if not (name and key_url and repo_line):
+            raise HTTPException(status_code=400, detail="apt_source requires name, key_url, repo_line")
+        if not _PKG_NAME_RE.match(name):
+            raise HTTPException(status_code=400, detail="Invalid apt_source.name")
+        try:
+            subprocess.run(["install", "-m", "0755", "-d", "/etc/apt/keyrings"], check=True)
+            keyring = f"/etc/apt/keyrings/{name}.gpg"
+            curl_proc = subprocess.run(
+                ["curl", "-fsSL", key_url], capture_output=True, check=True, timeout=30,
+            )
+            subprocess.run(
+                ["gpg", "--dearmor", "-o", keyring],
+                input=curl_proc.stdout, check=True, timeout=10,
+            )
+            with open(f"/etc/apt/sources.list.d/{name}.list", "w") as f:
+                f.write(repo_line + "\n")
+            subprocess.run(["apt-get", "update", "-qq"], check=True, capture_output=True, text=True, timeout=120)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            stderr_tail = (getattr(e, "stderr", "") or str(e))[-1000:]
+            _set_extra_error(entry_id, stderr_tail)
+            audit_log("agent_apt_install", {
+                "package": pkg, "agent": agent_id or "unscoped",
+                "id": entry_id, "status": "failed_repo",
+            })
+            return {"status": "failed", "id": entry_id, "stderr_tail": stderr_tail}
+
+    install_status = "installed"
+    try:
+        result = subprocess.run(
+            ["apt-get", "install", "-y", "-qq",
+             "-o", "DPkg::Lock::Timeout=60", pkg],
+            capture_output=True, text=True, timeout=300,
+            env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"},
+        )
+        if result.returncode != 0:
+            install_status = "failed"
+            stderr_tail = (result.stderr or "")[-1000:]
+    except subprocess.TimeoutExpired:
+        install_status = "failed"
+        stderr_tail = "apt-get install timed out after 300s"
+
+    _set_extra_error(entry_id, stderr_tail if install_status == "failed" else None)
+    audit_log("agent_apt_install", {
+        "package": pkg, "agent": agent_id or "unscoped",
+        "id": entry_id, "status": install_status,
+    })
+    return {"status": install_status, "id": entry_id, "stderr_tail": stderr_tail}
+
+
+@app.post("/agent/system/run-installer")
+async def agent_run_installer(
+    body: RunInstallerRequest,
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+    agent_id: Optional[str] = Query(None),
+):
+    """Run a shell-pipe installer (curl ... | sh) + record a setup-extras entry."""
+    _check_unscoped_agent(token, authorization, agent_id)
+
+    command = body.command.strip()
+    verify = body.verify.strip()
+    if not command or not verify:
+        raise HTTPException(status_code=400, detail="command and verify are required")
+
+    data = _read_extras()
+    existing = _find_open_extra(data, "shell_command", command=command)
+    if existing:
+        entry_id = existing["id"]
+    else:
+        entry_id = _make_extra_id()
+        data["extras"].append({
+            "id": entry_id,
+            "kind": "shell_command",
+            "status": "pending",
+            "proposed_at": datetime.now(timezone.utc).isoformat(),
+            "proposed_by": f"agent:{agent_id or 'unscoped'}",
+            "reason": body.reason,
+            "command": command,
+            "verify": verify,
+            "last_error": None,
+        })
+        _write_extras(data)
+
+    pre_check = subprocess.run(["/bin/bash", "-c", verify], capture_output=True, timeout=10)
+    if pre_check.returncode == 0:
+        audit_log("agent_run_installer", {
+            "agent": agent_id or "unscoped", "id": entry_id,
+            "status": "already_installed",
+        })
+        return {"status": "already_installed", "id": entry_id, "stderr_tail": ""}
+
+    install_status = "installed"
+    stderr_tail = ""
+    try:
+        result = subprocess.run(
+            ["/bin/bash", "-c", command],
+            capture_output=True, text=True, timeout=600,
+        )
+        if result.returncode != 0:
+            install_status = "failed"
+            stderr_tail = (result.stderr or result.stdout or "")[-1000:]
+    except subprocess.TimeoutExpired:
+        install_status = "failed"
+        stderr_tail = "installer command timed out after 600s"
+
+    if install_status == "installed":
+        post_check = subprocess.run(["/bin/bash", "-c", verify], capture_output=True, timeout=10)
+        if post_check.returncode != 0:
+            install_status = "failed"
+            stderr_tail = stderr_tail or "verify check failed after install"
+
+    _set_extra_error(entry_id, stderr_tail if install_status == "failed" else None)
+    audit_log("agent_run_installer", {
+        "agent": agent_id or "unscoped", "id": entry_id,
+        "status": install_status,
+    })
+    return {"status": install_status, "id": entry_id, "stderr_tail": stderr_tail}
+
+
+@app.post("/agent/system/env-set")
+async def agent_env_set(
+    body: EnvSetRequest,
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+    agent_id: Optional[str] = Query(None),
+):
+    """Set an env var in the runtime overlay file + record an encrypted setup-extras entry."""
+    _check_unscoped_agent(token, authorization, agent_id)
+
+    key = body.key.strip()
+    if not _ENV_KEY_RE.match(key):
+        raise HTTPException(status_code=400, detail="Invalid key (must match [A-Z][A-Z0-9_]*)")
+    if body.scope not in ("gateway", "controller"):
+        raise HTTPException(status_code=400, detail="scope must be 'gateway' or 'controller'")
+
+    overlay_path = RUNTIME_ENV_FILE if body.scope == "gateway" else RUNTIME_CONTROLLER_ENV_FILE
+    service_unit = (
+        f"openclaw-gateway@{INSTANCE_NAME}" if body.scope == "gateway"
+        else "clawfactory-controller"
+    )
+
+    value_age = _age_encrypt(body.value)
+
+    data = _read_extras()
+    existing = _find_open_extra(data, "env_secret", key=key, scope=body.scope)
+    if existing:
+        entry_id = existing["id"]
+        existing["value_age"] = value_age
+        existing["reason"] = body.reason
+        existing["proposed_at"] = datetime.now(timezone.utc).isoformat()
+    else:
+        entry_id = _make_extra_id()
+        data["extras"].append({
+            "id": entry_id,
+            "kind": "env_secret",
+            "status": "pending",
+            "proposed_at": datetime.now(timezone.utc).isoformat(),
+            "proposed_by": f"agent:{agent_id or 'unscoped'}",
+            "reason": body.reason,
+            "key": key,
+            "scope": body.scope,
+            "value_age": value_age,
+            "last_error": None,
+        })
+    _write_extras(data)
+
+    env = _read_env_file(overlay_path)
+    env[key] = body.value
+    _write_env_file(overlay_path, env)
+    svc_user = f"openclaw-{INSTANCE_NAME}"
+    try:
+        shutil.chown(str(overlay_path), user=svc_user, group=svc_user)
+        os.chmod(overlay_path, 0o640)
+    except (LookupError, OSError):
+        pass
+
+    # --no-block so the request can return before the controller restarts itself
+    # (relevant for scope=controller; harmless for gateway).
+    try:
+        subprocess.run(
+            ["systemctl", "restart", "--no-block", service_unit],
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+    except subprocess.CalledProcessError as e:
+        audit_log("agent_env_set_restart_failed", {
+            "key": key, "scope": body.scope, "error": e.stderr or str(e),
+        })
+        raise HTTPException(
+            status_code=500,
+            detail=f"failed to restart {service_unit}: {e.stderr or e}",
+        )
+
+    audit_log("agent_env_set", {
+        "key": key, "scope": body.scope, "agent": agent_id or "unscoped",
+        "id": entry_id,
+    })
+    return {"status": "set", "id": entry_id}
+
+
 @app.post("/temporal/start")
 async def controller_temporal_start(
     body: TemporalStartRequest,

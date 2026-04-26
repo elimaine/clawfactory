@@ -1,118 +1,180 @@
-# Setup Guide
+# Setup
 
-## Option A: Interactive Setup (Recommended)
+This setup doc describes the code as it exists now. It does not assume the older GitHub-promotion plan is working.
 
-The fastest way to get your first agent online. The installer walks you through everything.
+## Prerequisites
+
+Common requirements:
+
+- `git`
+- `docker`
+- `openssl`
+- `jq` for several helper commands
+
+Lima mode requirements on macOS:
+
+- Homebrew, used by `sandbox/lima/setup.sh` to install Lima if needed
+- `limactl`
+- enough memory for the VM sizing selected during setup
+
+Optional tools:
+
+- `age` and `age-keygen` on the host for host-side snapshot scripts
+- `gh` for installer-time GitHub repository setup prompts
+- `fswatch` for `./clawfactory.sh sync watch`
+- Tailscale.app for HTTPS `tailscale serve` shortcuts
+
+Current caveat: `install.sh` still requires Docker to be installed and running before it asks whether you want Lima mode.
+
+## Install A New Instance
 
 ```bash
 ./install.sh
 ```
 
-It'll ask for:
-- **Instance name** (e.g., `bot1`, `recon-agent`) — this becomes your agent's identity
-- **Channel tokens** — Discord, Telegram, Slack (connect one or all)
-- **AI Providers** — pick your agent's brain(s):
-  - `1` Anthropic (Claude) — Recommended primary
-  - `2` Kimi-K2 (Moonshot) — High-performance alternative
-  - `3` OpenAI (GPT-4)
-  - `4` Google (Gemini) — Also powers memory embeddings
-  - `5` Ollama (Local) — Run models on your own hardware
-  - `6` OpenRouter — Multi-provider gateway
-  - `7` Brave Search — Web search capabilities
-  - `8` ElevenLabs — Voice synthesis
-- **GitHub org** (optional) — keeps your fleet's repos organized under one roof
-- **GitHub setup** — auto-forks openclaw/openclaw as `{instance}-bot`
+The installer asks for:
 
-Example: Enter `1 4 7` to wire up Anthropic + Gemini + Brave Search.
+- instance name;
+- channel tokens, currently Discord, Telegram, and Slack;
+- provider keys, currently Anthropic, Moonshot/Kimi, OpenAI, Gemini, Ollama, OpenRouter, Brave Search, and ElevenLabs prompts;
+- vector memory provider;
+- sandbox mode;
+- optional GitHub settings.
 
-The installer generates three credentials for you:
-- **Gateway token** — authenticates to the OpenClaw gateway API
-- **Controller token** — grants access to the Mission Control dashboard
-- **Snapshot key** — an age keypair for encrypting state snapshots
+The installer writes:
 
-## Option B: Manual Setup
+- `.clawfactory.conf` and `.env`;
+- `secrets/tokens.env`;
+- `secrets/<instance>/gateway.env`;
+- `secrets/<instance>/controller.env`;
+- `secrets/<instance>/snapshot.key` and `snapshot.pub` when `age-keygen` is available;
+- initial OpenClaw workspace files when the bot repo does not already have them;
+- `bot_repos/<instance>/state/openclaw.json` when no state config exists.
 
-For those who prefer to wire things up by hand.
+Start the instance:
 
 ```bash
-# 1. Fork OpenClaw on GitHub
-# Go to https://github.com/openclaw/openclaw and click Fork
-# Name it: {instance}-bot (e.g., bot1-bot)
-# Optional: Fork to an organization (e.g., my-bots-org/bot1-bot)
-
-# 2. Create the instance directory structure
-mkdir -p bot_repos/bot1/{code,state}
-
-# 3. Clone your fork
-git clone https://github.com/YOUR_ORG_OR_USERNAME/bot1-bot.git bot_repos/bot1/code
-
-# 4. Set up the workspace
-mkdir -p bot_repos/bot1/code/workspace/bot1_save
-# Create SOUL.md, TOOLS.md, etc. in workspace/
-git -C bot_repos/bot1/code add workspace/
-git -C bot_repos/bot1/code commit -m "Add config files"
-git -C bot_repos/bot1/code push
-
-# 5. Configure secrets
-mkdir -p secrets/bot1
-cp secrets/gateway.env.example secrets/bot1/gateway.env
-cp secrets/controller.env.example secrets/bot1/controller.env
-# Edit with your API keys and tokens
-chmod 600 secrets/bot1/*.env
-
-# 6. Generate snapshot encryption key
-./clawfactory.sh snapshot keygen
-
-# 7. Launch
-./clawfactory.sh start
+./clawfactory.sh -i <instance> start
 ```
 
-## Secrets
-
-Every agent gets its own isolated secrets vault. No cross-contamination between instances.
-
-```
-secrets/
-├── bot1/
-│   ├── gateway.env      # Channel tokens, AI provider keys
-│   ├── controller.env   # GitHub webhook secret, auth tokens
-│   └── snapshot.key     # Age private key for encrypted snapshots
-├── bot2/
-│   └── ...
-└── tokens.env           # Master token registry for the fleet
-```
-
-| File | What's Inside |
-|------|---------------|
-| `gateway.env` | Channel tokens (Discord/Telegram/Slack), AI provider API keys, gateway auth token |
-| `controller.env` | GitHub webhook secret, Controller dashboard auth token |
-| `snapshot.key` | Age private key — the encryption key for your agent's state backups |
-| `tokens.env` | Token registry mapping instances to their credentials |
-| `.clawfactory.conf` | Instance configuration (`SANDBOX_MODE`, ports, etc.) |
-
-Tokens are auto-generated during install. To reveal them anytime:
-```bash
-./clawfactory.sh info
-./clawfactory.sh -i bot1 info   # For a specific agent
-```
-
-For detailed API key instructions, see [API Keys](API-KEYS.md).
-
-## Remote Access
-
-### Tailscale (Recommended)
-
-The simplest way to reach your agents from anywhere on your tailnet.
+Open the controller URL:
 
 ```bash
-# Expose gateway, controller, and Temporal on your tailnet
-tailscale serve --bg --set-path /<instance> http://127.0.0.1:18789
-tailscale serve --bg --set-path /<instance>/controller http://127.0.0.1:8080
-tailscale serve --bg --https=8444 --set-path / http://127.0.0.1:8082
+./clawfactory.sh -i <instance> controller
 ```
 
-Then access via `https://your-machine.tailnet.ts.net/<instance>/` from any device on your network. Temporal UI is available at `https://your-machine.tailnet.ts.net:8444/`.
+## Existing Instances
 
-### Cloudflare Zero Trust
+List known instances:
 
-For public-facing access with proper authentication, check `todo/cloudflare/` for Cloudflare tunnel setup guides.
+```bash
+./clawfactory.sh bots
+```
+
+Show ports, mode, and tokens for one instance:
+
+```bash
+./clawfactory.sh -i <instance> info
+```
+
+If no instance is specified, the launcher uses `INSTANCE_NAME` from `.clawfactory.conf`. Most commands reject the implicit `default` instance unless `bot_repos/default` exists.
+
+## Lima Setup
+
+Provision the VM:
+
+```bash
+./clawfactory.sh lima setup
+```
+
+or:
+
+```bash
+./sandbox/lima/setup.sh setup
+```
+
+The setup script creates a Lima VM named `clawfactory`, installs Node, pnpm, Python dependencies, nginx, Docker, Temporal CLI, and systemd units. It also records VM sizing in `secrets/lima.sizing`.
+
+Start an instance in Lima mode:
+
+```bash
+./clawfactory.sh -i <instance> start
+```
+
+What happens on start:
+
+- the VM is started if needed;
+- snapshots and code are pulled from VM to host;
+- controller, proxy config, secrets, and code are synced host to VM;
+- OpenClaw dependencies and builds run in the VM;
+- state is restored from the latest snapshot only on cold start when no state exists;
+- systemd services are started;
+- Tailscale HTTPS serve is configured when Tailscale.app is available.
+
+## Docker Compose Setup
+
+Docker mode uses `docker-compose.yml`:
+
+```bash
+SANDBOX_MODE=none ./clawfactory.sh -i <instance> start
+```
+
+The compose stack binds gateway and controller to localhost:
+
+- gateway: `127.0.0.1:${GATEWAY_PORT:-18789}`
+- controller: `127.0.0.1:${CONTROLLER_PORT:-8080}`
+
+The gateway image is built from `bot_repos/<instance>/code`. The controller image is built from `controller/`.
+
+Sysbox sandbox mode uses `docker-compose.sandbox.yml` as an override and builds the gateway wrapper in `gateway/`.
+
+## Updating OpenClaw
+
+```bash
+./clawfactory.sh -i <instance> update
+```
+
+Default behavior:
+
+- fetch `upstream/main`;
+- reset the bot code checkout to upstream;
+- restore selected local-only paths such as `workspace`, `agents`, `config`, and `SOUL.md`;
+- rebuild and redeploy.
+
+Use merge mode only when you intentionally carry local source patches:
+
+```bash
+./clawfactory.sh -i <instance> update --merge
+```
+
+## State Recovery
+
+Create a named snapshot before risky work:
+
+```bash
+./clawfactory.sh -i <instance> snapshot create before-update
+```
+
+Restore:
+
+```bash
+./clawfactory.sh -i <instance> snapshot restore latest
+```
+
+In Lima mode, snapshots are pulled back to the host before sync and stop operations. Host copies are in `snapshots/<instance>`.
+
+## Uninstall Or Delete
+
+Delete one instance:
+
+```bash
+./clawfactory.sh -i <instance> delete
+```
+
+This removes host `bot_repos`, `secrets`, and `snapshots` for that instance. In Lima mode it also removes the VM-side instance directories and service user.
+
+Remove the Lima VM:
+
+```bash
+./clawfactory.sh lima teardown
+```

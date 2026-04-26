@@ -463,8 +463,11 @@ ExecStart=/usr/bin/node dist/index.js gateway --port ${gw_port} --bind lan
 EOF
 
         # Gateway override — load gateway secrets
+        # runtime.env is the agent-managed overlay (setup-extras system); leading '-' makes it
+        # optional, and later EnvironmentFile= directives override earlier ones.
         cat >> /etc/systemd/system/openclaw-gateway@${instance}.service.d/override.conf <<EOF
 EnvironmentFile=${LIMA_SRV}/secrets/${instance}/gateway.env
+EnvironmentFile=-${LIMA_SRV}/bot_repos/${instance}/state/runtime.env
 EOF
         # NOTE: LLM proxy intercept (ANTHROPIC_BASE_URL etc.) removed — it added
         # latency and only covered 3 providers. The proxy still runs on :9090 and
@@ -476,6 +479,7 @@ EOF
 [Service]
 EnvironmentFile=${LIMA_SRV}/secrets/${instance}/controller.env
 EnvironmentFile=${LIMA_SRV}/secrets/${instance}/gateway.env
+EnvironmentFile=-${LIMA_SRV}/bot_repos/${instance}/state/runtime.controller.env
 Environment=CODE_DIR=${LIMA_SRV}/bot_repos/${instance}/code
 Environment=OPENCLAW_HOME=${LIMA_SRV}/bot_repos/${instance}/state
 Environment=AUDIT_LOG=${LIMA_SRV}/audit/audit.jsonl
@@ -714,6 +718,233 @@ lima_config_edit() {
     _lima_root "chown ${svc_user}:${svc_user} ${vm_config}"
 
     echo "[config] Updated config on VM"
+}
+
+# ============================================================
+# lima_extras — Manage agent-submitted setup-extras entries
+# ============================================================
+# Reads /srv/clawfactory/bot_repos/<inst>/state/setup-extras.json from the
+# VM. On `approve`, promotes the entry to host-side artifacts (secrets/<inst>/*.env
+# or sandbox/lima/setup-extras.sh). The agent never touches host filesystem.
+#
+# Usage:
+#   lima_extras list [--all]
+#   lima_extras show <id>
+#   lima_extras approve <id>
+#   lima_extras reject <id>
+
+lima_extras() {
+    local cmd="${1:-list}"
+    local instance="${INSTANCE_NAME:-default}"
+    local vm_extras="${LIMA_SRV}/bot_repos/${instance}/state/setup-extras.json"
+
+    case "$cmd" in
+        list)
+            local jq_filter='.extras[] | select(.status=="pending")'
+            if [[ "${2:-}" == "--all" ]]; then
+                jq_filter='.extras[]'
+            fi
+            _lima_root "
+                if [ ! -f ${vm_extras} ]; then
+                    echo 'No setup-extras yet.'
+                    exit 0
+                fi
+                jq -r '${jq_filter} | [
+                    .id,
+                    .kind,
+                    .status,
+                    (.package // .key // (.command|tostring[0:60]) // \"?\"),
+                    .proposed_at,
+                    (.reason // \"\")
+                ] | @tsv' ${vm_extras} | column -t -s\$'\t'
+            "
+            ;;
+        show)
+            local id="${2:-}"
+            [[ -z "$id" ]] && { echo "Usage: setup-extras show <id>" >&2; return 1; }
+            _lima_root "jq '.extras[] | select(.id==\"${id}\")' ${vm_extras}"
+            ;;
+        approve)
+            local id="${2:-}"
+            [[ -z "$id" ]] && { echo "Usage: setup-extras approve <id>" >&2; return 1; }
+            _lima_extras_approve "$instance" "$id"
+            ;;
+        reject)
+            local id="${2:-}"
+            [[ -z "$id" ]] && { echo "Usage: setup-extras reject <id>" >&2; return 1; }
+            _lima_extras_set_status "$instance" "$id" "rejected"
+            echo "[extras] Rejected ${id}."
+            ;;
+        *)
+            echo "Usage: clawfactory.sh -i <inst> setup-extras {list [--all]|show <id>|approve <id>|reject <id>}" >&2
+            return 1
+            ;;
+    esac
+}
+
+_lima_extras_set_status() {
+    local instance="$1" id="$2" status="$3"
+    local vm_extras="${LIMA_SRV}/bot_repos/${instance}/state/setup-extras.json"
+    local svc_user="openclaw-${instance}"
+    _lima_root "
+        if [ ! -f ${vm_extras} ]; then
+            echo 'No setup-extras file' >&2
+            exit 1
+        fi
+        tmp=\$(mktemp)
+        jq --arg id '${id}' --arg status '${status}' --arg ts \"\$(date -u +%Y-%m-%dT%H:%M:%SZ)\" '
+            .extras = [
+                .extras[] |
+                if .id == \$id then . + {status: \$status, approved_at: \$ts, approved_by: \"user\"}
+                else . end
+            ]
+        ' ${vm_extras} > \$tmp && mv \$tmp ${vm_extras}
+        chown ${svc_user}:${svc_user} ${vm_extras}
+        chmod 640 ${vm_extras}
+    "
+}
+
+_lima_extras_approve() {
+    local instance="$1" id="$2"
+    local vm_extras="${LIMA_SRV}/bot_repos/${instance}/state/setup-extras.json"
+
+    local entry
+    entry=$(_lima_root "jq -c '.extras[] | select(.id==\"${id}\")' ${vm_extras}")
+    if [[ -z "$entry" || "$entry" == "null" ]]; then
+        echo "No setup-extras entry with id ${id}" >&2
+        return 1
+    fi
+
+    local kind status
+    kind=$(echo "$entry" | jq -r '.kind')
+    status=$(echo "$entry" | jq -r '.status')
+
+    if [[ "$status" != "pending" ]]; then
+        echo "Entry ${id} has status '${status}' — refusing to re-approve" >&2
+        return 1
+    fi
+
+    case "$kind" in
+        apt_package)
+            _lima_extras_apply_apt "$entry" || return 1
+            ;;
+        shell_command)
+            _lima_extras_apply_shell "$entry" || return 1
+            ;;
+        env_secret)
+            _lima_extras_apply_secret "$instance" "$id" "$entry" || return 1
+            ;;
+        *)
+            echo "Unknown kind: ${kind}" >&2
+            return 1
+            ;;
+    esac
+
+    _lima_extras_set_status "$instance" "$id" "approved"
+    echo "[extras] Approved ${id}. Will take effect on next 'clawfactory.sh -i ${instance} rebuild' or fresh VM."
+}
+
+_lima_extras_apply_apt() {
+    local entry="$1"
+    local extras_file="${SCRIPT_DIR}/sandbox/lima/setup-extras.sh"
+    [[ -f "$extras_file" ]] || { echo "${extras_file} not found" >&2; return 1; }
+
+    local pkg verify_bin apt_source rid reason
+    pkg=$(echo "$entry" | jq -r '.package')
+    verify_bin=$(echo "$entry" | jq -r '.verify_bin // empty')
+    apt_source=$(echo "$entry" | jq -c '.apt_source // empty')
+    rid=$(echo "$entry" | jq -r '.id')
+    reason=$(echo "$entry" | jq -r '.reason // ""')
+
+    {
+        echo ""
+        echo "# extras: ${rid} (${reason})"
+        if [[ -n "$apt_source" && "$apt_source" != "null" && "$apt_source" != "empty" ]]; then
+            local name key_url repo_line
+            name=$(echo "$apt_source" | jq -r '.name')
+            key_url=$(echo "$apt_source" | jq -r '.key_url')
+            repo_line=$(echo "$apt_source" | jq -r '.repo_line')
+            printf 'ensure_apt_repo %q %q %q\n' "$name" "$key_url" "$repo_line"
+        fi
+        if [[ -n "$verify_bin" ]]; then
+            printf 'ensure_apt %q %q\n' "$pkg" "$verify_bin"
+        else
+            printf 'ensure_apt %q\n' "$pkg"
+        fi
+    } >> "$extras_file"
+
+    echo "[extras] Appended apt entry to ${extras_file}: ${pkg}"
+}
+
+_lima_extras_apply_shell() {
+    local entry="$1"
+    local extras_file="${SCRIPT_DIR}/sandbox/lima/setup-extras.sh"
+    [[ -f "$extras_file" ]] || { echo "${extras_file} not found" >&2; return 1; }
+
+    local command verify rid reason
+    command=$(echo "$entry" | jq -r '.command')
+    verify=$(echo "$entry" | jq -r '.verify')
+    rid=$(echo "$entry" | jq -r '.id')
+    reason=$(echo "$entry" | jq -r '.reason // ""')
+
+    {
+        echo ""
+        echo "# extras: ${rid} (${reason})"
+        printf 'ensure_shell %q bash -c %q\n' "$verify" "$command"
+    } >> "$extras_file"
+
+    echo "[extras] Appended shell installer to ${extras_file}"
+}
+
+_lima_extras_apply_secret() {
+    local instance="$1" id="$2" entry="$3"
+    local key scope env_file
+    key=$(echo "$entry" | jq -r '.key')
+    scope=$(echo "$entry" | jq -r '.scope')
+
+    if [[ "$scope" == "gateway" ]]; then
+        env_file="${SCRIPT_DIR}/secrets/${instance}/gateway.env"
+    else
+        env_file="${SCRIPT_DIR}/secrets/${instance}/controller.env"
+    fi
+    [[ -f "$env_file" ]] || { echo "${env_file} not found" >&2; return 1; }
+
+    # Decrypt inside the VM where age + key live; pull plaintext over SSH.
+    local value
+    value=$(_lima_root "
+        jq -r '.extras[] | select(.id==\"${id}\") | .value_age' \
+            ${LIMA_SRV}/bot_repos/${instance}/state/setup-extras.json | \
+        age -d -i ${LIMA_SRV}/secrets/${instance}/snapshot.key
+    ") || { echo "age decryption failed in VM" >&2; return 1; }
+    [[ -z "$value" ]] && { echo "decrypted value was empty" >&2; return 1; }
+
+    # Insert or replace KEY=value in the host env file
+    local tmp
+    tmp=$(mktemp)
+    awk -v key="$key" -v val="$value" '
+        BEGIN { sub_done=0 }
+        $0 ~ "^"key"=" { print key"="val; sub_done=1; next }
+        { print }
+        END { if (!sub_done) print key"="val }
+    ' "$env_file" > "$tmp"
+    mv "$tmp" "$env_file"
+    chmod 640 "$env_file"
+
+    # Remove the corresponding line from runtime overlay in VM (host is now source of truth)
+    local rt_relpath="state/runtime.env"
+    [[ "$scope" == "controller" ]] && rt_relpath="state/runtime.controller.env"
+    _lima_root "
+        rt=${LIMA_SRV}/bot_repos/${instance}/${rt_relpath}
+        if [ -f \$rt ]; then
+            tmp=\$(mktemp)
+            grep -v '^${key}=' \$rt > \$tmp || true
+            mv \$tmp \$rt
+            chown openclaw-${instance}:openclaw-${instance} \$rt
+            chmod 640 \$rt
+        fi
+    "
+
+    echo "[extras] Approved env_secret '${key}' (scope=${scope}) — written to ${env_file}"
 }
 
 # ============================================================
