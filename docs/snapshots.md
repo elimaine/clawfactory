@@ -48,6 +48,17 @@ The intent is to preserve recoverable state, not dependency caches.
 ./clawfactory.sh -i <instance> snapshot list
 ```
 
+Controller API:
+
+```text
+GET  /snapshot
+POST /snapshot
+GET  /agent/snapshot
+POST /agent/snapshot
+```
+
+The `/agent/snapshot` endpoints require `AGENT_API_TOKEN` and are limited to list/create. They let agents checkpoint state without receiving controller auth.
+
 Controller filenames use this shape:
 
 ```text

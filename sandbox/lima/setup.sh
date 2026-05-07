@@ -306,7 +306,7 @@ configure_services() {
 
     lima_root "
         # ---- Directory structure ----
-        mkdir -p /srv/clawfactory/{controller,proxy,bot_repos,secrets,audit,snapshots,temporal}
+        mkdir -p /srv/clawfactory/{controller,proxy,bot_repos,secrets,audit,snapshots,temporal,previews/nginx}
 
         # ---- Systemd unit: OpenClaw Gateway (template) ----
         # Port and state dir are set per-instance via overrides in lima_services()
@@ -455,6 +455,18 @@ server {
 server {
     listen 8081;
     server_name _;
+
+    location = /_preview_auth {
+        internal;
+        proxy_pass http://127.0.0.1:8080/controller/previews/auth;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header Cookie \$http_cookie;
+        proxy_set_header Authorization \$http_authorization;
+        proxy_set_header X-Preview-Token \$arg_token;
+    }
+
+    include /srv/clawfactory/previews/nginx/*.conf;
 
     location / {
         proxy_pass http://127.0.0.1:8080;

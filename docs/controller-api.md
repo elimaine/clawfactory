@@ -24,7 +24,7 @@ When `CONTROLLER_API_TOKEN` is set, controller endpoints accept any of:
 
 When `CONTROLLER_API_TOKEN` is empty, most controller endpoints are open for backward compatibility.
 
-Agent endpoints require `AGENT_API_TOKEN`. Internal gateway helper auth accepts `GATEWAY_INTERNAL_TOKEN` or `CONTROLLER_API_TOKEN`, but the current `/internal/snapshot` endpoints do not call that checker.
+Agent endpoints require `AGENT_API_TOKEN`. Internal gateway helper auth accepts `GATEWAY_INTERNAL_TOKEN` or `CONTROLLER_API_TOKEN`.
 
 Current exception: `/health`, `/status`, and `/audit` do not enforce controller auth in the implementation.
 
@@ -110,6 +110,40 @@ POST /snapshot/browse/save
 
 Browse paths are constrained to the temporary workspace and reject traversal.
 
+Agent-scoped snapshot helpers:
+
+```text
+GET  /agent/snapshot
+POST /agent/snapshot
+```
+
+These require `AGENT_API_TOKEN`, not controller auth. They are intended for agents that need to list or create snapshots without receiving `CONTROLLER_API_TOKEN`. The create body is the same as `/snapshot`.
+
+## Preview Ports
+
+```text
+GET    /previews
+POST   /previews
+DELETE /previews/{id-or-alias}
+POST   /agent/previews?agent_id=<agent-id>
+```
+
+Controller preview endpoints require controller auth. The agent endpoint requires `AGENT_API_TOKEN` and an explicit `agent_id`.
+
+Create body:
+
+```json
+{"port": 6969, "alias": "my-app", "name": "My app"}
+```
+
+Preview aliases are optional. When provided, they must match `[a-z0-9][a-z0-9-]{2,40}` and must not be reserved controller paths. Registered previews are served at:
+
+```text
+/previews/<alias-or-generated-id>/
+```
+
+Preview routes are intentionally not protected by controller auth. The app listening behind the preview port must provide its own authentication if the content is sensitive. The controller validates that the port is a loopback listener owned by the instance user and blocks internal service ports.
+
 ## Gateway Operations
 
 ```text
@@ -157,15 +191,17 @@ Agent system endpoints:
 POST /agent/system/apt-install
 POST /agent/system/run-installer
 POST /agent/system/env-set
+POST /agent/system/batch
 ```
 
-These require `AGENT_API_TOKEN` and reject scoped sub-agents. They take immediate effect inside the VM:
+These require `AGENT_API_TOKEN` and reject scoped sub-agents. They run inside the VM and record approval entries in `state/setup-extras.json`:
 
-- `apt-install` validates an apt package name, optionally registers an apt source, runs `apt-get install`, and records a proposal in `state/proposals.json`.
-- `run-installer` runs a shell command after a verify check fails, then verifies again and records a proposal.
-- `env-set` writes to `runtime.env` or `runtime.controller.env`, stores the proposed secret value encrypted with age in `proposals.json`, and restarts the gateway or controller systemd unit.
+- `apt-install` validates an apt package name, optionally registers an apt source, runs `apt-get install`, and records a setup-extras entry.
+- `run-installer` runs a shell command after a verify check fails, then verifies again and records a setup-extras entry.
+- `env-set` writes to `runtime.env` or `runtime.controller.env`, stores the proposed secret value encrypted with age, and only restarts the affected service when `apply: true`.
+- `batch` runs multiple setup-extras operations and can restart dirty services once at the end with `apply: true`.
 
-The VM systemd overrides load those runtime env overlay files when present. The tracked launcher does not currently include the documented `proposals approve` command referenced by comments in these hooks.
+The VM systemd overrides load those runtime env overlay files when present. The host operator promotes approved setup-extras entries with `./clawfactory.sh -i <instance> setup-extras approve <id>` or `approve --all`.
 
 ## Temporal
 

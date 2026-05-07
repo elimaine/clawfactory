@@ -766,20 +766,77 @@ lima_extras() {
             ;;
         approve)
             local id="${2:-}"
-            [[ -z "$id" ]] && { echo "Usage: setup-extras approve <id>" >&2; return 1; }
-            _lima_extras_approve "$instance" "$id"
+            if [[ "$id" == "--all" ]]; then
+                _lima_extras_bulk "$instance" "approve"
+            elif [[ -z "$id" ]]; then
+                echo "Usage: setup-extras approve <id>|--all" >&2
+                return 1
+            else
+                _lima_extras_approve "$instance" "$id"
+            fi
             ;;
         reject)
             local id="${2:-}"
-            [[ -z "$id" ]] && { echo "Usage: setup-extras reject <id>" >&2; return 1; }
-            _lima_extras_set_status "$instance" "$id" "rejected"
-            echo "[extras] Rejected ${id}."
+            if [[ "$id" == "--all" ]]; then
+                _lima_extras_bulk "$instance" "reject"
+            elif [[ -z "$id" ]]; then
+                echo "Usage: setup-extras reject <id>|--all" >&2
+                return 1
+            else
+                _lima_extras_set_status "$instance" "$id" "rejected"
+                echo "[extras] Rejected ${id}."
+            fi
             ;;
         *)
-            echo "Usage: clawfactory.sh -i <inst> setup-extras {list [--all]|show <id>|approve <id>|reject <id>}" >&2
+            echo "Usage: clawfactory.sh -i <inst> setup-extras {list [--all]|show <id>|approve <id>|--all|reject <id>|--all}" >&2
             return 1
             ;;
     esac
+}
+
+_lima_extras_bulk() {
+    local instance="$1" action="$2"
+    local vm_extras="${LIMA_SRV}/bot_repos/${instance}/state/setup-extras.json"
+
+    local ids
+    ids=$(_lima_root "
+        if [ -f ${vm_extras} ]; then
+            jq -r '.extras[] | select(.status==\"pending\") | .id' ${vm_extras}
+        fi
+    " 2>/dev/null | grep '^e_')
+
+    if [[ -z "$ids" ]]; then
+        echo "[extras] No pending entries."
+        return 0
+    fi
+
+    local count
+    count=$(echo "$ids" | wc -l | tr -d ' ')
+    echo "[extras] ${action}ing ${count} pending entries..."
+
+    local ok=0 failed=0
+    while IFS= read -r entry_id; do
+        [[ -z "$entry_id" ]] && continue
+        if [[ "$action" == "approve" ]]; then
+            if _lima_extras_approve "$instance" "$entry_id" </dev/null; then
+                ok=$((ok + 1))
+            else
+                failed=$((failed + 1))
+                echo "[extras] FAILED to approve ${entry_id}" >&2
+            fi
+        else
+            if _lima_extras_set_status "$instance" "$entry_id" "rejected" </dev/null; then
+                ok=$((ok + 1))
+                echo "[extras] Rejected ${entry_id}."
+            else
+                failed=$((failed + 1))
+                echo "[extras] FAILED to reject ${entry_id}" >&2
+            fi
+        fi
+    done <<< "$ids"
+
+    echo "[extras] Done. ${action}ed: ${ok}, Failed: ${failed}"
+    [[ $failed -eq 0 ]]
 }
 
 _lima_extras_set_status() {
@@ -930,6 +987,22 @@ _lima_extras_apply_secret() {
     mv "$tmp" "$env_file"
     chmod 640 "$env_file"
 
+    # Push host env_file to VM so the running gateway/controller sees it on next
+    # restart. Without this, host is updated but the VM systemd unit keeps
+    # reading its stale copy until the next lima_sync. Permissions match what
+    # lima_sync sets (gateway.env: 640 root:svc, controller.env: 600 root:root).
+    local vm_env_path="${LIMA_SRV}/secrets/${instance}/$(basename "$env_file")"
+    if ! rsync -a --rsync-path="sudo rsync" -e "ssh -F ${LIMA_SSH_CONFIG}" \
+        "$env_file" "${LIMA_SSH_HOST}:${vm_env_path}" 2>&1; then
+        echo "[extras] WARNING: failed to push ${env_file} to VM (host updated, VM stale)" >&2
+    else
+        if [[ "$scope" == "gateway" ]]; then
+            _lima_root "chown root:openclaw-${instance} ${vm_env_path}; chmod 640 ${vm_env_path}"
+        else
+            _lima_root "chown root:root ${vm_env_path}; chmod 600 ${vm_env_path}"
+        fi
+    fi
+
     # Remove the corresponding line from runtime overlay in VM (host is now source of truth)
     local rt_relpath="state/runtime.env"
     [[ "$scope" == "controller" ]] && rt_relpath="state/runtime.controller.env"
@@ -944,7 +1017,7 @@ _lima_extras_apply_secret() {
         fi
     "
 
-    echo "[extras] Approved env_secret '${key}' (scope=${scope}) — written to ${env_file}"
+    echo "[extras] Approved env_secret '${key}' (scope=${scope}) — written to ${env_file} and pushed to VM"
 }
 
 # ============================================================

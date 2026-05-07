@@ -24,7 +24,7 @@ from typing import Optional
 
 import docker
 from fastapi import Cookie, Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
 
 import traffic_log
@@ -52,6 +52,9 @@ AGE_KEY = Path(os.environ.get("AGE_KEY", "/srv/secrets/snapshot.key"))
 SECRETS_DIR = Path(os.environ.get("SECRETS_DIR", f"/srv/clawfactory/secrets/{INSTANCE_NAME}"))
 TEMPORAL_HOST = os.environ.get("TEMPORAL_HOST", "127.0.0.1:7233")
 WORKFLOWS_DIR = Path(os.environ.get("WORKFLOWS_DIR", "/srv/clawfactory/workflows"))
+PREVIEWS_DIR = Path(os.environ.get("PREVIEWS_DIR", "/srv/clawfactory/previews"))
+PREVIEWS_REGISTRY = PREVIEWS_DIR / "previews.json"
+PREVIEWS_NGINX_DIR = PREVIEWS_DIR / "nginx"
 
 # Lima mode: GATEWAY_CONTAINER=local means systemd, not Docker
 IS_LIMA_MODE = GATEWAY_CONTAINER == "local"
@@ -91,6 +94,7 @@ temporal_client = None
 @app.on_event("startup")
 async def _connect_temporal():
     """Connect to Temporal server on startup. Non-fatal if unavailable."""
+    _reconcile_previews()
     global temporal_client
     if not HAS_TEMPORALIO:
         print("[temporal] temporalio package not installed — Temporal endpoints disabled")
@@ -312,6 +316,264 @@ def audit_log(event: str, details: dict):
     print(f"[audit] {event}: {details}")
 
 
+# ============================================================
+# Preview Proxy Registry
+# ============================================================
+
+_BLOCKED_PREVIEW_PORTS = {
+    22, 80, 443, 8888, 9090, 18789, 2375, 2376, 7233, 8233,
+    int(GATEWAY_PORT) if str(GATEWAY_PORT).isdigit() else 18789,
+}
+_PREVIEW_ALIAS_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,40}$")
+_RESERVED_PREVIEW_ALIASES = {
+    "admin", "api", "auth", "controller", "health", "internal", "login",
+    "logout", "metrics", "previews", "proxy", "root", "status", "system",
+}
+
+
+class PreviewCreateRequest(BaseModel):
+    port: int
+    name: Optional[str] = None
+    alias: Optional[str] = None
+
+
+def _read_previews() -> dict:
+    if not PREVIEWS_REGISTRY.exists():
+        return {"version": 1, "previews": []}
+    try:
+        with open(PREVIEWS_REGISTRY) as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get("previews"), list):
+            return data
+    except Exception:
+        pass
+    return {"version": 1, "previews": []}
+
+
+def _write_previews(data: dict):
+    PREVIEWS_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = PREVIEWS_REGISTRY.with_suffix(".json.tmp")
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+    tmp.replace(PREVIEWS_REGISTRY)
+    os.chmod(PREVIEWS_REGISTRY, 0o600)
+
+
+def _validate_preview_name(name: Optional[str]) -> Optional[str]:
+    if name is None:
+        return None
+    clean = name.strip()
+    if not clean:
+        return None
+    if len(clean) > 80:
+        raise HTTPException(status_code=400, detail="preview name must be 80 chars or less")
+    return clean
+
+
+def _validate_preview_alias(alias: Optional[str]) -> Optional[str]:
+    if alias is None:
+        return None
+    clean = alias.strip().lower()
+    if not clean:
+        return None
+    if not _PREVIEW_ALIAS_RE.fullmatch(clean):
+        raise HTTPException(
+            status_code=400,
+            detail="alias must match [a-z0-9][a-z0-9-]{2,40}",
+        )
+    if clean in _RESERVED_PREVIEW_ALIASES:
+        raise HTTPException(status_code=400, detail="alias is reserved")
+    return clean
+
+
+def _preview_route_id(entry: dict) -> str:
+    return str(entry.get("alias") or entry.get("id"))
+
+
+def _preview_process_owner(port: int) -> tuple[str, str]:
+    if port < 1024 or port > 65535 or port in _BLOCKED_PREVIEW_PORTS:
+        raise HTTPException(status_code=400, detail="port is outside the allowed preview range")
+
+    try:
+        result = subprocess.run(
+            ["ss", "-H", "-ltnp", f"sport = :{port}"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"failed to inspect port: {e}")
+
+    expected_user = f"openclaw-{INSTANCE_NAME}"
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 4:
+            continue
+        local_addr = fields[3]
+        if not (
+            local_addr.startswith("127.0.0.1:")
+            or local_addr.startswith("[::1]:")
+            or local_addr.startswith("::1:")
+        ):
+            continue
+        pid_match = re.search(r"pid=(\d+)", line)
+        if not pid_match:
+            continue
+        pid = pid_match.group(1)
+        try:
+            stat = os.stat(f"/proc/{pid}")
+            import pwd
+            owner = pwd.getpwuid(stat.st_uid).pw_name
+        except Exception:
+            continue
+        if owner != expected_user:
+            raise HTTPException(
+                status_code=403,
+                detail=f"preview port must be owned by {expected_user}, found {owner}",
+            )
+        return owner, pid
+
+    raise HTTPException(
+        status_code=400,
+        detail="port must be listening on 127.0.0.1 or ::1 and owned by the instance user",
+    )
+
+
+def _preview_nginx_conf(route_id: str, port: int) -> str:
+    return f"""
+location = /previews/{route_id} {{
+    return 302 /previews/{route_id}/;
+}}
+
+location ^~ /previews/{route_id}/ {{
+    proxy_pass http://127.0.0.1:{port}/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_buffering off;
+    proxy_cache off;
+}}
+""".lstrip()
+
+
+def _reload_nginx():
+    result = subprocess.run(["nginx", "-t"], capture_output=True, text=True, timeout=10)
+    if result.returncode != 0:
+        raise HTTPException(status_code=500, detail=result.stderr.strip() or "nginx config test failed")
+    result = subprocess.run(["systemctl", "reload", "nginx"], capture_output=True, text=True, timeout=10)
+    if result.returncode != 0:
+        raise HTTPException(status_code=500, detail=result.stderr.strip() or "nginx reload failed")
+
+
+def _upsert_preview(port: int, name: Optional[str], alias: Optional[str], agent_id: Optional[str]) -> dict:
+    owner, pid = _preview_process_owner(port)
+    data = _read_previews()
+    preview_id = secrets.token_urlsafe(18).replace("-", "").replace("_", "")[:24]
+    clean_alias = _validate_preview_alias(alias)
+    agent_owner = agent_id or "operator"
+
+    if clean_alias:
+        for existing in data.get("previews", []):
+            if existing.get("alias") == clean_alias and existing.get("agent") != agent_owner:
+                raise HTTPException(status_code=409, detail="alias is already owned by another agent")
+        preview_id = next(
+            (
+                str(existing.get("id"))
+                for existing in data.get("previews", [])
+                if existing.get("alias") == clean_alias and existing.get("agent") == agent_owner
+            ),
+            preview_id,
+        )
+
+    entry = {
+        "id": preview_id,
+        "alias": clean_alias,
+        "instance": INSTANCE_NAME,
+        "port": port,
+        "name": _validate_preview_name(name),
+        "owner": owner,
+        "pid": pid,
+        "agent": agent_owner,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "path": f"/previews/{clean_alias or preview_id}/",
+    }
+    removed_routes = []
+    kept = []
+    for existing in data.get("previews", []):
+        same_port = existing.get("port") == port
+        same_alias = clean_alias and existing.get("alias") == clean_alias and existing.get("agent") == agent_owner
+        if same_port or same_alias:
+            removed_routes.append(_preview_route_id(existing))
+        else:
+            kept.append(existing)
+    data["previews"] = kept
+    data["previews"].append(entry)
+
+    PREVIEWS_NGINX_DIR.mkdir(parents=True, exist_ok=True)
+    for route_id in removed_routes:
+        old_conf = PREVIEWS_NGINX_DIR / f"{route_id}.conf"
+        if old_conf.exists():
+            old_conf.unlink()
+    route_id = clean_alias or preview_id
+    conf_path = PREVIEWS_NGINX_DIR / f"{route_id}.conf"
+    conf_path.write_text(_preview_nginx_conf(route_id, port))
+    os.chmod(conf_path, 0o600)
+    _write_previews(data)
+    _reload_nginx()
+    audit_log("preview_registered", {"id": preview_id, "alias": clean_alias, "port": port, "agent": agent_owner})
+    return entry
+
+
+def _delete_preview(preview_ref: str) -> bool:
+    if not (
+        re.fullmatch(r"[A-Za-z0-9]{12,64}", preview_ref)
+        or _PREVIEW_ALIAS_RE.fullmatch(preview_ref)
+    ):
+        raise HTTPException(status_code=400, detail="invalid preview id or alias")
+    data = _read_previews()
+    existing = data.get("previews", [])
+    removed_routes = [_preview_route_id(p) for p in existing if p.get("id") == preview_ref or p.get("alias") == preview_ref]
+    data["previews"] = [p for p in existing if p.get("id") != preview_ref and p.get("alias") != preview_ref]
+    removed = len(data["previews"]) != len(existing)
+    for route_id in removed_routes or [preview_ref]:
+        conf_path = PREVIEWS_NGINX_DIR / f"{route_id}.conf"
+        if conf_path.exists():
+            conf_path.unlink()
+            removed = True
+    if removed:
+        _write_previews(data)
+        _reload_nginx()
+        audit_log("preview_revoked", {"ref": preview_ref})
+    return removed
+
+
+def _reconcile_previews():
+    """Drop stale preview routes at controller startup."""
+    data = _read_previews()
+    kept = []
+    changed = False
+    for entry in data.get("previews", []):
+        try:
+            _preview_process_owner(int(entry.get("port", 0)))
+            kept.append(entry)
+        except Exception:
+            route_id = _preview_route_id(entry)
+            if re.fullmatch(r"[A-Za-z0-9-]{3,64}", route_id):
+                conf_path = PREVIEWS_NGINX_DIR / f"{route_id}.conf"
+                if conf_path.exists():
+                    conf_path.unlink()
+            changed = True
+    if changed:
+        data["previews"] = kept
+        _write_previews(data)
+        try:
+            _reload_nginx()
+        except Exception as e:
+            print(f"[previews] nginx reload after reconcile failed: {e}")
+
+
 
 
 
@@ -525,6 +787,7 @@ async def promote_ui(
             <a href="#dashboard" class="active" onclick="switchPage('dashboard')">Dashboard</a>
             <a href="#gateway" onclick="switchPage('gateway')">Gateway</a>
             <a href="#logs" onclick="switchPage('logs')">Logs</a>
+            <a href="#ports" onclick="switchPage('ports')">Ports</a>
             <a href="#snapshots" onclick="switchPage('snapshots')">Snapshots</a>
             <a href="#settings" onclick="switchPage('settings')">Settings</a>
             <a href="http://localhost:8082" target="_blank">Temporal &#8599;</a>
@@ -776,6 +1039,37 @@ async def promote_ui(
 
         </div><!-- /page-logs -->
 
+        <!-- ==================== PORTS PAGE ==================== -->
+        <div id="page-ports" class="page">
+        <h1>Ports</h1>
+
+        <h2>Preview Passthrough</h2>
+        <div class="card">
+            <p style="color: #888; font-size: 0.85rem;">Register a localhost server as an unauthenticated preview path. The app behind the port should enforce its own auth when needed.</p>
+            <div style="display: grid; grid-template-columns: 120px 1fr 1fr auto; gap: 0.5rem; align-items: end;">
+                <div>
+                    <label style="color: #888; font-size: 0.85rem;">Port</label>
+                    <input type="number" id="preview-port-input" min="1024" max="65535" placeholder="6969" style="width: 100%;">
+                </div>
+                <div>
+                    <label style="color: #888; font-size: 0.85rem;">Path alias</label>
+                    <input type="text" id="preview-alias-input" placeholder="my-app" style="width: 100%;">
+                </div>
+                <div>
+                    <label style="color: #888; font-size: 0.85rem;">Name</label>
+                    <input type="text" id="preview-name-input" placeholder="My app" style="width: 100%;">
+                </div>
+                <button onclick="registerPreview()">Register</button>
+            </div>
+            <div id="preview-result" class="result"></div>
+            <div style="margin-top: 0.75rem;">
+                <button onclick="fetchPreviews()" class="secondary">Refresh</button>
+            </div>
+            <div id="preview-list" style="margin-top: 0.75rem;"></div>
+        </div>
+
+        </div><!-- /page-ports -->
+
         <!-- ==================== SNAPSHOTS PAGE ==================== -->
         <div id="page-snapshots" class="page">
         <h1>Snapshots</h1>
@@ -944,6 +1238,10 @@ async def promote_ui(
                 if (name === 'logs') {{
                     const activeSubTab = document.querySelector('.sub-tab.active');
                     if (activeSubTab && activeSubTab.textContent === 'Traffic') fetchTraffic();
+                }}
+                // Auto-load preview ports when switching to ports
+                if (name === 'ports') {{
+                    fetchPreviews();
                 }}
                 // Auto-load snapshots when switching to snapshots
                 if (name === 'snapshots') {{
@@ -1548,6 +1846,116 @@ async def promote_ui(
                 }}
             }}
 
+            // Preview passthrough ports
+            async function fetchPreviews() {{
+                const list = document.getElementById('preview-list');
+                if (!list) return;
+                list.innerHTML = '<p style="color: #888;">Loading...</p>';
+                try {{
+                    const resp = await fetch(basePath + '/previews');
+                    const data = await resp.json();
+                    if (!resp.ok || data.error || data.detail) {{
+                        list.innerHTML = '<p style="color: #ef9a9a;">Error: ' + escHtml(data.error || data.detail || 'Unable to load previews') + '</p>';
+                        return;
+                    }}
+                    renderPreviews(data.previews || []);
+                }} catch(e) {{
+                    list.innerHTML = '<p style="color: #ef9a9a;">Error: ' + escHtml(e.message) + '</p>';
+                }}
+            }}
+
+            function renderPreviews(previews) {{
+                const list = document.getElementById('preview-list');
+                if (!previews.length) {{
+                    list.innerHTML = '<p style="color: #888; font-size: 0.85rem;">No preview ports registered.</p>';
+                    return;
+                }}
+                let html = '<div style="max-height: 360px; overflow-y: auto;">';
+                previews.forEach(p => {{
+                    const ref = p.alias || p.id;
+                    const url = p.path || ('/previews/' + ref + '/');
+                    const openUrl = window.location.origin + url;
+                    const owner = p.agent && p.agent !== 'operator' ? ('agent: ' + p.agent) : (p.owner || 'operator');
+                    html += `<div style="padding: 0.55rem 0; border-bottom: 1px solid #333; display: flex; justify-content: space-between; gap: 0.75rem; align-items: center;">
+                        <div style="min-width: 0;">
+                            <div><strong>${{escHtml(p.name || ref)}}</strong> <code style="color:#888; font-size:0.78rem;">:${{p.port}}</code></div>
+                            <div style="font-size: 0.78rem; color: #888;">
+                                <a href="${{escHtml(url)}}" target="_blank" style="color:#2196F3;">${{escHtml(url)}}</a>
+                                <span> · ${{escHtml(owner)}}</span>
+                            </div>
+                        </div>
+                        <div style="display: flex; gap: 0.35rem; flex-shrink: 0;">
+                            <button class="small secondary" onclick="window.open('${{openUrl}}', '_blank')">Open</button>
+                            <button class="small danger" onclick="deletePreview('${{escHtml(ref)}}')">Delete</button>
+                        </div>
+                    </div>`;
+                }});
+                html += '</div>';
+                list.innerHTML = html;
+            }}
+
+            async function registerPreview() {{
+                const result = document.getElementById('preview-result');
+                const portInput = document.getElementById('preview-port-input');
+                const aliasInput = document.getElementById('preview-alias-input');
+                const nameInput = document.getElementById('preview-name-input');
+                const port = parseInt(portInput.value, 10);
+                const alias = aliasInput.value.trim();
+                const name = nameInput.value.trim();
+                result.style.display = 'block';
+                result.className = 'result';
+                if (!port || port < 1024 || port > 65535) {{
+                    result.className = 'result error';
+                    result.textContent = 'Enter a port from 1024 to 65535.';
+                    return;
+                }}
+                result.textContent = 'Registering preview...';
+                try {{
+                    const resp = await fetch(basePath + '/previews', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ port, alias, name }})
+                    }});
+                    const data = await resp.json();
+                    if (!resp.ok || data.error || data.detail) {{
+                        result.className = 'result error';
+                        result.textContent = data.error || data.detail || 'Registration failed';
+                        return;
+                    }}
+                    const preview = data.preview || {{}};
+                    result.innerHTML = 'Registered: <a href="' + escHtml(preview.path) + '" target="_blank" style="color:#2196F3;">' + escHtml(preview.path) + '</a>';
+                    portInput.value = '';
+                    aliasInput.value = '';
+                    nameInput.value = '';
+                    fetchPreviews();
+                }} catch(e) {{
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
+                }}
+            }}
+
+            async function deletePreview(ref) {{
+                if (!confirm('Delete preview "' + ref + '"?')) return;
+                const result = document.getElementById('preview-result');
+                result.style.display = 'block';
+                result.className = 'result';
+                result.textContent = 'Deleting preview...';
+                try {{
+                    const resp = await fetch(basePath + '/previews/' + encodeURIComponent(ref), {{ method: 'DELETE' }});
+                    const data = await resp.json();
+                    if (!resp.ok || data.error || data.detail) {{
+                        result.className = 'result error';
+                        result.textContent = data.error || data.detail || 'Delete failed';
+                    }} else {{
+                        result.textContent = data.removed ? 'Preview deleted.' : 'Preview was not found.';
+                        fetchPreviews();
+                    }}
+                }} catch(e) {{
+                    result.className = 'result error';
+                    result.textContent = 'Error: ' + e.message;
+                }}
+            }}
+
             // Snapshots
             async function createSnapshot() {{
                 const result = document.getElementById('snapshot-result');
@@ -1567,7 +1975,7 @@ async def promote_ui(
                         result.className = 'result error';
                         result.textContent = data.error || data.detail || 'Unknown error';
                     }} else {{
-                        result.innerHTML = 'Created: ' + escapeHtml(data.name) + ' (' + formatSize(data.size) + ') '
+                        result.innerHTML = 'Created: ' + escHtml(data.name) + ' (' + formatSize(data.size) + ') '
                             + '<a href="' + basePath + '/snapshot/download/' + encodeURIComponent(data.name) + '" '
                             + 'style="color: #2196F3; margin-left: 0.5rem;" download>Download</a>';
                         if (nameInput) nameInput.value = '';
@@ -2997,6 +3405,79 @@ async def status():
     }
 
 
+@app.get("/previews")
+@app.get("/controller/previews")
+async def list_previews(
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """List active preview routes."""
+    if not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return {"previews": _read_previews().get("previews", [])}
+
+
+@app.post("/previews")
+@app.post("/controller/previews")
+async def create_preview(
+    body: PreviewCreateRequest,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Register a controller-owned nginx preview route for a local VM port."""
+    if not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    entry = _upsert_preview(body.port, body.name, body.alias, None)
+    return {"preview": entry}
+
+
+@app.post("/agent/previews")
+async def agent_create_preview(
+    body: PreviewCreateRequest,
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+    agent_id: Optional[str] = Query(None),
+):
+    """Register a preview route for an unscoped agent-owned localhost server."""
+    if not check_agent_auth(token, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    clean_agent_id = (agent_id or "").strip()
+    if not clean_agent_id:
+        raise HTTPException(status_code=400, detail="agent_id is required")
+    entry = _upsert_preview(body.port, body.name, body.alias, clean_agent_id)
+    return {"preview": entry}
+
+
+@app.delete("/previews/{preview_id}")
+@app.delete("/controller/previews/{preview_id}")
+async def delete_preview(
+    preview_id: str,
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+):
+    """Revoke a preview route and reload nginx."""
+    if not check_auth(token, session, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    removed = _delete_preview(preview_id)
+    return {"removed": removed}
+
+
+@app.get("/controller/previews/auth")
+async def preview_auth(
+    token: Optional[str] = Query(None),
+    session: Optional[str] = Cookie(None, alias="clawfactory_session"),
+    authorization: Optional[str] = Header(None),
+    x_preview_token: Optional[str] = Header(None, alias="X-Preview-Token"),
+):
+    """nginx auth_request hook for preview routes."""
+    if check_auth(x_preview_token or token, session, authorization):
+        return Response(status_code=204)
+    return Response(status_code=401)
+
+
 @app.get("/audit")
 @app.get("/controller/audit")
 async def get_audit(limit: int = 50):
@@ -4181,6 +4662,49 @@ async def snapshot_list(
     if CONTROLLER_API_TOKEN and not check_auth(token, session, authorization):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
+    return {
+        "snapshots": list_snapshots(),
+        "encryption_ready": AGE_KEY.exists() or ensure_snapshot_key()
+    }
+
+
+@app.post("/agent/snapshot")
+async def agent_snapshot_create(
+    request: Optional[SnapshotCreateRequest] = None,
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+    agent_id: Optional[str] = Query(None),
+):
+    """Create a snapshot via scoped agent auth."""
+    if not check_agent_auth(token, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    snapshot_name = request.name if request else ""
+    audit_log("snapshot_requested", {
+        "source": "agent",
+        "agent_id": (agent_id or "").strip() or None,
+        "name": snapshot_name,
+    })
+    result = create_snapshot(name=snapshot_name)
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    return result
+
+
+@app.get("/agent/snapshot")
+async def agent_snapshot_list(
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+    agent_id: Optional[str] = Query(None),
+):
+    """List snapshots via scoped agent auth."""
+    if not check_agent_auth(token, authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    audit_log("snapshot_list_requested", {
+        "source": "agent",
+        "agent_id": (agent_id or "").strip() or None,
+    })
     return {
         "snapshots": list_snapshots(),
         "encryption_ready": AGE_KEY.exists() or ensure_snapshot_key()
@@ -6050,18 +6574,39 @@ class EnvSetRequest(BaseModel):
     value: str
     scope: str
     reason: str
+    # When True, the affected service (gateway or controller) is restarted so
+    # the new env is live immediately. Default False to avoid killing the
+    # caller's session — env loads on next natural service restart.
+    apply: bool = False
 
 
-@app.post("/agent/system/apt-install")
-async def agent_apt_install(
-    body: AptInstallRequest,
-    token: Optional[str] = Query(None),
-    authorization: Optional[str] = Header(None),
-    agent_id: Optional[str] = Query(None),
-):
-    """Install an apt package immediately + record a setup-extras entry."""
-    _check_unscoped_agent(token, authorization, agent_id)
+class BatchRequest(BaseModel):
+    operations: list[dict]
+    # When True, services dirtied by env-set ops in this batch are restarted
+    # once at the end. Default False — see EnvSetRequest.apply.
+    apply: bool = False
 
+
+def _restart_service(service_unit: str) -> None:
+    """systemctl restart --no-block; raises HTTPException(500) on failure."""
+    try:
+        subprocess.run(
+            ["systemctl", "restart", "--no-block", service_unit],
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+    except subprocess.CalledProcessError as e:
+        audit_log("agent_service_restart_failed", {
+            "service": service_unit, "error": e.stderr or str(e),
+        })
+        raise HTTPException(
+            status_code=500,
+            detail=f"failed to restart {service_unit}: {e.stderr or e}",
+        )
+
+
+# ----- Op helpers (no auth, no restart — pure logic) ----- #
+
+def _do_apt_install(body: AptInstallRequest, agent_id: Optional[str]) -> dict:
     pkg = body.package.strip()
     if not _PKG_NAME_RE.match(pkg):
         raise HTTPException(status_code=400, detail="Invalid package name")
@@ -6141,16 +6686,7 @@ async def agent_apt_install(
     return {"status": install_status, "id": entry_id, "stderr_tail": stderr_tail}
 
 
-@app.post("/agent/system/run-installer")
-async def agent_run_installer(
-    body: RunInstallerRequest,
-    token: Optional[str] = Query(None),
-    authorization: Optional[str] = Header(None),
-    agent_id: Optional[str] = Query(None),
-):
-    """Run a shell-pipe installer (curl ... | sh) + record a setup-extras entry."""
-    _check_unscoped_agent(token, authorization, agent_id)
-
+def _do_run_installer(body: RunInstallerRequest, agent_id: Optional[str]) -> dict:
     command = body.command.strip()
     verify = body.verify.strip()
     if not command or not verify:
@@ -6211,16 +6747,9 @@ async def agent_run_installer(
     return {"status": install_status, "id": entry_id, "stderr_tail": stderr_tail}
 
 
-@app.post("/agent/system/env-set")
-async def agent_env_set(
-    body: EnvSetRequest,
-    token: Optional[str] = Query(None),
-    authorization: Optional[str] = Header(None),
-    agent_id: Optional[str] = Query(None),
-):
-    """Set an env var in the runtime overlay file + record an encrypted setup-extras entry."""
-    _check_unscoped_agent(token, authorization, agent_id)
-
+def _do_env_set(body: EnvSetRequest, agent_id: Optional[str]) -> tuple[dict, str]:
+    """Write env var to runtime overlay + record an encrypted entry. Does NOT restart.
+    Returns (response_dict, service_unit). Caller decides whether to restart."""
     key = body.key.strip()
     if not _ENV_KEY_RE.match(key):
         raise HTTPException(status_code=400, detail="Invalid key (must match [A-Z][A-Z0-9_]*)")
@@ -6268,27 +6797,145 @@ async def agent_env_set(
     except (LookupError, OSError):
         pass
 
-    # --no-block so the request can return before the controller restarts itself
-    # (relevant for scope=controller; harmless for gateway).
-    try:
-        subprocess.run(
-            ["systemctl", "restart", "--no-block", service_unit],
-            check=True, capture_output=True, text=True, timeout=10,
-        )
-    except subprocess.CalledProcessError as e:
-        audit_log("agent_env_set_restart_failed", {
-            "key": key, "scope": body.scope, "error": e.stderr or str(e),
-        })
-        raise HTTPException(
-            status_code=500,
-            detail=f"failed to restart {service_unit}: {e.stderr or e}",
-        )
-
     audit_log("agent_env_set", {
         "key": key, "scope": body.scope, "agent": agent_id or "unscoped",
         "id": entry_id,
     })
-    return {"status": "set", "id": entry_id}
+    return {"status": "set", "id": entry_id}, service_unit
+
+
+# ----- Endpoints ----- #
+
+@app.post("/agent/system/apt-install")
+async def agent_apt_install(
+    body: AptInstallRequest,
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+    agent_id: Optional[str] = Query(None),
+):
+    """Install an apt package immediately + record a setup-extras entry."""
+    _check_unscoped_agent(token, authorization, agent_id)
+    return _do_apt_install(body, agent_id)
+
+
+@app.post("/agent/system/run-installer")
+async def agent_run_installer(
+    body: RunInstallerRequest,
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+    agent_id: Optional[str] = Query(None),
+):
+    """Run a shell-pipe installer + record a setup-extras entry."""
+    _check_unscoped_agent(token, authorization, agent_id)
+    return _do_run_installer(body, agent_id)
+
+
+@app.post("/agent/system/env-set")
+async def agent_env_set(
+    body: EnvSetRequest,
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+    agent_id: Optional[str] = Query(None),
+):
+    """Set an env var in the runtime overlay + record an encrypted entry.
+
+    By default does NOT restart the affected service (apply=False) — env loads
+    on next natural restart. Pass apply=true to restart immediately, but note
+    that restarting the gateway will kill any active agent session that calls
+    this endpoint. Prefer the batch endpoint for multiple env-sets.
+    """
+    _check_unscoped_agent(token, authorization, agent_id)
+    response, service_unit = _do_env_set(body, agent_id)
+    if body.apply:
+        _restart_service(service_unit)
+        response["service_restarted"] = service_unit
+    return response
+
+
+@app.post("/agent/system/batch")
+async def agent_batch(
+    body: BatchRequest,
+    token: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+    agent_id: Optional[str] = Query(None),
+):
+    """Run multiple setup-extras operations in one call. Per-item results are
+    returned even if some operations fail, so the caller can retry failed
+    entries idempotently. Service restarts are deferred to the end of the
+    batch and only happen if apply=True (default False)."""
+    _check_unscoped_agent(token, authorization, agent_id)
+
+    if not body.operations:
+        raise HTTPException(status_code=400, detail="operations cannot be empty")
+    if len(body.operations) > 50:
+        raise HTTPException(status_code=400, detail="batch limited to 50 operations")
+
+    results = []
+    services_dirty: set[str] = set()
+
+    for idx, op_dict in enumerate(body.operations):
+        if not isinstance(op_dict, dict):
+            results.append({"index": idx, "op": None, "status": "rejected",
+                            "error": "operation must be an object"})
+            continue
+
+        op = op_dict.get("op")
+        result_base: dict = {"index": idx, "op": op}
+        op_payload = {k: v for k, v in op_dict.items() if k != "op"}
+
+        try:
+            if op == "apt-install":
+                req = AptInstallRequest(**op_payload)
+                result_base["package"] = req.package
+                result = _do_apt_install(req, agent_id)
+            elif op == "run-installer":
+                req = RunInstallerRequest(**op_payload)
+                result_base["command_preview"] = req.command[:80]
+                result = _do_run_installer(req, agent_id)
+            elif op == "env-set":
+                req = EnvSetRequest(**op_payload)
+                result_base["key"] = req.key
+                result_base["scope"] = req.scope
+                result, service_unit = _do_env_set(req, agent_id)
+                if result.get("status") == "set":
+                    services_dirty.add(service_unit)
+            else:
+                results.append({**result_base, "status": "rejected",
+                                "error": f"unknown op: {op!r}"})
+                continue
+            results.append({**result_base, **result})
+        except HTTPException as e:
+            results.append({**result_base, "status": "rejected",
+                            "error": str(e.detail)})
+        except Exception as e:
+            results.append({**result_base, "status": "error",
+                            "error": str(e)})
+
+    services_restarted: list[str] = []
+    if body.apply:
+        for service_unit in sorted(services_dirty):
+            try:
+                subprocess.run(
+                    ["systemctl", "restart", "--no-block", service_unit],
+                    check=True, capture_output=True, text=True, timeout=10,
+                )
+                services_restarted.append(service_unit)
+            except subprocess.CalledProcessError as e:
+                audit_log("agent_batch_restart_failed", {
+                    "service": service_unit, "error": e.stderr or str(e),
+                })
+                services_restarted.append(f"{service_unit}:FAILED")
+
+    audit_log("agent_batch", {
+        "agent": agent_id or "unscoped",
+        "op_count": len(body.operations),
+        "applied": body.apply,
+        "services_restarted": services_restarted,
+        "services_dirty": sorted(services_dirty),
+    })
+
+    return {"results": results, "services_restarted": services_restarted,
+            "services_dirty": sorted(services_dirty)}
 
 
 @app.post("/temporal/start")

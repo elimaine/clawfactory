@@ -79,7 +79,7 @@ This log was created during the documentation rewrite on 2026-04-25. It records 
     - Impact: Sysbox mode can fail if the base OpenClaw image does not include sudo.
     - Suggested fix: install sudo in the wrapper image or start dockerd as root before dropping privileges.
 
-16. ~~Proposal overlay hooks exist without a tracked CLI implementation.~~ **RESOLVED 2026-04-25.** The `proposals` subcommand now exists in `clawfactory.sh` (dispatcher + `lima_proposals` helpers in `vm.sh`); the three `/agent/system/*` endpoints are wired to write `state/proposals.json` and the host-side `approve` flow promotes entries to `secrets/<inst>/*.env` or `sandbox/lima/setup-extras.sh`. Smoke-tested end to end on sandy.
+16. ~~Setup-extras hooks exist without a tracked CLI implementation.~~ **RESOLVED 2026-04-25, updated 2026-05-07.** The `setup-extras` subcommand exists in `clawfactory.sh` (dispatcher + Lima helpers in `vm.sh`); `/agent/system/*` endpoints write `state/setup-extras.json`, and the host-side approve flow promotes entries to `secrets/<inst>/*.env` or `sandbox/lima/setup-extras.sh`. Bulk `approve --all` and `reject --all` are supported.
 
 17. ~~Agent system endpoints take immediate effect before approval.~~ **RESOLVED 2026-04-25 — intended by design.** The two-layer model (immediate VM mutation + accumulating host-approval TODO) is the explicit goal: agents must be usable remotely without host-side coordination per install. Approval gates only host-artifact persistence, not in-VM execution. Tradeoff accepted by operator (Eli) during planning.
 

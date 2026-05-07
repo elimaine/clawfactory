@@ -52,3 +52,6 @@ ensure_shell() {
 
 # === Approved entries (managed by clawfactory.sh setup-extras) ===
 # Do not edit below this line manually; use `clawfactory.sh -i <inst> setup-extras approve`.
+
+# extras: e_2026-04-26T02-50-31_200e (Install xtradeb/apps Chromium on Ubuntu noble arm64 for OpenClaw browser control; includes PPA key/source setup because Google Chrome Linux arm64 is unavailable and Ubuntu's chromium-browser is a snap wrapper.)
+ensure_shell chromium\ --version bash -c $'set -euo pipefail\ninstall -d -m 0755 /etc/apt/keyrings\nrm -f /etc/apt/keyrings/xtradeb-apps.gpg\ncurl -fsSL \'https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x5301FA4FD93244FBC6F6149982BB6851C64F6880\' | gpg --dearmor --batch --yes -o /etc/apt/keyrings/xtradeb-apps.gpg\nchmod 0644 /etc/apt/keyrings/xtradeb-apps.gpg\nprintf \'%s\\n\' \'deb [arch=arm64 signed-by=/etc/apt/keyrings/xtradeb-apps.gpg] https://ppa.launchpadcontent.net/xtradeb/apps/ubuntu noble main\' > /etc/apt/sources.list.d/xtradeb-apps.list\napt-get update\nDEBIAN_FRONTEND=noninteractive apt-get install -y chromium\nchromium --version'

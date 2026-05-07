@@ -46,6 +46,8 @@ Docker mode follows `docker logs` for `clawfactory-<instance>-<service>`. Lima m
 
 `controller` prints the local controller URL, including the token when known. `info` prints mode, ports, and saved tokens. `bots` lists local instance folders, whether secrets and snapshots exist, and running service status.
 
+The controller UI includes a `Ports` page for preview passthrough routes. It registers loopback dev servers as `/previews/<alias>/` paths and stores the nginx route registry in the VM.
+
 ## Snapshots
 
 ```bash
@@ -109,6 +111,10 @@ Default update resets the bot source to `upstream/main`, then restores selected 
 ./clawfactory.sh -i <instance> code pull
 ./clawfactory.sh -i <instance> tunnels status
 ./clawfactory.sh -i <instance> mount list
+./clawfactory.sh -i <instance> setup-extras list
+./clawfactory.sh -i <instance> setup-extras approve <id>
+./clawfactory.sh -i <instance> setup-extras approve --all
+./clawfactory.sh -i <instance> setup-extras reject <id>
 ```
 
 `sync` pushes controller/proxy/code/secrets into the VM and restarts controller plus gateway. `sync watch` requires `fswatch`.

@@ -53,6 +53,18 @@ Two logging paths exist in the VM:
 - `clawfactory-llm-proxy` on port `9090`, which is not automatically wired into provider base URLs in current Lima code.
 - `clawfactory-mitm`, which is started by the controller capture toggle and uses iptables owner rules to redirect gateway user HTTP/HTTPS traffic to mitmproxy. Captured entries are Fernet-encrypted line by line; the Fernet key is age-encrypted with `snapshot.key`.
 
+### Lima Preview Ports
+
+The controller can expose an agent-owned loopback dev server through nginx at:
+
+```text
+/previews/<alias-or-generated-id>/
+```
+
+Use the controller UI `Ports` page or `POST /agent/previews` with `AGENT_API_TOKEN`. Aliases are validated and stable across controller restarts. The controller validates that the target port is listening on loopback and owned by `openclaw-<instance>`.
+
+Preview paths are not protected by controller auth. This keeps controller credentials out of the agent preview flow; the app behind the preview port must add its own auth when needed.
+
 ## Sysbox Mode
 
 Sysbox mode uses Docker Compose plus `docker-compose.sandbox.yml`.
