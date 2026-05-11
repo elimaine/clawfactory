@@ -119,8 +119,29 @@ create_snapshot() {
     tar -C "$STATE_DIR" -cf "$temp_tar" \
         --exclude='*.tmp*' \
         --exclude='agents/*/sessions/*.jsonl' \
+        --exclude='agents/*/sessions/*.jsonl.deleted.*' \
+        --exclude='agents/*/sessions/*.jsonl.reset.*' \
+        --exclude='agents/*/agent/auth/*/logs_*.sqlite*' \
+        --exclude='agents/*/agent/auth/*/cache' \
+        --exclude='agents/*/agent/codex-home/logs_*.sqlite*' \
+        --exclude='agents/*/agent/codex-home/home/.local/share/pnpm/store' \
+        --exclude='agents/*/agent/codex-home/home/.npm' \
+        --exclude='agents/*/agent/codex-home/home/.cache' \
+        --exclude='agents/*/agent/codex-home/home/.bun/install/cache' \
+        --exclude='agents/*/agent/tools/cache' \
         --exclude='installed' \
         --exclude='installed/*' \
+        --exclude='*/.git' \
+        --exclude='**/venv' \
+        --exclude='*/node_modules' \
+        --exclude='*/__pycache__' \
+        --exclude='*/.venv' \
+        --exclude='subagents' \
+        --exclude='media' \
+        --exclude='shared/caches' \
+        --exclude='shared/tools' \
+        --exclude='*.sqlite-wal' \
+        --exclude='*.db-wal' \
         . 2>/dev/null || true
 
     local tar_size
